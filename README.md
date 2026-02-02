@@ -1,5 +1,6 @@
 # continuous-latent-autoencoder
 
+This commit should be signed!
 Deterministic continuous-latent speech foundation autoencoder:
 
 - Waveform-in (16kHz), strided Conv1D frontend → ~12.5 Hz tokens (hop 1280 samples)
