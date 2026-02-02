@@ -172,10 +172,19 @@ def main() -> None:
     if decoder_cfg.latent_stats_path:
         stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
         decoder.set_latent_stats(stats["mean"], stats["var"])
-    sigreg = SIGReg(int(mcfg["bottleneck"]["latent_dim"]), SIGRegConfig(**cfg["loss"]["sigreg"]))
+    sigreg_cfg = cfg["loss"]["sigreg"].copy()
+    if "weight" in sigreg_cfg:
+        del sigreg_cfg["weight"]
+    sigreg = SIGReg(int(mcfg["bottleneck"]["latent_dim"]), SIGRegConfig(**sigreg_cfg))
 
     model = torch.nn.ModuleDict(
-        {"frontend": frontend, "encoder": encoder, "bottleneck": bottleneck, "decoder": decoder}
+        {
+            "frontend": frontend,
+            "encoder": encoder,
+            "bottleneck": bottleneck,
+            "decoder": decoder,
+            "sigreg": sigreg,
+        }
     ).to(device)
 
     gan_cfg = cfg.get("gan") or {}

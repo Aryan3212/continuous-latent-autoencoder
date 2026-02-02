@@ -1,12 +1,17 @@
-.DS_STORE
-# Python packaging metadata
-*.egg-info/
+# Data and Artifacts
+data/
+runs/
 __pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+bengaliai-speech.zip
 
-# Research areas to keep out of git history for now
-RAE/
-mHC-manifold-constrained-hyper-connections/
-icefall/
-lejepa/
-papers/
-paper-summaries/
+# Environment
+.env
+uv.lock
+
+# Editor
+.vscode/
+.idea/
