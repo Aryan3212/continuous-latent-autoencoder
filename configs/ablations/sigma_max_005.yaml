@@ -1,0 +1,5 @@
+_base_: configs/exp2_latent_noise.yaml
+latent_noise:
+  enabled: true
+  sigma_max: 0.05
+

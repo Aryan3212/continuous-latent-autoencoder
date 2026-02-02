@@ -1,0 +1,8 @@
+_base_: configs/exp2_latent_noise.yaml
+
+# Placeholder for future GAN stage (disabled by default).
+# Add discriminators + feature matching only after Exp1/2 are stable.
+gan:
+  enabled: false
+  weight: 0.0
+

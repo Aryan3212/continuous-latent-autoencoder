@@ -1,0 +1,6 @@
+_base_: configs/exp1_mix.yaml
+loss:
+  primary:
+    enabled: false
+    weight: 0.0
+

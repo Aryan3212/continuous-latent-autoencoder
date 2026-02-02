@@ -1,0 +1,4 @@
+_base_: configs/exp0.yaml
+optim:
+  kind: adamw
+

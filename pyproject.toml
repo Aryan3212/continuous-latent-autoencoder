@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "continuous-latent-autoencoder"
+version = "0.0.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "PyYAML>=6.0",
+  "numpy>=1.26",
+  "wandb>=0.16; platform_system != 'Windows'",
+  "torch>=2.2",
+  "torchaudio>=2.2",
+  "soundfile>=0.12",
+  "jiwer>=3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["data*", "eval*", "losses*", "models*", "optim*", "utils*"]
+exclude = ["icefall*", "RAE*", "lejepa*", "mHC-*", "configs*", "papers*", "paper-summaries*", "scripts*", "runs*"]

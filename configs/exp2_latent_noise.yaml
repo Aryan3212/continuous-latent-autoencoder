@@ -1,0 +1,6 @@
+_base_: configs/exp1_mix.yaml
+latent_noise:
+  enabled: true
+  warmup_steps: 2000
+  sigma_max: 0.10
+

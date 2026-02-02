@@ -1,0 +1,12 @@
+.DS_STORE
+# Python packaging metadata
+*.egg-info/
+__pycache__/
+
+# Research areas to keep out of git history for now
+RAE/
+mHC-manifold-constrained-hyper-connections/
+icefall/
+lejepa/
+papers/
+paper-summaries/

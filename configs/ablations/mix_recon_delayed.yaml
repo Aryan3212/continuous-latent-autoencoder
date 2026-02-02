@@ -1,0 +1,7 @@
+_base_: configs/exp1_mix.yaml
+loss:
+  mix_recon:
+    enabled: true
+    weight: 1.0
+    start_step: 20000
+

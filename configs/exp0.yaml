@@ -1,0 +1,181 @@
+run:
+  run_id: null                # if null, auto-generate
+  out_dir: runs
+  seed: 0
+  device: auto               # auto | cpu | cuda
+  amp: true
+  wandb:
+    enabled: true
+    project: "continuous-latent-ae"
+    name: null
+
+data:
+  sample_rate: 16000
+  segment_seconds: 2.0
+  train_manifest: null
+  val_manifest: null
+  num_workers: 4
+  pin_memory: true
+
+aug:
+  feature_mask:
+    enabled: true
+    time_mask_prob: 0.7
+    time_mask_len: 8         # in tokens at 12.5Hz
+    channel_mask_prob: 0.3
+    channel_mask_len: 32
+  mix:
+    enabled: false
+    snr_db_min: 3.0
+    snr_db_max: 15.0
+    prob: 0.0
+    swap_prob: 0.0
+
+model:
+  frontend:
+    channels: [64, 128, 192, 256, 256]
+    kernels:  [10, 8, 8, 4, 4]
+    strides:  [5, 4, 4, 4, 4]    # product=1280 -> 12.5Hz at 16k
+    groups: 8
+  encoder:
+    d_model: 256
+    n_layers: 6
+    num_heads: 4
+    query_head_dim: 32
+    pos_head_dim: 4
+    value_head_dim: 16
+    feedforward_dim: 512
+    dropout: 0.1
+    cnn_module_kernel: 31
+    pos_dim: 192
+    warmup_batches: 4000.0
+    mhc:
+      enabled: true
+      num_streams: 2
+      start_layer: 2
+      period: 3
+      sinkhorn_iters: 10
+      tau: 0.05
+      dropout: 0.0
+  bottleneck:
+    latent_dim: 16
+    norm: layernorm             # layernorm | rmsnorm
+  predictor:
+    kind: mlp                   # mlp | transformer
+    hidden_dim: 256
+    n_layers: 2
+    dropout: 0.1
+  decoder:
+    channels: 256
+    up_strides: [4, 4, 4, 4, 5]
+    up_kernels: [8, 8, 8, 8, 10]
+    res_blocks_per_up: 2
+    res_dilations: [1, 3, 9]
+    film_hidden: 128
+    latent_norm: false
+    latent_norm_eps: 1.0e-5
+    latent_stats_path: null
+
+loss:
+  stft:
+    fft_sizes: [256, 512, 1024, 2048]
+    hop_ratio: 0.25
+    win_ratio: 1.0
+    center: true
+    window: hann
+    logmag_eps: 1.0e-7
+    sc_weight: 1.0
+    mag_weight: 1.0
+    logmag_weight: 1.0
+  wav_l1_weight: 0.0
+  jepa:
+    weight: 1.0
+    mix_view_weight: 1.0        # Exp1+: z_mix -> z_primary alignment
+  sigreg:
+    weight: 0.1
+    num_slices: 256
+    t_max: 3.0
+    n_points: 17
+    reduction: mean
+    clip_value: null
+  mix_recon:
+    enabled: false              # Exp1+: decode from mix -> primary
+    weight: 1.0
+    start_step: 0
+  primary:
+    enabled: false
+    weight: 0.0
+
+gan:
+  enabled: false
+  start_step: 0
+  d_steps_per_g_step: 1
+  g_adv_weight: 1.0
+  fm_weight: 10.0
+  periods: [2, 3, 5, 7, 11]
+  msd_scales: 3
+  d_lr: 2.0e-4
+  d_betas: [0.8, 0.99]
+  d_weight_decay: 0.0
+
+latent_noise:
+  enabled: false
+  kind: uniform               # uniform | fixed
+  warmup_steps: 2000
+  sigma_max: 0.05
+
+optim:
+  kind: scaled_adam             # scaled_adam | adamw
+  lr: 3.0e-2
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
+  weight_decay: 1.0e-3
+  clipping_scale: 3.0
+  scalar_lr_scale: 0.1
+  param_min_rms: 1.0e-5
+  param_max_rms: 3.0
+  scalar_max: 10.0
+  size_update_period: 4
+  clipping_update_period: 100
+  scheduler:
+    kind: eden
+    lr_batches: 5000
+    lr_epochs: 6
+    warmup_batches: 500
+    warmup_start: 0.5
+  grad_clip: 1.0
+
+train:
+  batch_size: 8
+  grad_accum_steps: 1
+  max_steps: 200000
+  log_interval_steps: 50
+  eval_interval_steps: 2000
+  save_interval_steps: 2000
+  val_batches: 8
+  run_eval_on_save: false
+
+eval:
+  enabled: false
+  emotion:
+    enabled: false
+    train_manifest: null
+    dev_manifest: null
+    label_key: emotion
+    steps: 2000
+    batch_size: 64
+  gender:
+    enabled: false
+    train_manifest: null
+    dev_manifest: null
+    label_key: gender
+    steps: 1500
+    batch_size: 64
+  asr:
+    enabled: false
+    train_manifest: null
+    dev_manifest: null
+    text_key: text
+    steps: 8000
+    batch_size: 16
+    use_latent: false
