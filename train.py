@@ -58,8 +58,12 @@ def _latent_noise_sigma(cfg: Dict[str, Any], step: int, device: torch.device) ->
     return torch.empty((), device=device).uniform_(0.0, sigma_max)
 
 
-def _lejepa_loss(center: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
-    return (center - view).pow(2).mean()
+def _lejepa_loss(center: torch.Tensor, view: torch.Tensor, return_per_sample: bool = False) -> torch.Tensor:
+    # center, view: (B, D, T)
+    diff = (center - view).pow(2).mean(dim=(1, 2))
+    if return_per_sample:
+        return diff
+    return diff.mean()
 
 
 def _pool(z: torch.Tensor) -> torch.Tensor:
@@ -123,6 +127,20 @@ def main() -> None:
 
     jsonl = JsonlLogger(str(log_dir / "train.jsonl"))
     wb = maybe_init_wandb(cfg, run_id, str(out_root))
+    
+    # Initialize CodeCarbon
+    codecarbon_tracker = None
+    if cfg.get("run", {}).get("track_emissions", True):
+        try:
+            from codecarbon import EmissionsTracker
+            codecarbon_tracker = EmissionsTracker(
+                output_dir=str(out_root),
+                output_file="emissions.csv",
+                log_level="error" # reduce spam
+            )
+            codecarbon_tracker.start()
+        except ImportError:
+            pass
 
     # Data
     dcfg = cfg["data"]
@@ -383,6 +401,7 @@ def main() -> None:
                 batch = next(train_it)
 
             wav_a = batch["wav"]  # (B,1,T)
+            dataset_names = [m.get("dataset", "unknown") for m in batch["meta"]]
 
             # Optional mix view (Exp1+)
             try:
@@ -430,7 +449,8 @@ def main() -> None:
 
                 # LeJEPA: masked view should match clean center
                 # Removed .detach() to follow LeJEPA paper's "no stop-gradient" principle
-                l_jepa_mask = _lejepa_loss(z_a, z_mask)
+                l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
+                l_jepa_mask = l_jepa_mask_ps.mean()
 
                 l_jepa_mix = torch.tensor(0.0, device=device)
                 l_primary = torch.tensor(0.0, device=device)
@@ -477,9 +497,12 @@ def main() -> None:
                 # Decoder (Exp0: reconstruct clean; Exp1+: optionally decode mixed->primary)
                 sigma = _latent_noise_sigma(cfg, step, device)
                 x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
-                l_stft, stft_stats = stft(x_hat, wav_a)
+                l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
+                l_stft = l_stft_ps.mean()
+                stft_stats = {k: v.mean() for k, v in stft_stats_ps.items()}
 
-                l_wav = (x_hat - wav_a).abs().mean()
+                l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
+                l_wav = l_wav_ps.mean()
 
                 l_g_adv = torch.tensor(0.0, device=device)
                 l_fm = torch.tensor(0.0, device=device)
@@ -547,6 +570,17 @@ def main() -> None:
             )
             stats.update({k: float(v.cpu()) for k, v in stft_stats.items()})
             stats.update({k: float(v.cpu()) for k, v in sig_stats.items()})
+
+            unique_ds = set(dataset_names)
+            if len(unique_ds) > 1:
+                for ds_name in unique_ds:
+                    indices = [i for i, n in enumerate(dataset_names) if n == ds_name]
+                    if not indices:
+                        continue
+                    idx_t = torch.tensor(indices, device=device)
+                    stats[f"loss_stft/{ds_name}"] = float(l_stft_ps[idx_t].mean().detach().cpu())
+                    stats[f"loss_wav/{ds_name}"] = float(l_wav_ps[idx_t].mean().detach().cpu())
+                    stats[f"loss_jepa/{ds_name}"] = float(l_jepa_mask_ps[idx_t].mean().detach().cpu())
 
         # Optimize
         if grad_clip and grad_clip > 0:
@@ -681,6 +715,11 @@ def main() -> None:
         cfg=cfg,
         extra=_extra_state(),
     )
+    
+    if codecarbon_tracker is not None:
+        emissions: float = codecarbon_tracker.stop()
+        if wb is not None:
+            wb.log({"emissions_kg_co2": emissions}, step=step)
 
 
 if __name__ == "__main__":

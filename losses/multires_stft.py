@@ -49,13 +49,22 @@ class MultiResSTFTLoss(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, return_per_sample: bool = False) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         if x_hat.shape != x.shape:
             raise ValueError(f"x_hat and x must match; got {tuple(x_hat.shape)} vs {tuple(x.shape)}")
-        losses = []
-        sc_losses = []
-        mag_losses = []
-        log_losses = []
+        
+        # We accumulate per-sample losses if requested, otherwise we reduce to mean immediately 
+        # to match previous behavior (mostly).
+        # Actually, for consistency, we should compute per-sample and then mean.
+        
+        batch_size = x.shape[0]
+        per_sample_losses = torch.zeros(batch_size, device=x.device)
+        
+        # Stats accumulation
+        total_sc = torch.zeros(batch_size, device=x.device)
+        total_mag = torch.zeros(batch_size, device=x.device)
+        total_log = torch.zeros(batch_size, device=x.device)
+        
         for n_fft in self.cfg.fft_sizes:
             hop = max(1, int(n_fft * self.cfg.hop_ratio))
             win = max(1, int(n_fft * self.cfg.win_ratio))
@@ -65,20 +74,49 @@ class MultiResSTFTLoss(nn.Module):
             mag = _stft_mag(
                 x, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
             )
-            sc = (mag_hat - mag).norm(p="fro") / (mag.norm(p="fro") + self.cfg.logmag_eps)
-            l_mag = (mag_hat - mag).abs().mean()
-            l_log = (torch.log(mag_hat + self.cfg.logmag_eps) - torch.log(mag + self.cfg.logmag_eps)).abs().mean()
-            sc_losses.append(sc)
-            mag_losses.append(l_mag)
-            log_losses.append(l_log)
-            losses.append(
-                self.cfg.sc_weight * sc + self.cfg.mag_weight * l_mag + self.cfg.logmag_weight * l_log
-            )
-        loss = torch.stack(losses).mean()
-        stats = {
-            "stft_loss": loss.detach(),
-            "stft_sc": torch.stack(sc_losses).mean().detach(),
-            "stft_mag": torch.stack(mag_losses).mean().detach(),
-            "stft_log": torch.stack(log_losses).mean().detach(),
-        }
-        return loss, stats
+            
+            # Reduce over Frequency (1) and Time (2) dimensions, keeping Batch (0)
+            dims = (1, 2)
+            
+            # Spectral Convergence
+            numer = (mag_hat - mag).norm(p="fro", dim=dims)
+            denom = mag.norm(p="fro", dim=dims) + self.cfg.logmag_eps
+            sc = numer / denom
+            
+            # Log Mag
+            l_mag = (mag_hat - mag).abs().mean(dim=dims)
+            l_log = (torch.log(mag_hat + self.cfg.logmag_eps) - torch.log(mag + self.cfg.logmag_eps)).abs().mean(dim=dims)
+            
+            # Accumulate
+            combined = self.cfg.sc_weight * sc + self.cfg.mag_weight * l_mag + self.cfg.logmag_weight * l_log
+            per_sample_losses += combined
+            
+            total_sc += sc
+            total_mag += l_mag
+            total_log += l_log
+
+        # Normalize by number of resolutions
+        n_res = len(self.cfg.fft_sizes)
+        per_sample_losses /= n_res
+        total_sc /= n_res
+        total_mag /= n_res
+        total_log /= n_res
+
+        if return_per_sample:
+            # Return the (B,) tensor and the stats (B,) tensors
+            stats = {
+                "stft_loss": per_sample_losses,
+                "stft_sc": total_sc,
+                "stft_mag": total_mag,
+                "stft_log": total_log,
+            }
+            return per_sample_losses, stats
+        else:
+            loss = per_sample_losses.mean()
+            stats = {
+                "stft_loss": loss.detach(),
+                "stft_sc": total_sc.mean().detach(),
+                "stft_mag": total_mag.mean().detach(),
+                "stft_log": total_log.mean().detach(),
+            }
+            return loss, stats
