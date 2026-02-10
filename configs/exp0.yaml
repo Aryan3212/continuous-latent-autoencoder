@@ -58,10 +58,10 @@ model:
       tau: 0.05
       dropout: 0.0
   bottleneck:
-    latent_dim: 16
-    norm: layernorm             # layernorm | rmsnorm
+    latent_dim: 256             # RAE: Match encoder d_model (no bottleneck)
+    norm: layernorm
   predictor:
-    kind: mlp                   # mlp | transformer
+    kind: mlp
     hidden_dim: 256
     n_layers: 2
     dropout: 0.1
@@ -119,10 +119,10 @@ gan:
   d_weight_decay: 0.0
 
 latent_noise:
-  enabled: false
-  kind: uniform               # uniform | fixed
+  enabled: true               # RAE Trick: Train decoder on noisy latents
+  kind: uniform
   warmup_steps: 2000
-  sigma_max: 0.05
+  sigma_max: 0.1              # Increased for robustness
 
 optim:
   kind: scaled_adam             # scaled_adam | adamw

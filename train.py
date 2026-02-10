@@ -79,7 +79,10 @@ def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
 def _encode(model: torch.nn.ModuleDict, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     h0 = model["frontend"](wav)
     hE = model["encoder"](h0)
-    z = model["bottleneck"](hE)
+    # RAE: No bottleneck projection. The latent z IS the encoder output hE.
+    # We apply norm if it was requested in the bottleneck config, but usually hE is already normed.
+    # For now, we identity map z = hE.
+    z = hE 
     return h0, hE, z
 
 
