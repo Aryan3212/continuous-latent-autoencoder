@@ -295,6 +295,7 @@ def main() -> None:
     jcfg = cfg["loss"]["jepa"]
     jepa_w = float(jcfg["weight"])
     sig_w = float(cfg["loss"]["sigreg"]["weight"])
+    stft_w = float(cfg["loss"].get("stft_weight", 1.0))
     wav_l1_w = float(cfg["loss"].get("wav_l1_weight", 0.0))
 
     mix_recon_cfg = cfg["loss"].get("mix_recon") or {}
@@ -428,6 +429,7 @@ def main() -> None:
                 z_mask = model["bottleneck"](hE_mask)
 
                 # LeJEPA: masked view should match clean center
+                # Removed .detach() to follow LeJEPA paper's "no stop-gradient" principle
                 l_jepa_mask = _lejepa_loss(z_a, z_mask)
 
                 l_jepa_mix = torch.tensor(0.0, device=device)
@@ -491,6 +493,7 @@ def main() -> None:
                     l_d = discriminator_loss(d_real_mpd, d_fake_mpd) + discriminator_loss(
                         d_real_msd, d_fake_msd
                     )
+                    scaler.scale(l_d / grad_accum).backward()
                     _set_requires_grad(discriminators, False)
                     d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
                     d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
@@ -505,7 +508,7 @@ def main() -> None:
                 l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
 
                 loss = (
-                    l_stft
+                    stft_w * l_stft
                     + wav_l1_w * l_wav
                     + jepa_w * l_jepa
                     + sig_w * l_sig
@@ -516,8 +519,6 @@ def main() -> None:
                 )
                 loss = loss / grad_accum
 
-            if gan_enabled and step >= gan_start:
-                scaler.scale(l_d / grad_accum).backward()
             scaler.scale(loss).backward()
             total_loss += float(loss.detach().cpu())
 
@@ -553,6 +554,9 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         if gan_enabled and d_optimizer is not None and step >= gan_start:
+            if grad_clip and grad_clip > 0:
+                scaler.unscale_(d_optimizer)
+                torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
             scaler.step(d_optimizer)
         scaler.update()
 

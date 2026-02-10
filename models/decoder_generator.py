@@ -79,10 +79,10 @@ class WaveformDecoder(nn.Module):
         resblocks: List[nn.Module] = []
         in_ch = cfg.channels
         for s, k in zip(up_strides, up_kernels):
-            pad = (k - s) // 2
             ups.append(
-                nn.ConvTranspose1d(
-                    in_ch, in_ch // 2, kernel_size=k, stride=s, padding=pad
+                nn.Sequential(
+                    nn.Upsample(scale_factor=float(s), mode="linear", align_corners=False),
+                    nn.Conv1d(in_ch, in_ch // 2, kernel_size=k, padding=k // 2),
                 )
             )
             out_ch = in_ch // 2
