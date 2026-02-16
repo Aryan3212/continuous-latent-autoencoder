@@ -160,7 +160,15 @@ def main() -> None:
             log_probs = head(feats).log_softmax(dim=-1)
             hyp = _greedy_decode(log_probs, id2ch)
             w = wer(texts, hyp)
-        return {"wer": float(w), "num_samples": len(texts)}
+            
+            # Save first 5 examples
+            examples = []
+            for i in range(min(5, len(texts))):
+                examples.append({
+                    "ref": texts[i],
+                    "hyp": hyp[i]
+                })
+        return {"wer": float(w), "num_samples": len(texts), "examples": examples}
 
     out = {
         "train": _eval(feats_tr, text_tr, targets_tr),

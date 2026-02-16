@@ -22,3 +22,8 @@ Date format: `YYYY-MM-DD`
 - Added spectral convergence term and configurability to multi-res STFT loss, with tests.
 - Updated ASR probe to support end-to-end encoder features with a dry-run mode.
 - Added reconstruction evaluation and a run-all benchmark entrypoint with optional baselines.
+
+## 2026-02-11
+
+- Fixed numerical instability in STFT Spectral Convergence loss by increasing `logmag_eps` from 1e-7 to 1e-3. This prevents division-by-zero explosions when reconstructing silence.
+- Documented research diagnostic guidelines in `AGENTS.md`.

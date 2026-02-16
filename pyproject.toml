@@ -17,6 +17,7 @@ dependencies = [
   "matplotlib>=3.10.8",
   "scikit-learn>=1.7.2",
   "codecarbon>=3.2.2",
+  "tqdm>=4.66",
 ]
 
 [tool.setuptools.packages.find]

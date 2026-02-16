@@ -67,9 +67,9 @@ class DiscriminatorS(nn.Module):
 
 
 class MultiPeriodDiscriminator(nn.Module):
-    def __init__(self, periods: List[int]):
+    def __init__(self, periods: List[int], channels: int = 32):
         super().__init__()
-        self.discriminators = nn.ModuleList([DiscriminatorP(p) for p in periods])
+        self.discriminators = nn.ModuleList([DiscriminatorP(p, channels=channels) for p in periods])
 
     def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:
         logits = []
@@ -82,9 +82,9 @@ class MultiPeriodDiscriminator(nn.Module):
 
 
 class MultiScaleDiscriminator(nn.Module):
-    def __init__(self, scales: int = 3):
+    def __init__(self, scales: int = 3, channels: int = 16):
         super().__init__()
-        self.discriminators = nn.ModuleList([DiscriminatorS() for _ in range(scales)])
+        self.discriminators = nn.ModuleList([DiscriminatorS(channels=channels) for _ in range(scales)])
         self.pool = nn.AvgPool1d(4, 2, padding=1)
 
     def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:

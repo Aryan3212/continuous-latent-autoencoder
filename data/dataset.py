@@ -4,6 +4,7 @@ import json
 import math
 import pathlib
 import random
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,42 +25,38 @@ def _load_audio(
     Uses soundfile if available, else torchaudio.
     """
     p = str(path)
+    # Fallback to ffmpeg-python if possible, or standard torchaudio load
+    import torchaudio
+    
     try:
-        import soundfile as sf  # type: ignore
-
+        # Try standard loading first (handles most cases if backend is correct)
         if start_sec is not None and duration_sec is not None:
-            info = sf.info(p)
-            start = int(round(start_sec * info.samplerate))
-            frames = int(round(duration_sec * info.samplerate))
-            wav, sr = sf.read(p, start=start, frames=frames, dtype="float32", always_2d=False)
-        else:
-            wav, sr = sf.read(p, dtype="float32", always_2d=False)
-        wav = torch.from_numpy(np.asarray(wav, dtype=np.float32))
-        if wav.dim() == 2:
-            wav = wav.mean(dim=1)
-        if sr != target_sr:
             try:
-                import torchaudio  # type: ignore
-
-                wav = torchaudio.functional.resample(wav, sr, target_sr)
-            except Exception as e:
-                raise RuntimeError(f"Need torchaudio for resampling {sr}->{target_sr}: {e}")
-        return wav
-    except Exception:
-        import torchaudio  # type: ignore
-
-        if start_sec is not None and duration_sec is not None:
-            # frame_offset/num_frames are supported by many backends.
-            info = torchaudio.info(p)
-            frame_offset = int(round(start_sec * info.sample_rate))
-            num_frames = int(round(duration_sec * info.sample_rate))
-            wav, sr = torchaudio.load(p, frame_offset=frame_offset, num_frames=num_frames)  # (C,T)
+                info = torchaudio.info(p)
+                sr = info.sample_rate
+                frame_offset = int(round(start_sec * sr))
+                num_frames = int(round(duration_sec * sr))
+                wav, sr = torchaudio.load(p, frame_offset=frame_offset, num_frames=num_frames)
+            except AttributeError:
+                # Fallback for environments where torchaudio.info is missing
+                wav, sr = torchaudio.load(p)
+                frame_offset = int(round(start_sec * sr))
+                num_frames = int(round(duration_sec * sr))
+                wav = wav[:, frame_offset : frame_offset + num_frames]
         else:
-            wav, sr = torchaudio.load(p)  # (C,T)
-        wav = wav.mean(dim=0)
-        if sr != target_sr:
+            wav, sr = torchaudio.load(p)
+    except Exception as e:
+        # Fallback to direct ffmpeg via torchaudio's specialized reader if simple load fails? 
+        # Or simple re-raise. For robustness, we assume caller handles the error (retries).
+        raise RuntimeError(f"Failed to load {p}: {e}")
+
+    wav = wav.mean(dim=0) # Convert to mono
+    if sr != target_sr:
+        try:
             wav = torchaudio.functional.resample(wav, sr, target_sr)
-        return wav
+        except Exception as e:
+            raise RuntimeError(f"Resampling failed for {p}: {e}")
+    return wav
 
 
 def _random_crop(wav: torch.Tensor, num_samples: int) -> torch.Tensor:
@@ -101,18 +98,33 @@ class AudioManifestDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        it = self.items[idx]
-        start = it.get("start")
-        dur = it.get("duration")
-        wav = _load_audio(
-            it["audio_filepath"],
-            self.cfg.sample_rate,
-            start_sec=float(start) if start is not None else None,
-            duration_sec=float(dur) if dur is not None else None,
-        )
-        wav = _random_crop(wav, self.num_samples) if self.cfg.random_crop else _start_crop(wav, self.num_samples)
-        out = {"wav": wav, "meta": it}
-        return out
+        # Robust loading loop: try up to 10 times to find a valid sample
+        attempts = 0
+        while attempts < 10:
+            try:
+                it = self.items[idx]
+                start = it.get("start")
+                dur = it.get("duration")
+                
+                wav = _load_audio(
+                    it["audio_filepath"],
+                    self.cfg.sample_rate,
+                    start_sec=float(start) if start is not None else None,
+                    duration_sec=float(dur) if dur is not None else None,
+                )
+                
+                wav = _random_crop(wav, self.num_samples) if self.cfg.random_crop else _start_crop(wav, self.num_samples)
+                out = {"wav": wav, "meta": it}
+                return out
+            
+            except Exception as e:
+                # If loading fails (missing file, bad format, etc.), log and retry with a new random index
+                attempts += 1
+                logging.warning(f"Error loading index {idx} ({self.items[idx].get('audio_filepath', 'unknown')}): {e}. Retrying with random sample.")
+                idx = random.randint(0, len(self.items) - 1)
+        
+        # If we failed 10 times, raise the error to avoid infinite loops or silent failures
+        raise RuntimeError(f"Failed to load any valid sample after {attempts} attempts.")
 
 
 def collate_fixed(batch: List[Dict[str, Any]]) -> Dict[str, Any]:

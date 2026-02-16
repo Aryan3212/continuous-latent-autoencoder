@@ -2,14 +2,12 @@ import argparse
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-import umap
 import pathlib
 import json
 from sklearn.decomposition import PCA
 from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
-from models.encoder import Bottleneck
 from utils.config import load_config
 
 def main():
@@ -29,11 +27,6 @@ def main():
 
     frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"])).to(device)
     encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"])).to(device)
-    bottleneck = Bottleneck(
-        in_dim=mcfg["encoder"]["d_model"],
-        latent_dim=int(mcfg["bottleneck"]["latent_dim"]),
-        norm=str(mcfg["bottleneck"]["norm"]),
-    ).to(device)
 
     # Load Checkpoint
     print(f"Loading checkpoint: {args.ckpt}")
@@ -42,15 +35,15 @@ def main():
     # Handle state dict prefixes if necessary
     def load_part(model, key):
         part_dict = {k.replace(f"{key}.", ""): v for k, v in ckpt["model"].items() if k.startswith(f"{key}.")}
-        model.load_state_dict(part_dict)
+        if not part_dict: # maybe it's not prefixed
+             part_dict = {k: v for k, v in ckpt["model"].items() if k in model.state_dict()}
+        model.load_state_dict(part_dict, strict=False)
 
     load_part(frontend, "frontend")
     load_part(encoder, "encoder")
-    load_part(bottleneck, "bottleneck")
 
     frontend.eval()
     encoder.eval()
-    bottleneck.eval()
 
     # Load Data
     ds = AudioManifestDataset(ManifestConfig(manifest_path=args.manifest, sample_rate=16000))
@@ -65,7 +58,7 @@ def main():
             wav = batch["wav"].to(device)
             h0 = frontend(wav)
             hE = encoder(h0)
-            z = bottleneck(hE) # (B, D, T)
+            z = hE # (B, D, T)
             
             # Pool over time for visualization (Mean pooling)
             z_pooled = z.mean(dim=-1).cpu().numpy() # (B, D)

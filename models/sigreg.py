@@ -119,7 +119,7 @@ class SIGReg(nn.Module):
         x = z.permute(0, 2, 1).reshape(b * t, d).unsqueeze(0)  # (1,N,D)
         loss = self.test(x)
 
-        var = x.var(dim=0, unbiased=False)
+        var = x.var(dim=1, unbiased=False).squeeze(0)  # Variance across samples (N)
         stats = {
             "sigreg_loss": loss.detach(),
             "z_var_min": var.min().detach(),

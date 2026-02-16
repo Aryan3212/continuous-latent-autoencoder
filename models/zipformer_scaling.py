@@ -26,6 +26,11 @@ import torch.nn as nn
 from torch import Tensor
 from torch.cuda.amp import custom_bwd, custom_fwd
 
+try:
+    from torch.amp import custom_fwd, custom_bwd
+except ImportError:
+    from torch.cuda.amp import custom_bwd, custom_fwd
+
 
 @contextlib.contextmanager
 def torch_autocast(enabled: bool = True):
@@ -1314,7 +1319,7 @@ class MulForDropout3(torch.autograd.Function):
     # returns (x * y * alpha) where alpha is a float and y doesn't require
     # grad and is zero-or-one.
     @staticmethod
-    @custom_fwd
+    @custom_fwd(device_type="cuda")
     def forward(ctx, x, y, alpha):
         assert not y.requires_grad
         ans = x * y * alpha
@@ -1323,7 +1328,7 @@ class MulForDropout3(torch.autograd.Function):
         return ans
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type="cuda")
     def backward(ctx, ans_grad):
         (ans,) = ctx.saved_tensors
         x_grad = ctx.alpha * ans_grad * (ans != 0)
@@ -1512,7 +1517,7 @@ def SwooshRForward(x: Tensor):
 
 class ActivationDropoutAndLinearFunction(torch.autograd.Function):
     @staticmethod
-    @custom_fwd
+    @custom_fwd(device_type="cuda")
     def forward(
         ctx,
         x: Tensor,
@@ -1551,7 +1556,7 @@ class ActivationDropoutAndLinearFunction(torch.autograd.Function):
         return x
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type="cuda")
     def backward(ctx, ans_grad: Tensor):
         saved = ctx.saved_tensors
         (x, weight, bias, dropout_mask) = saved

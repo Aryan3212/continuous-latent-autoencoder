@@ -1,5 +1,0 @@
-_base_: configs/exp0.yaml
-loss:
-  jepa:
-    stop_grad_target: true
-

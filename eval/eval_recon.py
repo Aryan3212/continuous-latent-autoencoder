@@ -10,7 +10,7 @@ import torch
 from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
-from models.encoder import Bottleneck, Encoder, EncoderConfig
+from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import apply_overrides, load_config
 
@@ -34,19 +34,17 @@ def main() -> None:
     mcfg = cfg["model"]
     frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
     encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    bottleneck = Bottleneck(
-        in_dim=mcfg["encoder"]["d_model"],
-        latent_dim=int(mcfg["bottleneck"]["latent_dim"]),
-        norm=str(mcfg["bottleneck"]["norm"]),
-    )
+    
+    latent_dim = int(mcfg["encoder"]["d_model"])
+    
     decoder_cfg = DecoderConfig(**mcfg["decoder"])
-    decoder = WaveformDecoder(int(mcfg["bottleneck"]["latent_dim"]), decoder_cfg)
+    decoder = WaveformDecoder(latent_dim, decoder_cfg)
     if decoder_cfg.latent_stats_path:
         stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
         decoder.set_latent_stats(stats["mean"], stats["var"])
 
     model = torch.nn.ModuleDict(
-        {"frontend": frontend, "encoder": encoder, "bottleneck": bottleneck, "decoder": decoder}
+        {"frontend": frontend, "encoder": encoder, "decoder": decoder}
     ).to(device)
 
     state = torch.load(args.ckpt, map_location="cpu")
@@ -73,7 +71,7 @@ def main() -> None:
             wav = batch["wav"].to(device)
             h0 = model["frontend"](wav)
             hE = model["encoder"](h0)
-            z = model["bottleneck"](hE)
+            z = hE
             x_hat = model["decoder"](z, target_len=wav.size(-1))
             l_stft, _ = stft(x_hat, wav)
             l_wav = (x_hat - wav).abs().mean()

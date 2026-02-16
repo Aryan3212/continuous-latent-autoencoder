@@ -1,5 +1,0 @@
-_base_: configs/exp0.yaml
-loss:
-  sigreg:
-    weight: 0.0
-

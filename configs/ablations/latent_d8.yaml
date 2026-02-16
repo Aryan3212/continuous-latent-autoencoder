@@ -1,5 +1,0 @@
-_base_: configs/exp0.yaml
-model:
-  bottleneck:
-    latent_dim: 8
-

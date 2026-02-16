@@ -9,7 +9,7 @@ from typing import Any, Dict, Tuple
 import torch
 import torch.nn.functional as F
 
-from data.augment import FeatureMaskConfig, MixConfig, apply_feature_mask, maybe_mix_pair
+from data.augment import FeatureMaskConfig, MixConfig, WaveAugConfig, apply_feature_mask, apply_waveform_augment, maybe_mix_pair
 from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
@@ -20,7 +20,7 @@ from models.discriminators import (
     feature_matching_loss,
     generator_loss,
 )
-from models.encoder import Bottleneck, Encoder, EncoderConfig
+from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from models.sigreg import SIGReg, SIGRegConfig
 from optim.lr_schedulers import Eden, Eden2
@@ -76,14 +76,12 @@ def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
         p.requires_grad = flag
 
 
-def _encode(model: torch.nn.ModuleDict, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _encode(model: torch.nn.ModuleDict, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     h0 = model["frontend"](wav)
     hE = model["encoder"](h0)
-    # RAE: No bottleneck projection. The latent z IS the encoder output hE.
-    # We apply norm if it was requested in the bottleneck config, but usually hE is already normed.
-    # For now, we identity map z = hE.
+    # The latent z IS the encoder output hE.
     z = hE 
-    return h0, hE, z
+    return h0, hE, z, {} # No extra stats
 
 
 def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int, sigma: torch.Tensor) -> torch.Tensor:
@@ -113,7 +111,36 @@ def main() -> None:
     ap.add_argument("--save_interval_steps", type=int, default=None)
     ap.add_argument("--run_eval_on_save", action="store_true")
     ap.add_argument("overrides", nargs="*")
-    args = ap.parse_args()
+    args, unknown = ap.parse_known_args()
+
+    # Convert CLI flags like --optim.lr 0.001 or --optim.lr=0.001 to overrides optim.lr=0.001
+    i = 0
+    while i < len(unknown):
+        arg = unknown[i]
+        if arg.startswith("--"):
+            # Handle --key=value
+            if "=" in arg:
+                key, val = arg[2:].split("=", 1)
+                args.overrides.append(f"{key}={val}")
+                i += 1
+                continue
+            
+            # Handle --key value
+            key = arg[2:]
+            if i + 1 < len(unknown):
+                val = unknown[i + 1]
+                if not val.startswith("-"):
+                    args.overrides.append(f"{key}={val}")
+                    i += 2
+                    continue
+            
+            # If we get here, it's a flag without a value or boolean flag not supported
+            print(f"Warning: dangling flag {arg} ignored or boolean not supported")
+            i += 1
+        else:
+            # Positional arg in unknown?
+            print(f"Warning: unknown argument {arg}")
+            i += 1
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
     cfg["_resolved_config_path"] = args.config
@@ -183,26 +210,23 @@ def main() -> None:
     mcfg = cfg["model"]
     frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
     encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    bottleneck = Bottleneck(
-        in_dim=mcfg["encoder"]["d_model"],
-        latent_dim=int(mcfg["bottleneck"]["latent_dim"]),
-        norm=str(mcfg["bottleneck"]["norm"]),
-    )
+    
+    latent_dim = int(mcfg["encoder"]["d_model"])
+    
     decoder_cfg = DecoderConfig(**mcfg["decoder"])
-    decoder = WaveformDecoder(int(mcfg["bottleneck"]["latent_dim"]), decoder_cfg)
+    decoder = WaveformDecoder(latent_dim, decoder_cfg)
     if decoder_cfg.latent_stats_path:
         stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
         decoder.set_latent_stats(stats["mean"], stats["var"])
     sigreg_cfg = cfg["loss"]["sigreg"].copy()
     if "weight" in sigreg_cfg:
         del sigreg_cfg["weight"]
-    sigreg = SIGReg(int(mcfg["bottleneck"]["latent_dim"]), SIGRegConfig(**sigreg_cfg))
+    sigreg = SIGReg(latent_dim, SIGRegConfig(**sigreg_cfg))
 
     model = torch.nn.ModuleDict(
         {
             "frontend": frontend,
             "encoder": encoder,
-            "bottleneck": bottleneck,
             "decoder": decoder,
             "sigreg": sigreg,
         }
@@ -213,8 +237,14 @@ def main() -> None:
     discriminators = None
     d_optimizer = None
     if gan_enabled:
-        mpd = MultiPeriodDiscriminator(periods=gan_cfg.get("periods", [2, 3, 5, 7, 11]))
-        msd = MultiScaleDiscriminator(scales=int(gan_cfg.get("msd_scales", 3)))
+        mpd = MultiPeriodDiscriminator(
+            periods=gan_cfg.get("periods", [2, 3, 5, 7, 11]),
+            channels=int(gan_cfg.get("mpd_channels", 32)),
+        )
+        msd = MultiScaleDiscriminator(
+            scales=int(gan_cfg.get("msd_scales", 3)),
+            channels=int(gan_cfg.get("msd_channels", 16)),
+        )
         discriminators = torch.nn.ModuleDict({"mpd": mpd, "msd": msd}).to(device)
         d_optimizer = torch.optim.AdamW(
             discriminators.parameters(),
@@ -226,6 +256,7 @@ def main() -> None:
     # Losses
     stft = MultiResSTFTLoss(MultiResSTFTConfig(**cfg["loss"]["stft"])).to(device)
     feat_mask_cfg = FeatureMaskConfig(**(cfg.get("aug", {}).get("feature_mask", {}) or {}))
+    wave_aug_cfg = WaveAugConfig(**(cfg.get("aug", {}).get("wave_aug", {}) or {}))
 
     # Optim
     ocfg = cfg["optim"]
@@ -275,7 +306,7 @@ def main() -> None:
         )
 
     use_amp = bool(cfg["run"].get("amp", True)) and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     step = 0
     resume_best: Dict[str, float] | None = None
@@ -319,6 +350,9 @@ def main() -> None:
     stft_w = float(cfg["loss"].get("stft_weight", 1.0))
     wav_l1_w = float(cfg["loss"].get("wav_l1_weight", 0.0))
 
+    use_lejepa_on_hE = bool(cfg["loss"].get("use_lejepa_on_hE", False))
+    kl_weight = float(cfg["loss"].get("kl_weight", 0.0))
+
     mix_recon_cfg = cfg["loss"].get("mix_recon") or {}
     mix_recon_enabled = bool(mix_recon_cfg.get("enabled", False))
     mix_recon_w = float(mix_recon_cfg.get("weight", 1.0))
@@ -359,13 +393,13 @@ def main() -> None:
         model.eval()
         sums = {"val_stft": 0.0, "val_jepa": 0.0, "val_sig": 0.0}
         n = 0
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for vb in val_dl:
                 vw = vb["wav"].to(device)
-                h0, _, z = _encode(model, vw)
+                h0, hE, z, stats = _encode(model, vw)
                 h0m = apply_feature_mask(h0, feat_mask_cfg)
                 hEm = model["encoder"](h0m)
-                zm = model["bottleneck"](hEm)
+                zm = hEm
                 v_jepa = _lejepa_loss(z, zm)
                 v_sig_a, _ = sigreg(z, step=step)
                 v_sig_m, _ = sigreg(zm, step=step)
@@ -441,28 +475,65 @@ def main() -> None:
             primary_idx = primary_idx.to(device)
             snr_db_vals = snr_db_vals.to(device)
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                # Clean view (V0)
-                h0_a, _, z_a = _encode(model, wav_a)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                # Clean view (V0) - NO augmentation on target, but maybe on input if we want denoising?
+                # The user asked for "augmentations".
+                # Standard RAE/LeJEPA: "View" is augmented, "Center" is clean(er).
+                # Current code: _encode(model, wav_a) -> z_a.
+                # If we want Denoising, we should encode augmented, decode to clean.
+                # But LeJEPA logic in this file: z_mask matches z_a.
+                # If we augment wav_a, z_a changes.
+                
+                # Let's apply augmentation to get wav_aug.
+                # wav_a is CLEAN target.
+                wav_aug = apply_waveform_augment(wav_a, int(dcfg["sample_rate"]), wave_aug_cfg)
+                
+                # Encode Clean (Center)
+                h0_a, hE_a, z_a, stats_a = _encode(model, wav_a)
+                
+                # Encode Augmented (View 1)
+                # If we just want simple denoising, we can use wav_aug as input for "clean view" path
+                # but "clean view" is used as target for reconstruction in current code: 
+                # x_hat = _decode(z_a) -> loss(x_hat, wav_a)
+                
+                # To implement "Denoising", we should encode wav_aug -> z_aug -> decode -> wav_a
+                # But we also have LeJEPA z_aug vs z_clean.
+                
+                # Let's define:
+                # Center = Clean
+                # View = Augmented + Masked
+                
+                h0_aug, hE_aug, z_aug, stats_aug = _encode(model, wav_aug)
 
-                # Masked feature view (V1)
-                h0_masked = apply_feature_mask(h0_a, feat_mask_cfg)
+                # Masked feature view (V1) - applied to Augmented view features
+                h0_masked = apply_feature_mask(h0_aug, feat_mask_cfg)
                 hE_mask = model["encoder"](h0_masked)
-                z_mask = model["bottleneck"](hE_mask)
+                z_mask = hE_mask
 
-                # LeJEPA: masked view should match clean center
-                # Removed .detach() to follow LeJEPA paper's "no stop-gradient" principle
-                l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
+                # LeJEPA: masked+augmented view should match clean center
+                if use_lejepa_on_hE:
+                    l_jepa_mask_ps = _lejepa_loss(hE_a, hE_mask, return_per_sample=True)
+                else:
+                    l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
                 l_jepa_mask = l_jepa_mask_ps.mean()
+                
+                # KL Divergence (on CLEAN or AUG? Usually on the one used for gen/prior. Clean makes sense for "prior" matching)
+                l_kl = torch.tensor(0.0, device=device)
+                if "mu" in stats_a and "logvar" in stats_a and float(cfg["loss"].get("kl_weight", 0.0)) > 0:
+                    mu, logvar = stats_a["mu"], stats_a["logvar"]
+                    l_kl_ps = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean(dim=-1)
+                    l_kl = l_kl_ps.mean()
 
                 l_jepa_mix = torch.tensor(0.0, device=device)
+                l_primary = torch.tensor(0.0, device=device)
+                l_stft_mix = torch.tensor(0.0, device=device)
                 l_primary = torch.tensor(0.0, device=device)
                 l_stft_mix = torch.tensor(0.0, device=device)
 
                 # Exp1+: mix view (V2)
                 if mix_cfg.enabled and bool(mixed_mask.any().item()):
-                    _, _, z_b = _encode(model, wav_b)
-                    _, _, z_mix = _encode(model, wav_mix)
+                    _, _, z_b, _ = _encode(model, wav_b)
+                    _, _, z_mix, _ = _encode(model, wav_mix)
 
                     z_tgt_mix = z_a.clone()
                     z_tgt_mix[primary_idx == 1] = z_b[primary_idx == 1]
@@ -486,6 +557,8 @@ def main() -> None:
                 sig_losses = []
                 l_sig_a, sig_stats_a = sigreg(z_a, step=step)
                 sig_losses.append(l_sig_a)
+                # SIGReg on masked/augmented embeddings? Usually just one view is enough or both.
+                # Let's keep it on both to ensure isotropy everywhere.
                 l_sig_m, sig_stats_m = sigreg(z_mask, step=step)
                 sig_losses.append(l_sig_m)
                 if mix_cfg.enabled and bool(mixed_mask.any().item()):
@@ -495,14 +568,25 @@ def main() -> None:
                 sig_stats = {
                     "sigreg_clean": sig_stats_a["sigreg_loss"],
                     "sigreg_masked": sig_stats_m["sigreg_loss"],
+                    "z_var_min": sig_stats_a["z_var_min"],
+                    "z_var_med": sig_stats_a["z_var_med"],
+                    "z_var_max": sig_stats_a["z_var_max"],
                 }
 
-                # Decoder (Exp0: reconstruct clean; Exp1+: optionally decode mixed->primary)
+                # Decoder
+                # We decode from z_a (clean) OR z_mask (aug)?
+                # If we decode z_a -> wav_a, it's standard AE.
+                # If we decode z_mask -> wav_a, it's Denoising AE.
+                # RAE paper usually decodes clean+noise.
+                # LeJEPA paper decodes center (clean).
+                # Let's stick to decoding CLEAN z_a to learn good generator, relying on JEPA to pull z_mask close.
+                # BUT if we want robustness, maybe decode z_aug?
+                # Let's decode z_a (clean) as primary recon task.
                 sigma = _latent_noise_sigma(cfg, step, device)
                 x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
                 l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
                 l_stft = l_stft_ps.mean()
-                stft_stats = {k: v.mean() for k, v in stft_stats_ps.items()}
+                stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
 
                 l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
                 l_wav = l_wav_ps.mean()
@@ -540,6 +624,7 @@ def main() -> None:
                     + sig_w * l_sig
                     + g_adv_w * l_g_adv
                     + fm_w * l_fm
+                    + kl_weight * l_kl
                     + (mix_recon_w * l_stft_mix if (mix_recon_enabled and step >= mix_recon_start) else 0.0)
                     + (primary_w * l_primary if primary_enabled else 0.0)
                 )
@@ -548,31 +633,39 @@ def main() -> None:
             scaler.scale(loss).backward()
             total_loss += float(loss.detach().cpu())
 
-            stats.update(
-                {
-                    "loss": total_loss,
-                    "l_stft": float(l_stft.detach().cpu()),
-                    "l_stft_mix": float(l_stft_mix.detach().cpu()),
-                    "l_wav": float(l_wav.detach().cpu()),
-                    "l_jepa": float(l_jepa.detach().cpu()),
-                    "l_jepa_mask": float(l_jepa_mask.detach().cpu()),
+            stats = {
+                "loss": total_loss,
+                "l_stft": float(l_stft.detach().cpu()),
+                "l_wav": float(l_wav.detach().cpu()),
+                "l_jepa": float(l_jepa.detach().cpu()),
+                "l_jepa_mask": float(l_jepa_mask.detach().cpu()),
+                "l_sig": float(l_sig.detach().cpu()),
+                "sigma": float(sigma.detach().cpu()),
+                "z_mean": float(z_a.mean().detach().cpu()),
+                "z_std": float(z_a.std(unbiased=False).detach().cpu()),
+            }
+            stats.update({k: float(v.cpu()) for k, v in stft_stats.items()})
+            stats.update({k: float(v.cpu()) for k, v in sig_stats.items()})
+
+            if mix_cfg.enabled:
+                stats.update({
                     "l_jepa_mix": float(l_jepa_mix.detach().cpu()),
-                    "l_sig": float(l_sig.detach().cpu()),
+                    "l_stft_mix": float(l_stft_mix.detach().cpu()),
+                    "mixed_frac": float(mixed_mask.float().mean().detach().cpu()),
+                    "snr_db_mean": float(snr_db_vals[mixed_mask].mean().detach().cpu()) if bool(mixed_mask.any().item()) else 0.0,
+                })
+                if primary_enabled:
+                    stats["l_primary"] = float(l_primary.detach().cpu())
+
+            if gan_enabled:
+                stats.update({
                     "l_g_adv": float(l_g_adv.detach().cpu()),
                     "l_fm": float(l_fm.detach().cpu()),
                     "l_d": float(l_d.detach().cpu()),
-                    "l_primary": float(l_primary.detach().cpu()),
-                    "sigma": float(sigma.detach().cpu()),
-                    "mixed_frac": float(mixed_mask.float().mean().detach().cpu()),
-                    "snr_db_mean": float(snr_db_vals[mixed_mask].mean().detach().cpu())
-                    if bool(mixed_mask.any().item())
-                    else 0.0,
-                    "z_mean": float(z_a.mean().detach().cpu()),
-                    "z_std": float(z_a.std(unbiased=False).detach().cpu()),
-                }
-            )
-            stats.update({k: float(v.cpu()) for k, v in stft_stats.items()})
-            stats.update({k: float(v.cpu()) for k, v in sig_stats.items()})
+                })
+
+            if kl_weight > 0:
+                stats["l_kl"] = float(l_kl.detach().cpu())
 
             unique_ds = set(dataset_names)
             if len(unique_ds) > 1:
@@ -642,6 +735,12 @@ def main() -> None:
                         to_log["probe/asr_wer_train"] = float(asr["train"]["wer"])
                     if asr.get("dev", {}).get("wer") is not None:
                         to_log["probe/asr_wer_dev"] = float(asr["dev"]["wer"])
+                        
+                    if asr.get("dev", {}).get("examples"):
+                        import wandb
+                        cols = ["Ref", "Hyp"]
+                        data = [[ex["ref"], ex["hyp"]] for ex in asr["dev"]["examples"]]
+                        to_log["probe/asr_examples"] = wandb.Table(columns=cols, data=data)
 
                     if emo.get("accuracy") is not None:
                         to_log["probe/emotion_accuracy"] = float(emo["accuracy"])
@@ -650,6 +749,10 @@ def main() -> None:
 
                     if gen.get("accuracy") is not None:
                         to_log["probe/gender_accuracy"] = float(gen["accuracy"])
+                    
+                    if "visualization" in results:
+                        import wandb
+                        to_log["probe/latents"] = wandb.Image(results["visualization"], caption=f"Step {step} Latents")
 
                     if to_log:
                         wb.log(to_log, step=step)

@@ -1,0 +1,20 @@
+wandb_version: 1
+
+aug.wave_aug.lowpass_prob:
+  value: 0
+aug.wave_aug.noise_prob:
+  value: 0
+latent_noise.sigma_max:
+  value: 0.1
+loss.jepa.weight:
+  value: 4.541338786354999
+loss.sigreg.weight:
+  value: 4.027858477046784
+loss.stft_weight:
+  value: 0.7829630807489488
+model.bottleneck.kind:
+  value: identity
+model.bottleneck.latent_dim:
+  value: 256
+model.encoder.d_model:
+  value: 256

@@ -1,122 +1,53 @@
-#!/usr/bin/env python3
-"""
-Create reproducible train/val/test splits from a directory of audio files.
-This script scans for audio files, calculates their durations, filters out
-short files, and creates JSONL manifests.
-
-Usage:
-    uv run python scripts/create_dataset_splits.py \
-        --data_dir /path/to/wavs \
-        --out_dir data/manifests \
-        --min_duration 1.0 \
-        --val_frac 0.05 \
-        --test_frac 0.05 \
-        --seed 42
-"""
-
 import argparse
-import glob
 import json
-import os
 import random
 import pathlib
-import soundfile as sf
-import tqdm
 from typing import List, Dict, Any
 
-def get_audio_files(root: str, extensions: List[str] = [".wav", ".mp3", ".flac", ".ogg"]) -> List[str]:
-    files = []
-    root_path = pathlib.Path(root)
-    for ext in extensions:
-        # Recursive glob
-        files.extend([str(p) for p in root_path.rglob(f"*{ext}")])
-        files.extend([str(p) for p in root_path.rglob(f"*{ext.upper()}")])
-    return sorted(list(set(files)))
+def load_manifest(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
-def get_duration(path: str) -> float:
-    try:
-        info = sf.info(path)
-        return info.duration
-    except Exception:
-        # Fallback for some formats or errors
-        return 0.0
+def save_manifest(data: List[Dict[str, Any]], path: str):
+    with open(path, "w") as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data_dir", required=True, help="Root directory containing audio files")
-    ap.add_argument("--out_dir", required=True, help="Output directory for manifests")
-    ap.add_argument("--min_duration", type=float, default=2.0, help="Skip files shorter than this (seconds)")
-    ap.add_argument("--val_frac", type=float, default=0.05, help="Fraction of data for validation")
-    ap.add_argument("--test_frac", type=float, default=0.05, help="Fraction of data for testing")
-    ap.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    ap.add_argument("--limit", type=int, default=None, help="Limit total files (for testing)")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="Deterministic dataset splitter")
+    parser.add_argument("input_manifest", help="Path to input JSONL manifest")
+    parser.add_argument("--val_pct", type=float, default=0.1, help="Validation percentage (0.0-1.0)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--output_dir", default="data/manifests", help="Output directory")
+    parser.add_argument("--name", default="dataset", help="Base name for output files")
+    args = parser.parse_args()
 
     random.seed(args.seed)
-    out_dir = pathlib.Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Scanning {args.data_dir}...")
-    files = get_audio_files(args.data_dir)
-    print(f"Found {len(files)} files.")
-
-    if args.limit:
-        files = files[:args.limit]
-        print(f"Limiting to {args.limit} files.")
+    
+    print(f"Loading manifest from {args.input_manifest}...")
+    data = load_manifest(args.input_manifest)
+    print(f"Total samples: {len(data)}")
 
     # Shuffle deterministically
-    random.shuffle(files)
+    random.shuffle(data)
 
-    valid_items: List[Dict[str, Any]] = []
-    
-    print("Processing files (calculating durations)...")
-    for fpath in tqdm.tqdm(files):
-        dur = get_duration(fpath)
-        if dur >= args.min_duration:
-            valid_items.append({
-                "audio_filepath": os.path.abspath(fpath),
-                "duration": dur
-            })
-    
-    print(f"Kept {len(valid_items)} files after filtering (min_duration={args.min_duration}s).")
+    val_size = int(len(data) * args.val_pct)
+    val_data = data[:val_size]
+    train_data = data[val_size:]
 
-    # Split
-    n_total = len(valid_items)
-    n_val = int(n_total * args.val_frac)
-    n_test = int(n_total * args.test_frac)
-    n_train = n_total - n_val - n_test
+    out_dir = pathlib.Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_items = valid_items[:n_train]
-    val_items = valid_items[n_train : n_train + n_val]
-    test_items = valid_items[n_train + n_val :]
+    train_path = out_dir / f"{args.name}_train.jsonl"
+    val_path = out_dir / f"{args.name}_val.jsonl"
 
-    print(f"Splits: Train={len(train_items)}, Val={len(val_items)}, Test={len(test_items)}")
+    print(f"Saving {len(train_data)} training samples to {train_path}")
+    save_manifest(train_data, str(train_path))
 
-    def write_manifest(items, name):
-        path = out_dir / f"{name}.jsonl"
-        with open(path, "w") as f:
-            for it in items:
-                f.write(json.dumps(it) + "\n")
-        print(f"Wrote {path}")
+    print(f"Saving {len(val_data)} validation samples to {val_path}")
+    save_manifest(val_data, str(val_path))
 
-    write_manifest(train_items, "train")
-    write_manifest(val_items, "val")
-    write_manifest(test_items, "test")
-
-    # Write split info
-    split_info = {
-        "seed": args.seed,
-        "source_dir": os.path.abspath(args.data_dir),
-        "counts": {
-            "train": len(train_items),
-            "val": len(val_items),
-            "test": len(test_items)
-        },
-        "total_files_scanned": len(files),
-        "total_files_valid": len(valid_items)
-    }
-    with open(out_dir / "split_info.json", "w") as f:
-        json.dump(split_info, f, indent=2)
+    print("Done.")
 
 if __name__ == "__main__":
     main()

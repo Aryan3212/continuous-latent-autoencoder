@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Import model components
 from models.frontend_conv import ConvFrontend, FrontendConfig
-from models.encoder import Encoder, EncoderConfig, Bottleneck
+from models.encoder import Encoder, EncoderConfig
 from models.decoder_generator import WaveformDecoder, DecoderConfig
 from data.dataset import _load_audio
 
@@ -24,17 +24,13 @@ def load_model(ckpt_path, device):
     # Rebuild model structure
     frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
     encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    bottleneck = Bottleneck(
-        in_dim=mcfg["encoder"]["d_model"],
-        latent_dim=int(mcfg["bottleneck"]["latent_dim"]),
-        norm=str(mcfg["bottleneck"]["norm"]),
-    )
-    decoder = WaveformDecoder(int(mcfg["bottleneck"]["latent_dim"]), DecoderConfig(**mcfg["decoder"]))
+    
+    latent_dim = int(mcfg["encoder"]["d_model"])
+    decoder = WaveformDecoder(latent_dim, DecoderConfig(**mcfg["decoder"]))
 
     model = torch.nn.ModuleDict({
         "frontend": frontend,
         "encoder": encoder,
-        "bottleneck": bottleneck,
         "decoder": decoder
     })
 
@@ -51,7 +47,7 @@ def reconstruct(model, wav, device):
         # Encode
         h0 = model["frontend"](wav)
         hE = model["encoder"](h0)
-        z = model["bottleneck"](hE)
+        z = hE
         
         # Decode
         # Target length is roughly original length, but let decoder decide or pad/trim
@@ -63,7 +59,7 @@ def reconstruct(model, wav, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True, help="Path to checkpoint (.pt)")
-    ap.add_argument("--manifest", default="data/manifest_train_10pct.jsonl")
+    ap.add_argument("--manifest", default="data/manifests/experiment_v1/train.jsonl")
     ap.add_argument("--out_dir", default="reconstructions")
     ap.add_argument("--num_samples", type=int, default=10, help="Number of samples to reconstruct")
     ap.add_argument("--sample_id", type=int, default=None, help="Index of sample to pick (if set, num_samples is ignored)")

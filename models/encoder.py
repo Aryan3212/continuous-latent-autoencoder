@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple, Dict
 
 import copy
 import torch
@@ -30,18 +30,6 @@ class EncoderConfig:
     def __post_init__(self) -> None:
         if isinstance(self.mhc, dict):
             self.mhc = MHCConfig(**self.mhc)
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-8):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (..., dim)
-        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
-        return (x / rms) * self.weight
 
 
 class Encoder(nn.Module):
@@ -105,6 +93,8 @@ class Encoder(nn.Module):
                         sinkhorn_iters=cfg.mhc.sinkhorn_iters,
                         tau=cfg.mhc.tau,
                         dropout=cfg.mhc.dropout,
+                        identity_mix=cfg.mhc.identity_mix,
+                        alpha_init=cfg.mhc.alpha_init,
                     )
                 )
             else:
@@ -179,25 +169,3 @@ class Encoder(nn.Module):
         )
         out = out.reshape(seq_len, batch, streams, dim).permute(2, 0, 1, 3)
         return out
-
-
-class Bottleneck(nn.Module):
-    """
-    Deterministic latent bottleneck:
-      hE: (B,D,T') -> z: (B,d,T') + channel-wise norm.
-    """
-
-    def __init__(self, in_dim: int, latent_dim: int, norm: str = "layernorm"):
-        super().__init__()
-        self.proj = nn.Conv1d(in_dim, latent_dim, kernel_size=1)
-        if norm == "layernorm":
-            self.norm = nn.LayerNorm(latent_dim)
-        elif norm == "rmsnorm":
-            self.norm = RMSNorm(latent_dim)
-        else:
-            raise ValueError(f"Unknown bottleneck norm: {norm}")
-
-    def forward(self, hE: torch.Tensor) -> torch.Tensor:
-        z = self.proj(hE)  # (B,d,T')
-        z = self.norm(z.transpose(1, 2)).transpose(1, 2)
-        return z

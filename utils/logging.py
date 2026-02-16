@@ -11,6 +11,8 @@ class JsonlLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, row: Dict[str, Any]) -> None:
+        if not self.path.parent.exists():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
 

@@ -121,6 +121,32 @@ def run_all_probes(
         _run(cmd)
         results["asr"] = json.loads(out.read_text())
 
+    # Latent Visualization (PCA/UMAP)
+    vis_out = out_dir / "latents.png"
+    # Use validation manifest for visualization if available, else training
+    vis_manifest = eval_cfg.get("vis_manifest") or exp_cfg["data"].get("val_manifest") or exp_cfg["data"]["train_manifest"]
+    
+    try:
+        _run(
+            [
+                python_bin,
+                "scripts/visualize_latents.py",
+                "--config",
+                config_path,
+                "--ckpt",
+                ckpt_path,
+                "--manifest",
+                vis_manifest,
+                "--out",
+                str(vis_out),
+                "--limit",
+                "500" # Visualize 500 samples
+            ]
+        )
+        results["visualization"] = str(vis_out)
+    except Exception as e:
+        print(f"Visualization failed: {e}")
+
     (out_dir / "summary.json").write_text(json.dumps(results, indent=2))
     (pathlib.Path(run_dir) / f"eval_step_{step}.json").write_text(json.dumps(results, indent=2))
     return results

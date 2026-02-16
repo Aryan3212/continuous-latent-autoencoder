@@ -4,7 +4,7 @@ import pathlib
 import torch
 
 from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
-from models.encoder import Bottleneck, Encoder, EncoderConfig
+from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import apply_overrides, load_config
 
@@ -25,15 +25,11 @@ def main() -> None:
     mcfg = cfg["model"]
     frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
     encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    bottleneck = Bottleneck(
-        in_dim=mcfg["encoder"]["d_model"],
-        latent_dim=int(mcfg["bottleneck"]["latent_dim"]),
-        norm=str(mcfg["bottleneck"]["norm"]),
-    )
-    model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder, "bottleneck": bottleneck}).to(device)
+    
+    model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder}).to(device)
 
     state = torch.load(args.ckpt, map_location="cpu")
-    model.load_state_dict(state["model"], strict=True)
+    model.load_state_dict(state["model"], strict=False)
     model.eval()
 
     dcfg = cfg["data"]
@@ -64,7 +60,7 @@ def main() -> None:
             wav = batch["wav"].to(device)
             h0 = model["frontend"](wav)
             hE = model["encoder"](h0)
-            z = model["bottleneck"](hE)
+            z = hE
             z = z.permute(0, 2, 1).reshape(-1, z.shape[1])
             z = z.to(torch.float64)
             if sum_z is None:

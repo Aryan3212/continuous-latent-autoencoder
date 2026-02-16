@@ -3,7 +3,7 @@ run:
   out_dir: runs
   seed: 0
   device: auto               # auto | cpu | cuda
-  amp: true
+  amp: false
   wandb:
     enabled: true
     project: "continuous-latent-ae"
@@ -11,9 +11,9 @@ run:
 
 data:
   sample_rate: 16000
-  segment_seconds: 2.0
-  train_manifest: null
-  val_manifest: null
+  segment_seconds: 6.0
+  train_manifest: "data/manifests/experiment_v1/train.jsonl"
+  val_manifest: "data/manifests/experiment_v1/val.jsonl"
   num_workers: 4
   pin_memory: true
 
@@ -22,8 +22,15 @@ aug:
     enabled: true
     time_mask_prob: 0.7
     time_mask_len: 8         # in tokens at 12.5Hz
-    channel_mask_prob: 0.3
-    channel_mask_len: 32
+  wave_aug:
+    enabled: true
+    noise_prob: 0.1
+    noise_snr_min: 5.0
+    noise_snr_max: 20.0
+    reverb_prob: 0.0      # RIR dataset needed for true reverb, placeholder for now
+    lowpass_prob: 0.1
+    gain_prob: 0.1
+    clip_prob: 0.05
   mix:
     enabled: false
     snr_db_min: 3.0
@@ -39,7 +46,7 @@ model:
     groups: 8
   encoder:
     d_model: 256
-    n_layers: 6
+    n_layers: 4
     num_heads: 4
     query_head_dim: 32
     pos_head_dim: 4
@@ -57,9 +64,8 @@ model:
       sinkhorn_iters: 10
       tau: 0.05
       dropout: 0.0
-  bottleneck:
-    latent_dim: 256             # RAE: Match encoder d_model (no bottleneck)
-    norm: layernorm
+      identity_mix: true
+      alpha_init: 0.01
   predictor:
     kind: mlp
     hidden_dim: 256
@@ -83,16 +89,18 @@ loss:
     win_ratio: 1.0
     center: true
     window: hann
-    logmag_eps: 1.0e-7
+    logmag_eps: 1.0e-3
     sc_weight: 1.0
     mag_weight: 1.0
     logmag_weight: 1.0
+  use_lejepa_on_hE: false       # if true, compute JEPA on hE
+  kl_weight: 0.0                # weight for KL divergence
   wav_l1_weight: 0.0
   jepa:
-    weight: 1.0
+    weight: 5.0
     mix_view_weight: 1.0        # Exp1+: z_mix -> z_primary alignment
   sigreg:
-    weight: 0.1
+    weight: 0.001
     num_slices: 256
     t_max: 3.0
     n_points: 17
@@ -107,13 +115,15 @@ loss:
     weight: 0.0
 
 gan:
-  enabled: false
+  enabled: true
   start_step: 0
   d_steps_per_g_step: 1
   g_adv_weight: 1.0
   fm_weight: 10.0
   periods: [2, 3, 5, 7, 11]
   msd_scales: 3
+  mpd_channels: 24
+  msd_channels: 12
   d_lr: 2.0e-4
   d_betas: [0.8, 0.99]
   d_weight_decay: 0.0
@@ -126,9 +136,9 @@ latent_noise:
 
 optim:
   kind: scaled_adam             # scaled_adam | adamw
-  lr: 3.0e-2
+  lr: 5.0e-4
   betas: [0.9, 0.98]
-  eps: 1.0e-8
+  eps: 1.0e-4
   weight_decay: 1.0e-3
   clipping_scale: 3.0
   scalar_lr_scale: 0.1
@@ -147,35 +157,25 @@ optim:
 
 train:
   batch_size: 8
-  grad_accum_steps: 1
-  max_steps: 200000
+  grad_accum_steps: 8
+  max_steps: 6000       # Shortened for Sweep (allows 2 probes at 2500, 5000)
   log_interval_steps: 50
   eval_interval_steps: 2000
-  save_interval_steps: 2000
+  save_interval_steps: 2500
   val_batches: 8
-  run_eval_on_save: false
+  run_eval_on_save: true
 
 eval:
-  enabled: false
+  enabled: true
   emotion:
     enabled: false
-    train_manifest: null
-    dev_manifest: null
-    label_key: emotion
-    steps: 2000
-    batch_size: 64
   gender:
     enabled: false
-    train_manifest: null
-    dev_manifest: null
-    label_key: gender
-    steps: 1500
-    batch_size: 64
   asr:
-    enabled: false
-    train_manifest: null
-    dev_manifest: null
+    enabled: true
+    train_manifest: "data/manifests/asr_probe/train_asr.jsonl"
+    dev_manifest: "data/manifests/asr_probe/val_asr.jsonl"
     text_key: text
-    steps: 8000
+    steps: 2500           # Train probe for 2500 steps
     batch_size: 16
     use_latent: false

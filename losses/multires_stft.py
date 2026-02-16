@@ -14,7 +14,7 @@ class MultiResSTFTConfig:
     win_ratio: float = 1.0
     center: bool = True
     window: str = "hann"
-    logmag_eps: float = 1.0e-7
+    logmag_eps: float = 1.0e-3
     sc_weight: float = 1.0
     mag_weight: float = 1.0
     logmag_weight: float = 1.0

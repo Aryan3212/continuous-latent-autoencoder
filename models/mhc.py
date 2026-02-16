@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def sinkhorn_log(logits: torch.Tensor, num_iters: int = 10, tau: float = 0.05) -> torch.Tensor:
@@ -31,6 +33,8 @@ class MHCConfig:
     sinkhorn_iters: int = 10
     tau: float = 0.05
     dropout: float = 0.0
+    identity_mix: bool = True
+    alpha_init: float = 0.01
 
 
 class MHCWrapper(nn.Module):
@@ -44,6 +48,8 @@ class MHCWrapper(nn.Module):
         tau: float,
         dropout: float = 0.0,
         add_branch_out_to_residual: bool = True,
+        identity_mix: bool = True,
+        alpha_init: float = 0.01,
     ) -> None:
         super().__init__()
         if num_streams < 1:
@@ -54,6 +60,7 @@ class MHCWrapper(nn.Module):
         self.mhc_tau = float(tau)
         self.dropout = nn.Dropout(dropout)
         self.add_branch_out_to_residual = add_branch_out_to_residual
+        self.identity_mix = identity_mix
 
         init_residual_index = layer_index % num_streams
         init_h_res = torch.full((num_streams, num_streams), -8.0)
@@ -67,6 +74,14 @@ class MHCWrapper(nn.Module):
         if add_branch_out_to_residual:
             self.H_post_logits = nn.Parameter(torch.zeros(1, num_streams))
 
+        if identity_mix:
+            # Learned alpha via sigmoid to keep it in (0, 1)
+            # Initialize so sigmoid(logit) approx alpha_init
+            if alpha_init <= 0 or alpha_init >= 1:
+                raise ValueError("alpha_init must be in (0, 1)")
+            logit_alpha = math.log(alpha_init / (1 - alpha_init))
+            self.H_res_alpha_logit = nn.Parameter(torch.tensor(logit_alpha))
+
     def forward(
         self,
         residuals: torch.Tensor,
@@ -79,9 +94,21 @@ class MHCWrapper(nn.Module):
         if residuals.dim() != 4:
             raise ValueError(f"Expected residuals as (S,T,B,D), got {tuple(residuals.shape)}")
 
-        h_res = sinkhorn_log(self.H_res_logits, num_iters=self.mhc_num_iters, tau=self.mhc_tau)
+        # 1. Project to Doubly Stochastic Matrix
+        S = sinkhorn_log(self.H_res_logits, num_iters=self.mhc_num_iters, tau=self.mhc_tau)
+        
+        # 2. Apply Identity Mix
+        if self.identity_mix:
+            alpha = torch.sigmoid(self.H_res_alpha_logit)
+            I = torch.eye(self.num_streams, device=residuals.device, dtype=residuals.dtype)
+            h_res = (1 - alpha) * I + alpha * S
+        else:
+            h_res = S
+
+        # 3. Residual Mixing
         residuals_out = torch.einsum("sr, s t b d -> r t b d", h_res, residuals)
 
+        # 4. Branch Logic
         h_pre = self.H_pre_logits.softmax(dim=-1)
         branch_input = torch.einsum("vs, s t b d -> v t b d", h_pre, residuals).squeeze(0)
         branch_out = self.branch(
