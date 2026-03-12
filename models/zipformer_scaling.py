@@ -1029,6 +1029,9 @@ class WhiteningPenaltyFunction(torch.autograd.Function):
         (x_orig,) = ctx.saved_tensors
         w = ctx.module
 
+        if random.random() > w.prob:
+            return x_grad, None
+
         try:
             with torch.enable_grad():
                 with torch_autocast(enabled=False):
@@ -1122,7 +1125,7 @@ class Whiten(nn.Module):
         and nothing will happen in backprop.
         """
         grad_scale = float(self.grad_scale)
-        if not x.requires_grad or random.random() > self.prob or grad_scale == 0:
+        if not x.requires_grad or grad_scale == 0:
             return _no_op(x)
         else:
             return WhiteningPenaltyFunction.apply(x, self)

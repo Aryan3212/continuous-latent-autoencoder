@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
-from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
+from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import apply_overrides, load_config
@@ -50,15 +50,18 @@ def iter_embeddings(
     batch_size: int,
     num_workers: int = 0,
 ) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = AudioManifestDataset(
-        ManifestConfig(
-            manifest_path=manifest_path,
+    ds = get_audio_wds(
+        WebDatasetConfig(
+            urls=manifest_path,
             sample_rate=sample_rate,
             segment_seconds=segment_seconds,
             random_crop=False,
+            resampled=False,
+            shuffle_size=0,
         )
     )
-    dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fixed)
+    ds = ds.batched(batch_size, collation_fn=collate_fixed)
+    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=num_workers)
     for batch in dl:
         wav = batch["wav"].to(lm.device)
         h0 = lm.frontend(wav)
@@ -79,15 +82,18 @@ def iter_frame_features(
     num_workers: int = 0,
     use_latent: bool = False, # deprecated
 ) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = AudioManifestDataset(
-        ManifestConfig(
-            manifest_path=manifest_path,
+    ds = get_audio_wds(
+        WebDatasetConfig(
+            urls=manifest_path,
             sample_rate=sample_rate,
             segment_seconds=segment_seconds,
             random_crop=False,
+            resampled=False,
+            shuffle_size=0,
         )
     )
-    dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fixed)
+    ds = ds.batched(batch_size, collation_fn=collate_fixed)
+    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=num_workers)
     for batch in dl:
         wav = batch["wav"].to(lm.device)
         h0 = lm.frontend(wav)

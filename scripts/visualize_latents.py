@@ -5,7 +5,7 @@ import numpy as np
 import pathlib
 import json
 from sklearn.decomposition import PCA
-from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
+from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import load_config
@@ -46,8 +46,9 @@ def main():
     encoder.eval()
 
     # Load Data
-    ds = AudioManifestDataset(ManifestConfig(manifest_path=args.manifest, sample_rate=16000))
-    dl = torch.utils.data.DataLoader(ds, batch_size=32, collate_fn=collate_fixed)
+    ds = get_audio_wds(WebDatasetConfig(urls=args.manifest, sample_rate=16000, random_crop=False))
+    ds = ds.batched(32, collation_fn=collate_fixed)
+    dl = torch.utils.data.DataLoader(ds, batch_size=None)
 
     latents = []
     

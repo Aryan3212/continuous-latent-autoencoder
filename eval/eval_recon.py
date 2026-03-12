@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 import torch
 
-from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
+from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
 from models.encoder import Encoder, EncoderConfig
@@ -54,15 +54,16 @@ def main() -> None:
     loss_cfg = MultiResSTFTConfig(**cfg["loss"]["stft"])
     stft = MultiResSTFTLoss(loss_cfg).to(device)
 
-    ds = AudioManifestDataset(
-        ManifestConfig(
-            manifest_path=args.manifest,
+    ds = get_audio_wds(
+        WebDatasetConfig(
+            urls=args.manifest,
             sample_rate=int(cfg["data"]["sample_rate"]),
             segment_seconds=seg,
             random_crop=False,
         )
     )
-    dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=collate_fixed)
+    ds = ds.batched(args.batch_size, collation_fn=collate_fixed)
+    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=0)
 
     sums: Dict[str, float] = {"stft": 0.0, "wav_l1": 0.0}
     n = 0

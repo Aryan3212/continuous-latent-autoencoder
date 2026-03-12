@@ -5,11 +5,11 @@ import pathlib
 from typing import List, Dict, Any
 
 def load_manifest(path: str) -> List[Dict[str, Any]]:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 def save_manifest(data: List[Dict[str, Any]], path: str):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
 

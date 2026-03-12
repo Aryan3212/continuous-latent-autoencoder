@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from data.augment import FeatureMaskConfig, MixConfig, WaveAugConfig, apply_feature_mask, apply_waveform_augment, maybe_mix_pair
-from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
+from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
 from models.discriminators import (
@@ -102,6 +102,10 @@ def _primary_logits(e_mix: torch.Tensor, e_a: torch.Tensor, e_b: torch.Tensor) -
 
 
 def main() -> None:
+    # Limit PyTorch to 95% of physical VRAM to prevent WSL2/Windows shared memory slowdowns
+    if torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(0.95, device=0)
+    
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--resume", default=None)
@@ -110,6 +114,10 @@ def main() -> None:
     ap.add_argument("--eval_interval_steps", type=int, default=None)
     ap.add_argument("--save_interval_steps", type=int, default=None)
     ap.add_argument("--run_eval_on_save", action="store_true")
+    ap.add_argument("--profile", action="store_true", help="Enable PyTorch Profiler with W&B")
+    ap.add_argument("--profile_wait", type=int, default=1, help="Steps to wait before profiling")
+    ap.add_argument("--profile_warmup", type=int, default=1, help="Steps to warm up profiler")
+    ap.add_argument("--profile_active", type=int, default=3, help="Steps to actively profile")
     ap.add_argument("overrides", nargs="*")
     args, unknown = ap.parse_known_args()
 
@@ -175,30 +183,29 @@ def main() -> None:
     # Data
     dcfg = cfg["data"]
     if dcfg.get("train_manifest") is None:
-        raise ValueError("Set data.train_manifest=/path/train.jsonl")
+        raise ValueError("Set data.train_manifest to the shard URL pattern (e.g. data/shards/train/train-{0000..0150}.tar)")
     meta_extra = {
         "git_hash": try_git_hash(cwd=str(pathlib.Path(".").resolve())),
         "train_manifest": str(dcfg["train_manifest"]),
-        "train_manifest_sha256": sha256_file(dcfg["train_manifest"]),
         "val_manifest": str(dcfg.get("val_manifest") or ""),
-        "val_manifest_sha256": sha256_file(dcfg["val_manifest"]) if dcfg.get("val_manifest") else "",
     }
     save_run_metadata(str(out_root), cfg, extra=meta_extra)
-    train_ds = AudioManifestDataset(
-        ManifestConfig(
-            manifest_path=dcfg["train_manifest"],
+    train_ds = get_audio_wds(
+        WebDatasetConfig(
+            urls=dcfg["train_manifest"],
             sample_rate=int(dcfg["sample_rate"]),
             segment_seconds=float(dcfg["segment_seconds"]),
+            shuffle_size=int(dcfg.get("shuffle_size", 1000)),
         )
     )
     train_dl = torch.utils.data.DataLoader(
         train_ds,
         batch_size=int(cfg["train"]["batch_size"]),
-        shuffle=True,
         num_workers=int(dcfg.get("num_workers", 4)),
         pin_memory=bool(dcfg.get("pin_memory", True)),
+        persistent_workers=bool(dcfg.get("persistent_workers", False)) if int(dcfg.get("num_workers", 4)) > 0 else False,
         collate_fn=collate_fixed,
-        drop_last=True,
+        # No shuffle=True for IterableDataset
     )
     train_it = iter(train_dl)
 
@@ -246,6 +253,7 @@ def main() -> None:
             channels=int(gan_cfg.get("msd_channels", 16)),
         )
         discriminators = torch.nn.ModuleDict({"mpd": mpd, "msd": msd}).to(device)
+        
         d_optimizer = torch.optim.AdamW(
             discriminators.parameters(),
             lr=float(gan_cfg.get("d_lr", 2.0e-4)),
@@ -342,7 +350,9 @@ def main() -> None:
     max_steps = int(cfg["train"]["max_steps"])
     grad_accum = int(cfg["train"]["grad_accum_steps"])
     grad_clip = float(cfg["optim"]["grad_clip"])
-    val_batches = int(cfg["train"].get("val_batches", 8))
+    val_batches = cfg["train"].get("val_batches")
+    if val_batches is not None:
+        val_batches = int(val_batches)
 
     jcfg = cfg["loss"]["jepa"]
     jepa_w = float(jcfg["weight"])
@@ -376,19 +386,21 @@ def main() -> None:
     def _validate_one() -> Dict[str, float]:
         if not dcfg.get("val_manifest"):
             return {}
-        val_ds = AudioManifestDataset(
-            ManifestConfig(
-                manifest_path=dcfg["val_manifest"],
+        val_ds = get_audio_wds(
+            WebDatasetConfig(
+                urls=dcfg["val_manifest"],
                 sample_rate=int(dcfg["sample_rate"]),
                 segment_seconds=float(dcfg["segment_seconds"]),
+                random_crop=False, # use start crop for validation consistency
+                resampled=False,
+                shuffle_size=0,
             )
         )
+        val_ds = val_ds.batched(int(cfg["train"]["batch_size"]), collation_fn=collate_fixed)
         val_dl = torch.utils.data.DataLoader(
             val_ds,
-            batch_size=int(cfg["train"]["batch_size"]),
-            shuffle=False,
+            batch_size=None,
             num_workers=0,
-            collate_fn=collate_fixed,
         )
         model.eval()
         sums = {"val_stft": 0.0, "val_jepa": 0.0, "val_sig": 0.0}
@@ -410,7 +422,7 @@ def main() -> None:
                 sums["val_jepa"] += float(v_jepa.detach().cpu())
                 sums["val_sig"] += float(v_sig.detach().cpu())
                 n += 1
-                if n >= val_batches:
+                if val_batches is not None and n >= val_batches:
                     break
         model.train()
         return {k: v / max(1, n) for k, v in sums.items()}
@@ -423,19 +435,48 @@ def main() -> None:
         payload.update(extra)
         return payload
 
+    if use_dummy_data:
+        dummy_wav_size = (int(cfg["train"]["batch_size"]), 1, int(dcfg["sample_rate"] * float(dcfg["segment_seconds"])))
+        dummy_wav = torch.randn(dummy_wav_size)
+        print(f"Using dummy data of shape {dummy_wav_size}")
+
+    prof = None
+    if args.profile:
+        import wandb
+        if wandb.run is None:
+            print("Warning: W&B is not initialized, but --profile is enabled. Trace will not be logged to W&B.")
+            handler = None
+        else:
+            handler = wandb.profiler.torch_trace_handler()
+
+        prof = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=args.profile_wait, warmup=args.profile_warmup, active=args.profile_active, repeat=1),
+            on_trace_ready=handler,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        )
+        prof.start()
+
     while step < max_steps:
+        step_start_time = time.perf_counter()
+        
         optimizer.zero_grad(set_to_none=True)
         if gan_enabled and d_optimizer is not None:
             d_optimizer.zero_grad(set_to_none=True)
         total_loss = 0.0
         stats: Dict[str, Any] = {}
+        
+        data_time_total = 0.0
 
         for micro in range(grad_accum):
+            data_start_time = time.perf_counter()
             try:
                 batch = next(train_it)
             except StopIteration:
                 train_it = iter(train_dl)
                 batch = next(train_it)
+            data_time_total += (time.perf_counter() - data_start_time)
 
             wav_a = batch["wav"]  # (B,1,T)
             dataset_names = [m.get("dataset", "unknown") for m in batch["meta"]]
@@ -574,17 +615,11 @@ def main() -> None:
                 }
 
                 # Decoder
-                # We decode from z_a (clean) OR z_mask (aug)?
-                # If we decode z_a -> wav_a, it's standard AE.
-                # If we decode z_mask -> wav_a, it's Denoising AE.
-                # RAE paper usually decodes clean+noise.
-                # LeJEPA paper decodes center (clean).
-                # Let's stick to decoding CLEAN z_a to learn good generator, relying on JEPA to pull z_mask close.
-                # BUT if we want robustness, maybe decode z_aug?
-                # Let's decode z_a (clean) as primary recon task.
                 sigma = _latent_noise_sigma(cfg, step, device)
                 x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
-                l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
+                
+                t_stfts = batch.get("target_stfts")
+                l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True, target_mags=t_stfts)
                 l_stft = l_stft_ps.mean()
                 stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
 
@@ -633,6 +668,7 @@ def main() -> None:
             scaler.scale(loss).backward()
             total_loss += float(loss.detach().cpu())
 
+            sync_start_time = time.perf_counter()
             stats = {
                 "loss": total_loss,
                 "l_stft": float(l_stft.detach().cpu()),
@@ -643,6 +679,7 @@ def main() -> None:
                 "sigma": float(sigma.detach().cpu()),
                 "z_mean": float(z_a.mean().detach().cpu()),
                 "z_std": float(z_a.std(unbiased=False).detach().cpu()),
+                "vram_gb": float(torch.cuda.max_memory_allocated() / 1e9) if torch.cuda.is_available() else 0.0,
             }
             stats.update({k: float(v.cpu()) for k, v in stft_stats.items()})
             stats.update({k: float(v.cpu()) for k, v in sig_stats.items()})
@@ -677,6 +714,9 @@ def main() -> None:
                     stats[f"loss_stft/{ds_name}"] = float(l_stft_ps[idx_t].mean().detach().cpu())
                     stats[f"loss_wav/{ds_name}"] = float(l_wav_ps[idx_t].mean().detach().cpu())
                     stats[f"loss_jepa/{ds_name}"] = float(l_jepa_mask_ps[idx_t].mean().detach().cpu())
+            
+            sync_end_time = time.perf_counter()
+            stats["time/sync_s"] = sync_end_time - sync_start_time
 
         # Optimize
         if grad_clip and grad_clip > 0:
@@ -689,6 +729,11 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
             scaler.step(d_optimizer)
         scaler.update()
+
+        step_time = time.perf_counter() - step_start_time
+        stats["time/step_s"] = step_time
+        stats["time/data_s"] = data_time_total
+        stats["time/model_s"] = step_time - data_time_total
 
         step += 1
         if scheduler is not None:
@@ -811,6 +856,12 @@ def main() -> None:
                     )
 
             # Probes are triggered on save (run_eval_on_save), not on eval.
+
+        if prof is not None:
+            prof.step()
+
+    if prof is not None:
+        prof.stop()
 
     save_checkpoint(
         str(ckpt_dir / "last.pt"),

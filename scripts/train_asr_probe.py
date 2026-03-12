@@ -7,7 +7,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
+from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from eval.common import load_frozen_encoder
 from jiwer import wer
 from typing import List, Dict, Tuple, Any
@@ -88,19 +88,23 @@ def main():
 
     # Dataset
     d_cfg = lm.cfg["data"]
-    ds_train = AudioManifestDataset(ManifestConfig(
-        manifest_path=args.train_manifest,
+    ds_train = get_audio_wds(WebDatasetConfig(
+        urls=args.train_manifest,
         sample_rate=d_cfg["sample_rate"],
         segment_seconds=d_cfg["segment_seconds"],
     ))
-    dl_train = DataLoader(ds_train, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fixed, num_workers=4, pin_memory=True)
+    ds_train = ds_train.batched(args.batch_size, collation_fn=collate_fixed)
+    dl_train = DataLoader(ds_train, batch_size=None, num_workers=4, pin_memory=True)
 
-    ds_val = AudioManifestDataset(ManifestConfig(
-        manifest_path=args.val_manifest,
+    ds_val = get_audio_wds(WebDatasetConfig(
+        urls=args.val_manifest,
         sample_rate=d_cfg["sample_rate"],
         segment_seconds=d_cfg["segment_seconds"],
+        resampled=False,
+        shuffle_size=0,
     ))
-    dl_val = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fixed, num_workers=4)
+    ds_val = ds_val.batched(args.batch_size, collation_fn=collate_fixed)
+    dl_val = DataLoader(ds_val, batch_size=None, num_workers=4)
 
     # ASR Head
     d_model = lm.cfg["model"]["encoder"]["d_model"]

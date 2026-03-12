@@ -3,7 +3,7 @@ import pathlib
 
 import torch
 
-from data.dataset import AudioManifestDataset, ManifestConfig, collate_fixed
+from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import apply_overrides, load_config
@@ -34,20 +34,19 @@ def main() -> None:
 
     dcfg = cfg["data"]
     if dcfg.get("train_manifest") is None:
-        raise ValueError("Set data.train_manifest=/path/train.jsonl")
-    ds = AudioManifestDataset(
-        ManifestConfig(
-            manifest_path=dcfg["train_manifest"],
+        raise ValueError("Set data.train_manifest=data/shards/train/train-{0000..0150}.tar")
+    ds = get_audio_wds(
+        WebDatasetConfig(
+            urls=dcfg["train_manifest"],
             sample_rate=int(dcfg["sample_rate"]),
             segment_seconds=float(dcfg["segment_seconds"]),
         )
     )
+    ds = ds.batched(int(cfg["train"]["batch_size"]), collation_fn=collate_fixed)
     dl = torch.utils.data.DataLoader(
         ds,
-        batch_size=int(cfg["train"]["batch_size"]),
-        shuffle=False,
+        batch_size=None,
         num_workers=0,
-        collate_fn=collate_fixed,
     )
 
     total = 0
