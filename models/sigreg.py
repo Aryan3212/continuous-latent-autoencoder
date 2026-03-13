@@ -66,10 +66,12 @@ class SlicingUnivariateTest(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            global_step_sync = _all_reduce(self.global_step.clone(), op="MAX")
-            seed = int(global_step_sync.item())
-            g = self._get_generator(x.device, seed)
-            a = torch.randn(x.size(-1), self.num_slices, device=x.device, generator=g)
+            a = torch.randn(x.size(-1), self.num_slices, device=x.device)
+            # WARNING: dist.broadcast is a blocking collective operation.
+            # If DDP ranks become desynchronized (e.g., uneven batches at epoch end),
+            # this will deadlock. Ensure DataLoader or DistributedSampler uses drop_last=True!
+            if dist.is_available() and dist.is_initialized():
+                dist.broadcast(a, src=0)
             a /= a.norm(p=2, dim=0)
             self.global_step.add_(1)
 

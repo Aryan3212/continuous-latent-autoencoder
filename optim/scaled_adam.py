@@ -54,8 +54,12 @@ class ScaledAdam(Optimizer):
                 grad = p.grad
                 if grad.is_sparse:
                     raise RuntimeError("ScaledAdam does not support sparse gradients")
-                if clipping_scale != 1.0:
+                
+                if isinstance(clipping_scale, float) and clipping_scale == 1.0:
+                    pass
+                else:
                     grad = grad.mul(clipping_scale)
+                    
                 state = self.state[p]
                 if len(state) == 0:
                     state["step"] = 0
@@ -194,7 +198,7 @@ class ScaledAdam(Optimizer):
 
         irregular_estimate_steps = [i for i in (10, 20, 40) if i < clipping_update_period]
         if step % clipping_update_period == 0 or step in irregular_estimate_steps:
-            sorted_norms = model_norms.sort()[0].to("cpu")
+            sorted_norms = model_norms.sort()[0]
             if step in irregular_estimate_steps:
                 sorted_norms = sorted_norms[-step:]
             num_norms = sorted_norms.numel()
@@ -203,18 +207,17 @@ class ScaledAdam(Optimizer):
             if step in irregular_estimate_steps:
                 threshold = threshold * 2.0
             first_state["model_norm_threshold"] = threshold
-            first_state["num_clipped"] = 0
+            first_state["num_clipped"] = torch.tensor(0, dtype=torch.long, device=first_param.device)
 
         model_norm_threshold = first_state.get("model_norm_threshold")
         if model_norm_threshold is None:
             return 1.0
-        ans = min(1.0, (model_norm_threshold / (tot_norm + 1.0e-20)).item())
-        if ans != ans:
-            ans = 0.0
-        if ans < 1.0:
-            first_state["num_clipped"] = first_state.get("num_clipped", 0) + 1
-        if ans == 0.0:
-            for p in group["params"]:
-                if p.grad is not None:
-                    p.grad.zero_()
+        
+        ans = torch.clamp(model_norm_threshold / (tot_norm + 1.0e-20), max=1.0)
+        ans = torch.nan_to_num(ans, nan=0.0)
+
+        is_clipped = (ans < 1.0).long()
+        num_clipped = first_state.get("num_clipped", torch.tensor(0, dtype=torch.long, device=first_param.device))
+        first_state["num_clipped"] = num_clipped + is_clipped
+
         return ans

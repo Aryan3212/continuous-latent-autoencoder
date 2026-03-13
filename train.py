@@ -102,6 +102,10 @@ def _primary_logits(e_mix: torch.Tensor, e_a: torch.Tensor, e_b: torch.Tensor) -
 
 
 def main() -> None:
+    # Hardware acceleration flags
+    torch.set_float32_matmul_precision('high')
+    torch.backends.cudnn.benchmark = True
+
     # Limit PyTorch to 95% of physical VRAM to prevent WSL2/Windows shared memory slowdowns
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(0.95, device=0)
@@ -115,9 +119,9 @@ def main() -> None:
     ap.add_argument("--save_interval_steps", type=int, default=None)
     ap.add_argument("--run_eval_on_save", action="store_true")
     ap.add_argument("--profile", action="store_true", help="Enable PyTorch Profiler with W&B")
-    ap.add_argument("--profile_wait", type=int, default=1, help="Steps to wait before profiling")
-    ap.add_argument("--profile_warmup", type=int, default=1, help="Steps to warm up profiler")
-    ap.add_argument("--profile_active", type=int, default=3, help="Steps to actively profile")
+    ap.add_argument("--profile_wait", type=int, default=0, help="Steps to wait before profiling")
+    ap.add_argument("--profile_warmup", type=int, default=0, help="Steps to warm up profiler")
+    ap.add_argument("--profile_active", type=int, default=1, help="Steps to actively profile")
     ap.add_argument("overrides", nargs="*")
     args, unknown = ap.parse_known_args()
 
@@ -205,13 +209,12 @@ def main() -> None:
         pin_memory=bool(dcfg.get("pin_memory", True)),
         persistent_workers=bool(dcfg.get("persistent_workers", False)) if int(dcfg.get("num_workers", 4)) > 0 else False,
         collate_fn=collate_fixed,
-        # No shuffle=True for IterableDataset
+        drop_last=True,
     )
-    train_it = iter(train_dl)
+    # Note: WebDataset natively handles Distributed Data Parallel sharding via worker and node splitting.
+    # We do NOT use DistributedSampler as IterableDatasets do not support length or explicit indices.
 
-    # Optional second iterator for mixing (pulls different samples cheaply).
     mix_cfg = MixConfig(**(cfg.get("aug", {}).get("mix", {}) or {}))
-    mix_it = iter(train_dl)
 
     # Model
     mcfg = cfg["model"]
@@ -435,17 +438,12 @@ def main() -> None:
         payload.update(extra)
         return payload
 
-    if use_dummy_data:
-        dummy_wav_size = (int(cfg["train"]["batch_size"]), 1, int(dcfg["sample_rate"] * float(dcfg["segment_seconds"])))
-        dummy_wav = torch.randn(dummy_wav_size)
-        print(f"Using dummy data of shape {dummy_wav_size}")
-
     prof = None
     if args.profile:
         import wandb
         if wandb.run is None:
-            print("Warning: W&B is not initialized, but --profile is enabled. Trace will not be logged to W&B.")
-            handler = None
+            print("Warning: W&B is not initialized, logging profiler trace to local './profiler_logs' directory.")
+            handler = torch.profiler.tensorboard_trace_handler('./profiler_logs')
         else:
             handler = wandb.profiler.torch_trace_handler()
 
@@ -458,267 +456,290 @@ def main() -> None:
         )
         prof.start()
 
-    while step < max_steps:
-        step_start_time = time.perf_counter()
+    accum_stats: Dict[str, torch.Tensor] = {}
+
+    epochs = max_steps  # Safe upper bound since we break at max_steps
+    for epoch in range(epochs):
+        # WebDataset handles DDP sharding via node splits and worker splits intrinsically,
+        # so we do not use a DistributedSampler here.
         
-        optimizer.zero_grad(set_to_none=True)
-        if gan_enabled and d_optimizer is not None:
-            d_optimizer.zero_grad(set_to_none=True)
-        total_loss = 0.0
-        stats: Dict[str, Any] = {}
+        train_it = iter(train_dl)
+        mix_it = iter(train_dl)
         
-        data_time_total = 0.0
-
-        for micro in range(grad_accum):
-            data_start_time = time.perf_counter()
-            try:
-                batch = next(train_it)
-            except StopIteration:
-                train_it = iter(train_dl)
-                batch = next(train_it)
-            data_time_total += (time.perf_counter() - data_start_time)
-
-            wav_a = batch["wav"]  # (B,1,T)
-            dataset_names = [m.get("dataset", "unknown") for m in batch["meta"]]
-
-            # Optional mix view (Exp1+)
-            try:
-                batch_b = next(mix_it)
-            except StopIteration:
-                mix_it = iter(train_dl)
-                batch_b = next(mix_it)
-            wav_b = batch_b["wav"]
-
-            # Build mix waveform + per-sample primary target when enabled.
-            mixed_mask = torch.zeros((wav_a.size(0),), dtype=torch.bool)
-            primary_idx = torch.zeros((wav_a.size(0),), dtype=torch.long)
-            snr_db_vals = torch.zeros((wav_a.size(0),), dtype=torch.float32)
-            wav_mix = wav_a
-            wav_tgt = wav_a
-            if mix_cfg.enabled and mix_cfg.prob > 0.0:
-                wav_mix_list = []
-                wav_tgt_list = []
-                for i in range(wav_a.size(0)):
-                    y, did, sdb, pidx = maybe_mix_pair(wav_a[i, 0], wav_b[i, 0], mix_cfg)
-                    mixed_mask[i] = did
-                    primary_idx[i] = pidx
-                    snr_db_vals[i] = float(sdb)
-                    wav_mix_list.append(y)
-                    wav_tgt_list.append(wav_a[i, 0] if pidx == 0 else wav_b[i, 0])
-                wav_mix = torch.stack(wav_mix_list, dim=0).unsqueeze(1)
-                wav_tgt = torch.stack(wav_tgt_list, dim=0).unsqueeze(1)
-
-            wav_a = wav_a.to(device, non_blocking=True)
-            wav_b = wav_b.to(device, non_blocking=True)
-            wav_mix = wav_mix.to(device, non_blocking=True)
-            wav_tgt = wav_tgt.to(device, non_blocking=True)
-            mixed_mask = mixed_mask.to(device)
-            primary_idx = primary_idx.to(device)
-            snr_db_vals = snr_db_vals.to(device)
-
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                # Clean view (V0) - NO augmentation on target, but maybe on input if we want denoising?
-                # The user asked for "augmentations".
-                # Standard RAE/LeJEPA: "View" is augmented, "Center" is clean(er).
-                # Current code: _encode(model, wav_a) -> z_a.
-                # If we want Denoising, we should encode augmented, decode to clean.
-                # But LeJEPA logic in this file: z_mask matches z_a.
-                # If we augment wav_a, z_a changes.
-                
-                # Let's apply augmentation to get wav_aug.
-                # wav_a is CLEAN target.
-                wav_aug = apply_waveform_augment(wav_a, int(dcfg["sample_rate"]), wave_aug_cfg)
-                
-                # Encode Clean (Center)
-                h0_a, hE_a, z_a, stats_a = _encode(model, wav_a)
-                
-                # Encode Augmented (View 1)
-                # If we just want simple denoising, we can use wav_aug as input for "clean view" path
-                # but "clean view" is used as target for reconstruction in current code: 
-                # x_hat = _decode(z_a) -> loss(x_hat, wav_a)
-                
-                # To implement "Denoising", we should encode wav_aug -> z_aug -> decode -> wav_a
-                # But we also have LeJEPA z_aug vs z_clean.
-                
-                # Let's define:
-                # Center = Clean
-                # View = Augmented + Masked
-                
-                h0_aug, hE_aug, z_aug, stats_aug = _encode(model, wav_aug)
-
-                # Masked feature view (V1) - applied to Augmented view features
-                h0_masked = apply_feature_mask(h0_aug, feat_mask_cfg)
-                hE_mask = model["encoder"](h0_masked)
-                z_mask = hE_mask
-
-                # LeJEPA: masked+augmented view should match clean center
-                if use_lejepa_on_hE:
-                    l_jepa_mask_ps = _lejepa_loss(hE_a, hE_mask, return_per_sample=True)
-                else:
-                    l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
-                l_jepa_mask = l_jepa_mask_ps.mean()
-                
-                # KL Divergence (on CLEAN or AUG? Usually on the one used for gen/prior. Clean makes sense for "prior" matching)
-                l_kl = torch.tensor(0.0, device=device)
-                if "mu" in stats_a and "logvar" in stats_a and float(cfg["loss"].get("kl_weight", 0.0)) > 0:
-                    mu, logvar = stats_a["mu"], stats_a["logvar"]
-                    l_kl_ps = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean(dim=-1)
-                    l_kl = l_kl_ps.mean()
-
-                l_jepa_mix = torch.tensor(0.0, device=device)
-                l_primary = torch.tensor(0.0, device=device)
-                l_stft_mix = torch.tensor(0.0, device=device)
-                l_primary = torch.tensor(0.0, device=device)
-                l_stft_mix = torch.tensor(0.0, device=device)
-
-                # Exp1+: mix view (V2)
-                if mix_cfg.enabled and bool(mixed_mask.any().item()):
-                    _, _, z_b, _ = _encode(model, wav_b)
-                    _, _, z_mix, _ = _encode(model, wav_mix)
-
-                    z_tgt_mix = z_a.clone()
-                    z_tgt_mix[primary_idx == 1] = z_b[primary_idx == 1]
-                    l_jepa_mix = _lejepa_loss(z_tgt_mix[mixed_mask], z_mix[mixed_mask])
-
-                    if mix_recon_enabled and step >= mix_recon_start:
-                        sigma_mix = _latent_noise_sigma(cfg, step, device)
-                        x_hat_mix = _decode(
-                            model, z_mix[mixed_mask], target_len=wav_tgt.size(-1), sigma=sigma_mix
-                        )
-                        l_stft_mix, _ = stft(x_hat_mix, wav_tgt[mixed_mask])
-
-                    if primary_enabled:
-                        e_mix = _pool(z_mix[mixed_mask])
-                        e_a = _pool(z_a[mixed_mask])
-                        e_b = _pool(z_b[mixed_mask])
-                        logits = _primary_logits(e_mix, e_a, e_b)
-                        l_primary = F.cross_entropy(logits, primary_idx[mixed_mask])
-
-                # SIGReg on clean embeddings
-                sig_losses = []
-                l_sig_a, sig_stats_a = sigreg(z_a, step=step)
-                sig_losses.append(l_sig_a)
-                # SIGReg on masked/augmented embeddings? Usually just one view is enough or both.
-                # Let's keep it on both to ensure isotropy everywhere.
-                l_sig_m, sig_stats_m = sigreg(z_mask, step=step)
-                sig_losses.append(l_sig_m)
-                if mix_cfg.enabled and bool(mixed_mask.any().item()):
-                    l_sig_mix, _ = sigreg(z_mix[mixed_mask], step=step)
-                    sig_losses.append(l_sig_mix)
-                l_sig = torch.stack(sig_losses).mean()
-                sig_stats = {
-                    "sigreg_clean": sig_stats_a["sigreg_loss"],
-                    "sigreg_masked": sig_stats_m["sigreg_loss"],
-                    "z_var_min": sig_stats_a["z_var_min"],
-                    "z_var_med": sig_stats_a["z_var_med"],
-                    "z_var_max": sig_stats_a["z_var_max"],
-                }
-
-                # Decoder
-                sigma = _latent_noise_sigma(cfg, step, device)
-                x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
-                
-                t_stfts = batch.get("target_stfts")
-                l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True, target_mags=t_stfts)
-                l_stft = l_stft_ps.mean()
-                stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
-
-                l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
-                l_wav = l_wav_ps.mean()
-
-                l_g_adv = torch.tensor(0.0, device=device)
-                l_fm = torch.tensor(0.0, device=device)
-                l_d = torch.tensor(0.0, device=device)
-                if gan_enabled and discriminators is not None and step >= gan_start:
-                    _set_requires_grad(discriminators, True)
-                    d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
-                    d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat.detach())
-                    d_real_msd, fmap_real_msd = discriminators["msd"](wav_a)
-                    d_fake_msd, fmap_fake_msd = discriminators["msd"](x_hat.detach())
-                    l_d = discriminator_loss(d_real_mpd, d_fake_mpd) + discriminator_loss(
-                        d_real_msd, d_fake_msd
-                    )
-                    scaler.scale(l_d / grad_accum).backward()
-                    _set_requires_grad(discriminators, False)
-                    d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
-                    d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
-                    with torch.no_grad():
-                        d_real_mpd_g, fmap_real_mpd_g = discriminators["mpd"](wav_a)
-                        d_real_msd_g, fmap_real_msd_g = discriminators["msd"](wav_a)
-                    l_g_adv = generator_loss(d_fake_mpd_g) + generator_loss(d_fake_msd_g)
-                    l_fm = feature_matching_loss(fmap_real_mpd_g, fmap_fake_mpd_g) + feature_matching_loss(
-                        fmap_real_msd_g, fmap_fake_msd_g
-                    )
-
-                l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
-
-                loss = (
-                    stft_w * l_stft
-                    + wav_l1_w * l_wav
-                    + jepa_w * l_jepa
-                    + sig_w * l_sig
-                    + g_adv_w * l_g_adv
-                    + fm_w * l_fm
-                    + kl_weight * l_kl
-                    + (mix_recon_w * l_stft_mix if (mix_recon_enabled and step >= mix_recon_start) else 0.0)
-                    + (primary_w * l_primary if primary_enabled else 0.0)
-                )
-                loss = loss / grad_accum
-
-            scaler.scale(loss).backward()
-            total_loss += float(loss.detach().cpu())
-
-            sync_start_time = time.perf_counter()
-            stats = {
-                "loss": total_loss,
-                "l_stft": float(l_stft.detach().cpu()),
-                "l_wav": float(l_wav.detach().cpu()),
-                "l_jepa": float(l_jepa.detach().cpu()),
-                "l_jepa_mask": float(l_jepa_mask.detach().cpu()),
-                "l_sig": float(l_sig.detach().cpu()),
-                "sigma": float(sigma.detach().cpu()),
-                "z_mean": float(z_a.mean().detach().cpu()),
-                "z_std": float(z_a.std(unbiased=False).detach().cpu()),
-                "vram_gb": float(torch.cuda.max_memory_allocated() / 1e9) if torch.cuda.is_available() else 0.0,
-            }
-            stats.update({k: float(v.cpu()) for k, v in stft_stats.items()})
-            stats.update({k: float(v.cpu()) for k, v in sig_stats.items()})
-
-            if mix_cfg.enabled:
-                stats.update({
-                    "l_jepa_mix": float(l_jepa_mix.detach().cpu()),
-                    "l_stft_mix": float(l_stft_mix.detach().cpu()),
-                    "mixed_frac": float(mixed_mask.float().mean().detach().cpu()),
-                    "snr_db_mean": float(snr_db_vals[mixed_mask].mean().detach().cpu()) if bool(mixed_mask.any().item()) else 0.0,
-                })
-                if primary_enabled:
-                    stats["l_primary"] = float(l_primary.detach().cpu())
-
-            if gan_enabled:
-                stats.update({
-                    "l_g_adv": float(l_g_adv.detach().cpu()),
-                    "l_fm": float(l_fm.detach().cpu()),
-                    "l_d": float(l_d.detach().cpu()),
-                })
-
-            if kl_weight > 0:
-                stats["l_kl"] = float(l_kl.detach().cpu())
-
-            unique_ds = set(dataset_names)
-            if len(unique_ds) > 1:
-                for ds_name in unique_ds:
-                    indices = [i for i, n in enumerate(dataset_names) if n == ds_name]
-                    if not indices:
-                        continue
-                    idx_t = torch.tensor(indices, device=device)
-                    stats[f"loss_stft/{ds_name}"] = float(l_stft_ps[idx_t].mean().detach().cpu())
-                    stats[f"loss_wav/{ds_name}"] = float(l_wav_ps[idx_t].mean().detach().cpu())
-                    stats[f"loss_jepa/{ds_name}"] = float(l_jepa_mask_ps[idx_t].mean().detach().cpu())
+        epoch_done = False
+        while not epoch_done and step < max_steps:
+            print(f">>> START STEP {step}", flush=True)
+            optimizer.zero_grad(set_to_none=True)
+            if gan_enabled and d_optimizer is not None:
+                d_optimizer.zero_grad(set_to_none=True)
             
-            sync_end_time = time.perf_counter()
-            stats["time/sync_s"] = sync_end_time - sync_start_time
+            total_loss = torch.tensor(0.0, device=device)
+            stats: Dict[str, Any] = {}
+
+            microbatches = []
+            for micro in range(grad_accum):
+                print(f"DEBUG: Loading microbatch {micro}/{grad_accum}", flush=True)
+                try:
+                    batch = next(train_it)
+                except StopIteration:
+                    epoch_done = True
+                    break
+                
+                try:
+                    batch_b = next(mix_it)
+                except StopIteration:
+                    mix_it = iter(train_dl)
+                    batch_b = next(mix_it)
+                
+                microbatches.append((batch, batch_b))
+
+            if not microbatches:
+                break
+
+            for i_mb, (batch, batch_b) in enumerate(microbatches):
+                print(f"DEBUG: Processing microbatch {i_mb}/{grad_accum}", flush=True)
+                wav_a = batch["wav"]  # (B,1,T)
+                dataset_names = [m.get("dataset", "unknown") for m in batch["meta"]]
+                wav_b = batch_b["wav"]
+
+                # Build mix waveform + per-sample primary target when enabled.
+                mixed_mask = torch.zeros((wav_a.size(0),), dtype=torch.bool, device=device)
+                primary_idx = torch.zeros((wav_a.size(0),), dtype=torch.long, device=device)
+                snr_db_vals = torch.zeros((wav_a.size(0),), dtype=torch.float32, device=device)
+                wav_mix = wav_a
+                wav_tgt = wav_a
+                has_mix = False
+
+                if mix_cfg.enabled and mix_cfg.prob > 0.0:
+                    wav_mix_list = []
+                    wav_tgt_list = []
+                    for i in range(wav_a.size(0)):
+                        y, did, sdb, pidx = maybe_mix_pair(wav_a[i, 0], wav_b[i, 0], mix_cfg)
+                        if did:
+                            has_mix = True
+                        mixed_mask[i] = did
+                        primary_idx[i] = pidx
+                        snr_db_vals[i] = float(sdb)
+                        wav_mix_list.append(y)
+                        wav_tgt_list.append(wav_a[i, 0] if pidx == 0 else wav_b[i, 0])
+                    wav_mix = torch.stack(wav_mix_list, dim=0).unsqueeze(1).to(device, non_blocking=True)
+                    wav_tgt = torch.stack(wav_tgt_list, dim=0).unsqueeze(1).to(device, non_blocking=True)
+                else:
+                    wav_mix = wav_mix.to(device, non_blocking=True)
+                    wav_tgt = wav_tgt.to(device, non_blocking=True)
+
+                wav_a = wav_a.to(device, non_blocking=True)
+                wav_b = wav_b.to(device, non_blocking=True)
+
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    # Clean view (V0) - NO augmentation on target, but maybe on input if we want denoising?
+                    # The user asked for "augmentations".
+                    # Standard RAE/LeJEPA: "View" is augmented, "Center" is clean(er).
+                    # Current code: _encode(model, wav_a) -> z_a.
+                    # If we want Denoising, we should encode augmented, decode to clean.
+                    # But LeJEPA logic in this file: z_mask matches z_a.
+                    # If we augment wav_a, z_a changes.
+                
+                    # Let's apply augmentation to get wav_aug.
+                    # wav_a is CLEAN target.
+                    wav_aug = apply_waveform_augment(wav_a, int(dcfg["sample_rate"]), wave_aug_cfg)
+                
+                    # Encode Clean (Center)
+                    h0_a, hE_a, z_a, stats_a = _encode(model, wav_a)
+                
+                    # Encode Augmented (View 1)
+                    # If we just want simple denoising, we can use wav_aug as input for "clean view" path
+                    # but "clean view" is used as target for reconstruction in current code: 
+                    # x_hat = _decode(z_a) -> loss(x_hat, wav_a)
+                
+                    # To implement "Denoising", we should encode wav_aug -> z_aug -> decode -> wav_a
+                    # But we also have LeJEPA z_aug vs z_clean.
+                
+                    # Let's define:
+                    # Center = Clean
+                    # View = Augmented + Masked
+                
+                    h0_aug, hE_aug, z_aug, stats_aug = _encode(model, wav_aug)
+
+                    # Masked feature view (V1) - applied to Augmented view features
+                    h0_masked = apply_feature_mask(h0_aug, feat_mask_cfg)
+                    hE_mask = model["encoder"](h0_masked)
+                    z_mask = hE_mask
+
+                    # LeJEPA: masked+augmented view should match clean center
+                    if use_lejepa_on_hE:
+                        l_jepa_mask_ps = _lejepa_loss(hE_a, hE_mask, return_per_sample=True)
+                    else:
+                        l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
+                    l_jepa_mask = l_jepa_mask_ps.mean()
+                
+                    # KL Divergence (on CLEAN or AUG? Usually on the one used for gen/prior. Clean makes sense for "prior" matching)
+                    l_kl = torch.tensor(0.0, device=device)
+                    if "mu" in stats_a and "logvar" in stats_a and float(cfg["loss"].get("kl_weight", 0.0)) > 0:
+                        mu, logvar = stats_a["mu"], stats_a["logvar"]
+                        l_kl_ps = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean(dim=-1)
+                        l_kl = l_kl_ps.mean()
+
+                    l_jepa_mix = torch.tensor(0.0, device=device)
+                    l_primary = torch.tensor(0.0, device=device)
+                    l_stft_mix = torch.tensor(0.0, device=device)
+                    l_primary = torch.tensor(0.0, device=device)
+                    l_stft_mix = torch.tensor(0.0, device=device)
+
+                    # Exp1+: mix view (V2)
+                    if mix_cfg.enabled and has_mix:
+                        _, _, z_b, _ = _encode(model, wav_b)
+                        _, _, z_mix, _ = _encode(model, wav_mix)
+
+                        pidx_view = primary_idx.view(-1, *([1]*(z_a.ndim - 1)))
+                        z_tgt_mix = torch.where(pidx_view == 1, z_b, z_a)
+
+                        mix_mask_f = mixed_mask.float()
+                        mix_mask_sum = mix_mask_f.sum().clamp(min=1e-8)
+
+                        l_jepa_mix_ps = _lejepa_loss(z_tgt_mix, z_mix, return_per_sample=True)
+                        l_jepa_mix = (l_jepa_mix_ps * mix_mask_f).sum() / mix_mask_sum
+
+                        if mix_recon_enabled and step >= mix_recon_start:
+                            sigma_mix = _latent_noise_sigma(cfg, step, device)
+                            x_hat_mix = _decode(
+                                model, z_mix, target_len=wav_tgt.size(-1), sigma=sigma_mix
+                            )
+                            l_stft_mix_ps, _ = stft(x_hat_mix, wav_tgt, return_per_sample=True)
+                            l_stft_mix = (l_stft_mix_ps * mix_mask_f).sum() / mix_mask_sum
+
+                        if primary_enabled:
+                            e_mix = _pool(z_mix)
+                            e_a = _pool(z_a)
+                            e_b = _pool(z_b)
+                            logits = _primary_logits(e_mix, e_a, e_b)
+                            l_primary_ps = F.cross_entropy(logits, primary_idx, reduction='none')
+                            l_primary = (l_primary_ps * mix_mask_f).sum() / mix_mask_sum
+
+                    # SIGReg on clean embeddings
+                    sig_losses = []
+                    l_sig_a, sig_stats_a = sigreg(z_a, step=step)
+                    sig_losses.append(l_sig_a)
+                    # SIGReg on masked/augmented embeddings? Usually just one view is enough or both.
+                    # Let's keep it on both to ensure isotropy everywhere.
+                    l_sig_m, sig_stats_m = sigreg(z_mask, step=step)
+                    sig_losses.append(l_sig_m)
+                    if mix_cfg.enabled and has_mix:
+                        l_sig_mix, _ = sigreg(z_mix, step=step)
+                        sig_losses.append(l_sig_mix)
+                    l_sig = torch.stack(sig_losses).mean()
+                    sig_stats = {
+                        "sigreg_clean": sig_stats_a["sigreg_loss"],
+                        "sigreg_masked": sig_stats_m["sigreg_loss"],
+                        "z_var_min": sig_stats_a["z_var_min"],
+                        "z_var_med": sig_stats_a["z_var_med"],
+                        "z_var_max": sig_stats_a["z_var_max"],
+                    }
+
+                    # Decoder
+                    sigma = _latent_noise_sigma(cfg, step, device)
+                    x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
+                
+                    t_stfts = batch.get("target_stfts")
+                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True, target_mags=t_stfts)
+                    l_stft = l_stft_ps.mean()
+                    stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
+
+                    l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
+                    l_wav = l_wav_ps.mean()
+
+                    l_g_adv = torch.tensor(0.0, device=device)
+                    l_fm = torch.tensor(0.0, device=device)
+                    l_d = torch.tensor(0.0, device=device)
+                    if gan_enabled and discriminators is not None and step >= gan_start:
+                        _set_requires_grad(discriminators, True)
+                        d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
+                        d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat.detach())
+                        d_real_msd, fmap_real_msd = discriminators["msd"](wav_a)
+                        d_fake_msd, fmap_fake_msd = discriminators["msd"](x_hat.detach())
+                        l_d = discriminator_loss(d_real_mpd, d_fake_mpd) + discriminator_loss(
+                            d_real_msd, d_fake_msd
+                        )
+                        scaler.scale(l_d / grad_accum).backward()
+                        _set_requires_grad(discriminators, False)
+                        d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
+                        d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
+                        with torch.no_grad():
+                            d_real_mpd_g, fmap_real_mpd_g = discriminators["mpd"](wav_a)
+                            d_real_msd_g, fmap_real_msd_g = discriminators["msd"](wav_a)
+                        l_g_adv = generator_loss(d_fake_mpd_g) + generator_loss(d_fake_msd_g)
+                        l_fm = feature_matching_loss(fmap_real_mpd_g, fmap_fake_mpd_g) + feature_matching_loss(
+                            fmap_real_msd_g, fmap_fake_msd_g
+                        )
+
+                    l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
+
+                    loss = (
+                        stft_w * l_stft
+                        + wav_l1_w * l_wav
+                        + jepa_w * l_jepa
+                        + sig_w * l_sig
+                        + g_adv_w * l_g_adv
+                        + fm_w * l_fm
+                        + kl_weight * l_kl
+                        + (mix_recon_w * l_stft_mix if (mix_recon_enabled and step >= mix_recon_start) else 0.0)
+                        + (primary_w * l_primary if primary_enabled else 0.0)
+                    )
+                    loss = loss / grad_accum
+
+                print(f"DEBUG: Backward pass start", flush=True)
+                scaler.scale(loss).backward()
+                print(f"DEBUG: Backward pass end", flush=True)
+                total_loss = total_loss + loss.detach()
+
+                stats = {
+                    "loss": total_loss,
+                    "l_stft": l_stft.detach(),
+                    "l_wav": l_wav.detach(),
+                    "l_jepa": l_jepa.detach(),
+                    "l_jepa_mask": l_jepa_mask.detach(),
+                    "l_sig": l_sig.detach(),
+                    "sigma": sigma.detach(),
+                    "z_mean": z_a.mean().detach(),
+                    "z_std": z_a.std(unbiased=False).detach(),
+                    "vram_gb": torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
+                }
+                stats.update({k: v.detach() for k, v in stft_stats.items()})
+                stats.update({k: v.detach() for k, v in sig_stats.items()})
+
+                if mix_cfg.enabled:
+                    stats.update({
+                        "l_jepa_mix": l_jepa_mix.detach(),
+                        "l_stft_mix": l_stft_mix.detach(),
+                        "mixed_frac": mixed_mask.float().mean().detach(),
+                        "snr_db_mean": (snr_db_vals * mixed_mask.float()).sum().detach() / mixed_mask.float().sum().detach().clamp(min=1e-8),
+                    })
+                    if primary_enabled:
+                        stats["l_primary"] = l_primary.detach()
+
+                if gan_enabled:
+                    stats.update({
+                        "l_g_adv": l_g_adv.detach(),
+                        "l_fm": l_fm.detach(),
+                        "l_d": l_d.detach(),
+                    })
+
+                if kl_weight > 0:
+                    stats["l_kl"] = l_kl.detach()
+
+                unique_ds = set(dataset_names)
+                if len(unique_ds) > 1:
+                    for ds_name in unique_ds:
+                        indices = [i for i, n in enumerate(dataset_names) if n == ds_name]
+                        if not indices:
+                            continue
+                        idx_t = torch.tensor(indices, device=device)
+                        stats[f"loss_stft/{ds_name}"] = l_stft_ps[idx_t].mean().detach()
+                        stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
+                        stats[f"loss_jepa/{ds_name}"] = l_jepa_mask_ps[idx_t].mean().detach()
 
         # Optimize
+        print(f"DEBUG: Optimization step start", flush=True)
         if grad_clip and grad_clip > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -729,18 +750,29 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
             scaler.step(d_optimizer)
         scaler.update()
+        print(f"DEBUG: Optimization step end", flush=True)
 
-        step_time = time.perf_counter() - step_start_time
-        stats["time/step_s"] = step_time
-        stats["time/data_s"] = data_time_total
-        stats["time/model_s"] = step_time - data_time_total
+        for k, v in stats.items():
+            if k not in accum_stats:
+                accum_stats[k] = torch.tensor(0.0, device=device)
+            if isinstance(v, torch.Tensor):
+                accum_stats[k] += v.detach()
+            else:
+                accum_stats[k] += torch.tensor(v, device=device)
 
         step += 1
         if scheduler is not None:
             scheduler.step_batch(step)
 
-        if step % int(cfg["train"]["log_interval_steps"]) == 0:
-            row = {"step": step, **stats}
+        log_interval = int(cfg["train"]["log_interval_steps"])
+        if step % log_interval == 0:
+            log_stats = {}
+            for k, v in accum_stats.items():
+                if dist.is_available() and dist.is_initialized():
+                    dist.all_reduce(v, op=dist.ReduceOp.AVG)
+                log_stats[k] = v.item() / log_interval
+                v.zero_()
+            row = {"step": step, **log_stats}
             jsonl.log(row)
             if wb is not None:
                 wb.log(row, step=step)
