@@ -60,7 +60,7 @@ gan:
   - 5
   - 7
   - 11
-  start_step: 2
+  start_step: 0
 latent_noise:
   enabled: true
   kind: uniform

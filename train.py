@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from data.augment import FeatureMaskConfig, MixConfig, WaveAugConfig, apply_feature_mask, apply_waveform_augment, maybe_mix_pair
@@ -468,7 +469,6 @@ def main() -> None:
         
         epoch_done = False
         while not epoch_done and step < max_steps:
-            print(f">>> START STEP {step}", flush=True)
             optimizer.zero_grad(set_to_none=True)
             if gan_enabled and d_optimizer is not None:
                 d_optimizer.zero_grad(set_to_none=True)
@@ -478,7 +478,6 @@ def main() -> None:
 
             microbatches = []
             for micro in range(grad_accum):
-                print(f"DEBUG: Loading microbatch {micro}/{grad_accum}", flush=True)
                 try:
                     batch = next(train_it)
                 except StopIteration:
@@ -497,7 +496,6 @@ def main() -> None:
                 break
 
             for i_mb, (batch, batch_b) in enumerate(microbatches):
-                print(f"DEBUG: Processing microbatch {i_mb}/{grad_accum}", flush=True)
                 wav_a = batch["wav"]  # (B,1,T)
                 dataset_names = [m.get("dataset", "unknown") for m in batch["meta"]]
                 wav_b = batch_b["wav"]
@@ -687,9 +685,7 @@ def main() -> None:
                     )
                     loss = loss / grad_accum
 
-                print(f"DEBUG: Backward pass start", flush=True)
                 scaler.scale(loss).backward()
-                print(f"DEBUG: Backward pass end", flush=True)
                 total_loss = total_loss + loss.detach()
 
                 stats = {
@@ -738,159 +734,200 @@ def main() -> None:
                         stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
                         stats[f"loss_jepa/{ds_name}"] = l_jepa_mask_ps[idx_t].mean().detach()
 
-        # Optimize
-        print(f"DEBUG: Optimization step start", flush=True)
-        if grad_clip and grad_clip > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        scaler.step(optimizer)
-        if gan_enabled and d_optimizer is not None and step >= gan_start:
+            # Optimize
             if grad_clip and grad_clip > 0:
-                scaler.unscale_(d_optimizer)
-                torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
-            scaler.step(d_optimizer)
-        scaler.update()
-        print(f"DEBUG: Optimization step end", flush=True)
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            if gan_enabled and d_optimizer is not None and step >= gan_start:
+                if grad_clip and grad_clip > 0:
+                    scaler.unscale_(d_optimizer)
+                    torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
+                scaler.step(d_optimizer)
+            scaler.update()
 
-        for k, v in stats.items():
-            if k not in accum_stats:
-                accum_stats[k] = torch.tensor(0.0, device=device)
-            if isinstance(v, torch.Tensor):
-                accum_stats[k] += v.detach()
-            else:
-                accum_stats[k] += torch.tensor(v, device=device)
 
-        step += 1
-        if scheduler is not None:
-            scheduler.step_batch(step)
+            for k, v in stats.items():
+                if k not in accum_stats:
+                    accum_stats[k] = torch.tensor(0.0, device=device)
+                if isinstance(v, torch.Tensor):
+                    accum_stats[k] += v.detach()
+                else:
+                    accum_stats[k] += torch.tensor(v, device=device)
 
-        log_interval = int(cfg["train"]["log_interval_steps"])
-        if step % log_interval == 0:
-            log_stats = {}
-            for k, v in accum_stats.items():
-                if dist.is_available() and dist.is_initialized():
-                    dist.all_reduce(v, op=dist.ReduceOp.AVG)
-                log_stats[k] = v.item() / log_interval
-                v.zero_()
-            row = {"step": step, **log_stats}
-            jsonl.log(row)
-            if wb is not None:
-                wb.log(row, step=step)
+            step += 1
+            if scheduler is not None:
+                scheduler.step_batch(step)
 
-        if step % int(cfg["train"]["save_interval_steps"]) == 0:
-            last_path = str(ckpt_dir / "last.pt")
-            save_checkpoint(
-                last_path,
-                step=step,
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler if scaler.is_enabled() else None,
-                cfg=cfg,
-                extra=_extra_state(),
-            )
-
-            # Optionally run probes on the just-saved checkpoint.
-            if bool(cfg.get("eval", {}).get("enabled", False)) and bool(cfg["train"].get("run_eval_on_save", False)):
-                from eval.run_probes import run_all_probes
-
-                results = run_all_probes(
-                    run_dir=str(out_root),
-                    step=step,
-                    exp_cfg=cfg,
-                    ckpt_path=last_path,
-                    python_bin=sys.executable,
-                )
-                row = {"step": step, "probe": results}
-                jsonl.log(row)
-                if wb is not None:
-                    to_log: Dict[str, Any] = {}
-                    asr = results.get("asr") or {}
-                    emo = results.get("emotion") or {}
-                    gen = results.get("gender") or {}
-
-                    if asr.get("train", {}).get("wer") is not None:
-                        to_log["probe/asr_wer_train"] = float(asr["train"]["wer"])
-                    if asr.get("dev", {}).get("wer") is not None:
-                        to_log["probe/asr_wer_dev"] = float(asr["dev"]["wer"])
-                        
-                    if asr.get("dev", {}).get("examples"):
-                        import wandb
-                        cols = ["Ref", "Hyp"]
-                        data = [[ex["ref"], ex["hyp"]] for ex in asr["dev"]["examples"]]
-                        to_log["probe/asr_examples"] = wandb.Table(columns=cols, data=data)
-
-                    if emo.get("accuracy") is not None:
-                        to_log["probe/emotion_accuracy"] = float(emo["accuracy"])
-                    if emo.get("macro_f1") is not None:
-                        to_log["probe/emotion_macro_f1"] = float(emo["macro_f1"])
-
-                    if gen.get("accuracy") is not None:
-                        to_log["probe/gender_accuracy"] = float(gen["accuracy"])
-                    
-                    if "visualization" in results:
-                        import wandb
-                        to_log["probe/latents"] = wandb.Image(results["visualization"], caption=f"Step {step} Latents")
-
-                    if to_log:
-                        wb.log(to_log, step=step)
-
-                # best_asr / best_composite
-                asr_wer = results.get("asr", {}).get("dev", {}).get("wer")
-                if asr_wer is not None and float(asr_wer) < best["asr_wer"]:
-                    best["asr_wer"] = float(asr_wer)
-                    save_checkpoint(
-                        str(ckpt_dir / "best_asr.pt"),
-                        step=step,
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=scaler if scaler.is_enabled() else None,
-                        cfg=cfg,
-                        extra=_extra_state(probe=results),
-                    )
-
-                composite = 0.0
-                if "asr" in results and "dev" in results["asr"]:
-                    composite += -float(results["asr"]["dev"]["wer"])
-                if "emotion" in results:
-                    composite += float(results["emotion"].get("macro_f1", 0.0))
-                if "gender" in results:
-                    composite += float(results["gender"].get("accuracy", 0.0))
-                if composite > best["composite"]:
-                    best["composite"] = composite
-                    save_checkpoint(
-                        str(ckpt_dir / "best_composite.pt"),
-                        step=step,
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=scaler if scaler.is_enabled() else None,
-                        cfg=cfg,
-                        extra=_extra_state(probe=results, composite=composite),
-                    )
-
-        if step % int(cfg["train"]["eval_interval_steps"]) == 0:
-            v = _validate_one()
-            if v:
-                row = {"step": step, **v}
+            log_interval = int(cfg["train"]["log_interval_steps"])
+            if step % log_interval == 0:
+                log_stats = {}
+                for k, v in accum_stats.items():
+                    if dist.is_available() and dist.is_initialized():
+                        dist.all_reduce(v, op=dist.ReduceOp.AVG)
+                    log_stats[k] = v.item() / log_interval
+                    v.zero_()
+                row = {"step": step, **log_stats}
                 jsonl.log(row)
                 if wb is not None:
                     wb.log(row, step=step)
 
-                if v.get("val_jepa", float("inf")) < best["val_jepa"]:
-                    best["val_jepa"] = float(v["val_jepa"])
-                    save_checkpoint(
-                        str(ckpt_dir / "best_jepa.pt"),
-                        step=step,
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=scaler if scaler.is_enabled() else None,
-                        cfg=cfg,
-                        extra=_extra_state(val=v),
-                    )
+            if step % int(cfg["train"]["save_interval_steps"]) == 0:
+                last_path = str(ckpt_dir / "last.pt")
+                save_checkpoint(
+                    last_path,
+                    step=step,
+                    model=model,
+                    optimizer=optimizer,
+                    scaler=scaler if scaler.is_enabled() else None,
+                    cfg=cfg,
+                    extra=_extra_state(),
+                )
 
-            # Probes are triggered on save (run_eval_on_save), not on eval.
+                # Optionally run probes on the just-saved checkpoint.
+                if bool(cfg.get("eval", {}).get("enabled", False)) and bool(cfg["train"].get("run_eval_on_save", False)):
+                    from eval.run_probes import run_all_probes
 
-        if prof is not None:
-            prof.step()
+                    print(f"[{time.strftime('%H:%M:%S')}] Starting evaluation block at step {step}...", flush=True)
+                    eval_start_t = time.perf_counter()
+                    
+                    # Move everything to CPU to free GPU memory for subprocesses
+                    model.cpu()
+                    def optimizer_to(optim, device):
+                        for state in optim.state.values():
+                            for k, v in state.items():
+                                if torch.is_tensor(v):
+                                    state[k] = v.to(device)
+                    optimizer_to(optimizer, "cpu")
+                    if discriminators is not None:
+                        discriminators.cpu()
+                    if d_optimizer is not None:
+                        optimizer_to(d_optimizer, "cpu")
+                    
+                    # Stop profiler to flush its memory and stop recording
+                    if prof is not None:
+                        print(f"[{time.strftime('%H:%M:%S')}] Pausing profiler for evaluation...", flush=True)
+                        prof.stop()
+                    
+                    torch.cuda.empty_cache()
+
+                    try:
+                        results = run_all_probes(
+                            run_dir=str(out_root),
+                            step=step,
+                            exp_cfg=cfg,
+                            ckpt_path=last_path,
+                            python_bin=sys.executable,
+                        )
+                    finally:
+                        # Restore to GPU regardless of eval success/failure
+                        print(f"[{time.strftime('%H:%M:%S')}] Restoring model to GPU...", flush=True)
+                        model.to(device)
+                        optimizer_to(optimizer, device)
+                        if discriminators is not None:
+                            discriminators.to(device)
+                        if d_optimizer is not None:
+                            optimizer_to(d_optimizer, device)
+                        
+                        torch.cuda.empty_cache()
+                        if prof is not None:
+                            print(f"[{time.strftime('%H:%M:%S')}] Resuming profiler...", flush=True)
+                            prof.start()
+
+                    eval_elapsed = time.perf_counter() - eval_start_t
+                    print(f"[{time.strftime('%H:%M:%S')}] Evaluation block finished in {eval_elapsed:.2f}s", flush=True)
+
+                    row = {"step": step, "probe": results}
+                    jsonl.log(row)
+                    if wb is not None:
+                        to_log: Dict[str, Any] = {}
+                        asr = results.get("asr") or {}
+                        emo = results.get("emotion") or {}
+                        gen = results.get("gender") or {}
+
+                        if asr.get("train", {}).get("wer") is not None:
+                            to_log["probe/asr_wer_train"] = float(asr["train"]["wer"])
+                        if asr.get("dev", {}).get("wer") is not None:
+                            to_log["probe/asr_wer_dev"] = float(asr["dev"]["wer"])
+                            
+                        if asr.get("dev", {}).get("examples"):
+                            import wandb
+                            cols = ["Ref", "Hyp"]
+                            data = [[ex["ref"], ex["hyp"]] for ex in asr["dev"]["examples"]]
+                            to_log["probe/asr_examples"] = wandb.Table(columns=cols, data=data)
+
+                        if emo.get("accuracy") is not None:
+                            to_log["probe/emotion_accuracy"] = float(emo["accuracy"])
+                        if emo.get("macro_f1") is not None:
+                            to_log["probe/emotion_macro_f1"] = float(emo["macro_f1"])
+
+                        if gen.get("accuracy") is not None:
+                            to_log["probe/gender_accuracy"] = float(gen["accuracy"])
+                        
+                        if "visualization" in results:
+                            import wandb
+                            to_log["probe/latents"] = wandb.Image(results["visualization"], caption=f"Step {step} Latents")
+
+                        if to_log:
+                            wb.log(to_log, step=step)
+
+                    # best_asr / best_composite
+                    asr_wer = results.get("asr", {}).get("dev", {}).get("wer")
+                    if asr_wer is not None and float(asr_wer) < best["asr_wer"]:
+                        best["asr_wer"] = float(asr_wer)
+                        save_checkpoint(
+                            str(ckpt_dir / "best_asr.pt"),
+                            step=step,
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler if scaler.is_enabled() else None,
+                            cfg=cfg,
+                            extra=_extra_state(probe=results),
+                        )
+
+                    composite = 0.0
+                    if "asr" in results and "dev" in results["asr"]:
+                        composite += -float(results["asr"]["dev"]["wer"])
+                    if "emotion" in results:
+                        composite += float(results["emotion"].get("macro_f1", 0.0))
+                    if "gender" in results:
+                        composite += float(results["gender"].get("accuracy", 0.0))
+                    if composite > best["composite"]:
+                        best["composite"] = composite
+                        save_checkpoint(
+                            str(ckpt_dir / "best_composite.pt"),
+                            step=step,
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler if scaler.is_enabled() else None,
+                            cfg=cfg,
+                            extra=_extra_state(probe=results, composite=composite),
+                        )
+
+            if step % int(cfg["train"]["eval_interval_steps"]) == 0:
+                v = _validate_one()
+                if v:
+                    row = {"step": step, **v}
+                    jsonl.log(row)
+                    if wb is not None:
+                        wb.log(row, step=step)
+
+                    if v.get("val_jepa", float("inf")) < best["val_jepa"]:
+                        best["val_jepa"] = float(v["val_jepa"])
+                        save_checkpoint(
+                            str(ckpt_dir / "best_jepa.pt"),
+                            step=step,
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler if scaler.is_enabled() else None,
+                            cfg=cfg,
+                            extra=_extra_state(val=v),
+                        )
+
+                # Probes are triggered on save (run_eval_on_save), not on eval.
+
+            if prof is not None:
+                prof.step()
 
     if prof is not None:
         prof.stop()

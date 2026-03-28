@@ -12,7 +12,7 @@ run:
 data:
   sample_rate: 16000
   segment_seconds: 3.0
-  train_manifest: "data/shards/train/train-{000000..000058}.tar"
+  train_manifest: "data/shards/train/train-{000000..000117}.tar"
   val_manifest: "data/shards/val/val-000000.tar"
   shuffle_size: 1000
   num_workers: 8
@@ -80,12 +80,12 @@ model:
     res_blocks_per_up: 2
     res_dilations: [1, 3, 9]
     film_hidden: 128
-    latent_norm: false
+    latent_norm: true
     latent_norm_eps: 1.0e-5
     latent_stats_path: null
 
 loss:
-  stft_weight: 10.0
+  stft_weight: 0.2
   stft:
     fft_sizes: [256, 512, 1024, 2048]
     hop_ratio: 0.25
@@ -100,12 +100,12 @@ loss:
   kl_weight: 0.0                # weight for KL divergence
   wav_l1_weight: 0.0
   jepa:
-    weight: 15.0
+    weight: 0.8
     mix_view_weight: 1.0        # Exp1+: z_mix -> z_primary alignment
   sigreg:
-    weight: 0.05
+    weight: 0.08
     num_slices: 256
-    t_max: 3.0
+    t_max: 1.0
     n_points: 17
     reduction: mean
     clip_value: null
@@ -119,7 +119,7 @@ loss:
 
 gan:
   enabled: true
-  start_step: 10000
+  start_step: 15000
   d_steps_per_g_step: 1
   g_adv_weight: 1.0
   fm_weight: 10.0
@@ -134,8 +134,8 @@ gan:
 latent_noise:
   enabled: true               # RAE Trick: Train decoder on noisy latents
   kind: uniform
-  warmup_steps: 10000
-  sigma_max: 0.1              # Increased for robustness
+  warmup_steps: 5000
+  sigma_max: 0.02              # Reduced to prevent divergence during GAN warmup
 
 optim:
   kind: scaled_adam             # scaled_adam | adamw
@@ -159,10 +159,10 @@ optim:
   grad_clip: 1.0
 
 train:
-  batch_size: 24
+  batch_size: 20
   grad_accum_steps: 2
-  max_steps: 15000       # Reduced for a few epochs (~3 epochs on 50% data)
-  log_interval_steps: 15
+  max_steps: 250000       # Reduced for a few epochs (~3 epochs on 50% data)
+  log_interval_steps: 150
   eval_interval_steps: 5000
   save_interval_steps: 5000
   val_batches: null       # Evaluate on the entire validation set

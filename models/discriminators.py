@@ -5,6 +5,7 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import weight_norm
 
 
 class DiscriminatorP(nn.Module):
@@ -13,14 +14,14 @@ class DiscriminatorP(nn.Module):
         self.period = period
         self.convs = nn.ModuleList(
             [
-                nn.Conv2d(1, channels, (kernel_size, 1), (stride, 1), padding=(2, 0)),
-                nn.Conv2d(channels, channels * 2, (kernel_size, 1), (stride, 1), padding=(2, 0)),
-                nn.Conv2d(channels * 2, channels * 4, (kernel_size, 1), (stride, 1), padding=(2, 0)),
-                nn.Conv2d(channels * 4, channels * 8, (kernel_size, 1), (stride, 1), padding=(2, 0)),
-                nn.Conv2d(channels * 8, channels * 8, (kernel_size, 1), 1, padding=(2, 0)),
+                weight_norm(nn.Conv2d(1, channels, (kernel_size, 1), (stride, 1), padding=(2, 0))),
+                weight_norm(nn.Conv2d(channels, channels * 2, (kernel_size, 1), (stride, 1), padding=(2, 0))),
+                weight_norm(nn.Conv2d(channels * 2, channels * 4, (kernel_size, 1), (stride, 1), padding=(2, 0))),
+                weight_norm(nn.Conv2d(channels * 4, channels * 8, (kernel_size, 1), (stride, 1), padding=(2, 0))),
+                weight_norm(nn.Conv2d(channels * 8, channels * 8, (kernel_size, 1), 1, padding=(2, 0))),
             ]
         )
-        self.out_conv = nn.Conv2d(channels * 8, 1, (3, 1), 1, padding=(1, 0))
+        self.out_conv = weight_norm(nn.Conv2d(channels * 8, 1, (3, 1), 1, padding=(1, 0)))
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         b, c, t = x.shape
@@ -45,14 +46,14 @@ class DiscriminatorS(nn.Module):
         super().__init__()
         self.convs = nn.ModuleList(
             [
-                nn.Conv1d(1, channels, 15, 1, padding=7),
-                nn.Conv1d(channels, channels * 4, 41, 4, padding=20, groups=4),
-                nn.Conv1d(channels * 4, channels * 16, 41, 4, padding=20, groups=16),
-                nn.Conv1d(channels * 16, channels * 16, 41, 4, padding=20, groups=16),
-                nn.Conv1d(channels * 16, channels * 16, 5, 1, padding=2),
+                weight_norm(nn.Conv1d(1, channels, 15, 1, padding=7)),
+                weight_norm(nn.Conv1d(channels, channels * 4, 41, 4, padding=20, groups=4)),
+                weight_norm(nn.Conv1d(channels * 4, channels * 16, 41, 4, padding=20, groups=16)),
+                weight_norm(nn.Conv1d(channels * 16, channels * 16, 41, 4, padding=20, groups=16)),
+                weight_norm(nn.Conv1d(channels * 16, channels * 16, 5, 1, padding=2)),
             ]
         )
-        self.out_conv = nn.Conv1d(channels * 16, 1, 3, 1, padding=1)
+        self.out_conv = weight_norm(nn.Conv1d(channels * 16, 1, 3, 1, padding=1))
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         fmap = []
@@ -116,7 +117,11 @@ def generator_loss(fake_logits: List[torch.Tensor]) -> torch.Tensor:
 
 def feature_matching_loss(real_fmaps: List[List[torch.Tensor]], fake_fmaps: List[List[torch.Tensor]]) -> torch.Tensor:
     loss = 0.0
+    total_layers = 0
     for r_layers, f_layers in zip(real_fmaps, fake_fmaps):
         for r, f in zip(r_layers, f_layers):
-            loss = loss + (r - f).abs().mean()
+            loss = loss + (r - f).abs().mean() / (r.detach().abs().mean() + 1e-5)
+            total_layers += 1
+    if total_layers > 0:
+        loss = loss / total_layers
     return loss

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import subprocess
+import time
 from typing import Any, Dict, Optional
 
 
@@ -25,8 +26,19 @@ def run_all_probes(
 
     results: Dict[str, Any] = {}
 
-    def _run(cmd: list[str]) -> None:
-        subprocess.run(cmd, check=True)
+    def _run(name: str, cmd: list[str]) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] [Eval Step {step}] Starting {name}...", flush=True)
+        start_t = time.perf_counter()
+        try:
+            # We use subprocess.run to wait for the child process.
+            # Output is piped to stdout so it's visible in the main log.
+            subprocess.run(cmd, check=True)
+            elapsed = time.perf_counter() - start_t
+            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} finished in {elapsed:.2f}s", flush=True)
+        except subprocess.CalledProcessError as e:
+            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} FAILED with exit code {e.returncode}", flush=True)
+            raise
 
     eval_cfg = exp_cfg.get("eval") or {}
     config_path = exp_cfg.get("_resolved_config_path")
@@ -38,6 +50,7 @@ def run_all_probes(
     if emo.get("enabled", False):
         out = out_dir / "emotion.json"
         _run(
+            "Emotion Probe",
             [
                 python_bin,
                 "-m",
@@ -67,6 +80,7 @@ def run_all_probes(
     if gen.get("enabled", False):
         out = out_dir / "gender.json"
         _run(
+            "Gender Probe",
             [
                 python_bin,
                 "-m",
@@ -118,16 +132,16 @@ def run_all_probes(
         ]
         if asr.get("use_latent", False):
             cmd.append("--use_latent")
-        _run(cmd)
+        _run("ASR Probe", cmd)
         results["asr"] = json.loads(out.read_text())
 
     # Latent Visualization (PCA/UMAP)
     vis_out = out_dir / "latents.png"
-    # Use validation manifest for visualization if available, else training
     vis_manifest = eval_cfg.get("vis_manifest") or exp_cfg["data"].get("val_manifest") or exp_cfg["data"]["train_manifest"]
     
     try:
         _run(
+            "Latent Visualization",
             [
                 python_bin,
                 "scripts/visualize_latents.py",
@@ -140,7 +154,7 @@ def run_all_probes(
                 "--out",
                 str(vis_out),
                 "--limit",
-                "500" # Visualize 500 samples
+                "200" # Reduced from 500 for faster evaluation
             ]
         )
         results["visualization"] = str(vis_out)
