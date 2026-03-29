@@ -102,16 +102,16 @@ class WaveformDecoder(nn.Module):
         self.out_conv = nn.Conv1d(in_ch, 1, kernel_size=7, padding=3)
         self.up_strides = up_strides
         self.res_blocks_per_up = cfg.res_blocks_per_up
-        self.register_buffer("latent_mean", torch.zeros(1, latent_dim, 1), persistent=False)
-        self.register_buffer("latent_var", torch.ones(1, latent_dim, 1), persistent=False)
+        self.register_buffer("latent_mean", torch.zeros(1, latent_dim, 1))
+        self.register_buffer("latent_var", torch.ones(1, latent_dim, 1))
 
     def set_latent_stats(self, mean: torch.Tensor, var: torch.Tensor) -> None:
         if mean.dim() == 1:
             mean = mean.view(1, -1, 1)
         if var.dim() == 1:
             var = var.view(1, -1, 1)
-        self.latent_mean = mean.detach()
-        self.latent_var = var.detach()
+        self.latent_mean.copy_(mean.detach())
+        self.latent_var.copy_(var.detach())
 
     def forward(self, z: torch.Tensor, target_len: int | None = None) -> torch.Tensor:
         if self.cfg.latent_norm:

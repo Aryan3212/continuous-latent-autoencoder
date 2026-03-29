@@ -11,8 +11,9 @@ from torch import distributed as dist
 def _all_reduce(x: torch.Tensor, op: str = "AVG") -> torch.Tensor:
     if dist.is_available() and dist.is_initialized():
         if op == "MAX":
-            return torch.distributed.nn.all_reduce(x, dist.ReduceOp.MAX)
-        return torch.distributed.nn.all_reduce(x, dist.ReduceOp.AVG)
+            dist.all_reduce(x, dist.ReduceOp.MAX)
+        else:
+            dist.all_reduce(x, dist.ReduceOp.AVG)
     return x
 
 
@@ -95,6 +96,7 @@ class SIGRegConfig:
     n_points: int = 17
     reduction: str = "mean"
     clip_value: Optional[float] = None
+    var_weight: float = 1.0
 
 
 class SIGReg(nn.Module):
@@ -106,6 +108,7 @@ class SIGReg(nn.Module):
         super().__init__()
         self.dim = dim
         self.cfg = cfg
+        self.var_weight = cfg.var_weight
         univariate = EppsPulley(t_max=cfg.t_max, n_points=cfg.n_points)
         self.test = SlicingUnivariateTest(
             univariate_test=univariate,
@@ -119,13 +122,16 @@ class SIGReg(nn.Module):
             raise ValueError(f"Expected z as (B,d,T'), got {tuple(z.shape)}")
         b, d, t = z.shape
         x = z.permute(0, 2, 1).reshape(b * t, d).unsqueeze(0)  # (1,N,D)
-        loss = self.test(x)
+        ecf_loss = self.test(x)
 
         var = x.var(dim=1, unbiased=False).squeeze(0)  # Variance across samples (N)
+        l_var = (var - 1.0).pow(2).mean()
+        loss = ecf_loss + self.var_weight * l_var
         stats = {
             "sigreg_loss": loss.detach(),
             "z_var_min": var.min().detach(),
             "z_var_med": var.median().detach(),
             "z_var_max": var.max().detach(),
+            "z_var_penalty": l_var.detach(),
         }
         return loss, stats

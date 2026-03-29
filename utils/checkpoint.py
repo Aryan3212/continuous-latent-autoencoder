@@ -29,7 +29,9 @@ def save_checkpoint(
         "cfg": cfg,
         "extra": extra or {},
     }
-    torch.save(payload, str(p))
+    tmp = p.with_suffix(".tmp")
+    torch.save(payload, str(tmp))
+    tmp.rename(p)
 
 
 def try_git_hash(cwd: str | None = None) -> str:

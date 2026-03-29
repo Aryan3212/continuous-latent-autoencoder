@@ -26,7 +26,7 @@ from models.frontend_conv import ConvFrontend, FrontendConfig
 from models.sigreg import SIGReg, SIGRegConfig
 from optim.lr_schedulers import Eden, Eden2
 from optim.scaled_adam import ScaledAdam
-from utils.checkpoint import save_checkpoint, save_run_metadata, sha256_file, try_git_hash
+from utils.checkpoint import save_checkpoint, save_run_metadata, try_git_hash
 from utils.config import apply_overrides, load_config
 from utils.logging import JsonlLogger, maybe_init_wandb
 from utils.seed import seed_all
@@ -318,7 +318,8 @@ def main() -> None:
         )
 
     use_amp = bool(cfg["run"].get("amp", True)) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    g_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    d_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     step = 0
     resume_best: Dict[str, float] | None = None
@@ -330,8 +331,10 @@ def main() -> None:
             discriminators.load_state_dict(state["extra"]["discriminators"], strict=True)
             if d_optimizer and (state.get("extra") or {}).get("d_optimizer"):
                 d_optimizer.load_state_dict(state["extra"]["d_optimizer"])
-        if state.get("scaler") and scaler.is_enabled():
-            scaler.load_state_dict(state["scaler"])
+        if state.get("scaler") and g_scaler.is_enabled():
+            g_scaler.load_state_dict(state["scaler"])
+        if state.get("d_scaler") and d_scaler.is_enabled():
+            d_scaler.load_state_dict(state["d_scaler"])
         if scheduler and (state.get("extra") or {}).get("scheduler"):
             scheduler.load_state_dict(state["extra"]["scheduler"])
         step = int(state.get("step", 0))
@@ -378,8 +381,9 @@ def main() -> None:
 
     mix_view_w = float(jcfg.get("mix_view_weight", 1.0))
     gan_start = int(gan_cfg.get("start_step", 0))
-    g_adv_w = float(gan_cfg.get("g_adv_weight", 1.0))
-    fm_w = float(gan_cfg.get("fm_weight", 10.0))
+    g_adv_w_max = float(gan_cfg.get("g_adv_weight", 1.0))
+    fm_w_max = float(gan_cfg.get("fm_weight", 2.0))
+    gan_warmup_steps = int(gan_cfg.get("warmup_steps", 5000))
 
     best: Dict[str, float] = {"val_jepa": float("inf"), "asr_wer": float("inf"), "composite": -float("inf")}
     if isinstance(resume_best, dict):
@@ -436,6 +440,7 @@ def main() -> None:
         if gan_enabled and discriminators is not None:
             payload["discriminators"] = discriminators.state_dict()
             payload["d_optimizer"] = d_optimizer.state_dict() if d_optimizer else None
+        payload["d_scaler"] = d_scaler.state_dict() if d_scaler.is_enabled() else None
         payload.update(extra)
         return payload
 
@@ -461,8 +466,8 @@ def main() -> None:
 
     epochs = max_steps  # Safe upper bound since we break at max_steps
     for epoch in range(epochs):
-        # WebDataset handles DDP sharding via node splits and worker splits intrinsically,
-        # so we do not use a DistributedSampler here.
+        if scheduler is not None and epoch > 0:
+            scheduler.step_epoch(epoch)
         
         train_it = iter(train_dl)
         mix_it = iter(train_dl)
@@ -474,7 +479,7 @@ def main() -> None:
                 d_optimizer.zero_grad(set_to_none=True)
             
             total_loss = torch.tensor(0.0, device=device)
-            stats: Dict[str, Any] = {}
+            mb_stats: Dict[str, Any] = {}
 
             microbatches = []
             for micro in range(grad_accum):
@@ -557,7 +562,7 @@ def main() -> None:
                     # Center = Clean
                     # View = Augmented + Masked
                 
-                    h0_aug, hE_aug, z_aug, stats_aug = _encode(model, wav_aug)
+                    h0_aug = model["frontend"](wav_aug)
 
                     # Masked feature view (V1) - applied to Augmented view features
                     h0_masked = apply_feature_mask(h0_aug, feat_mask_cfg)
@@ -579,8 +584,6 @@ def main() -> None:
                         l_kl = l_kl_ps.mean()
 
                     l_jepa_mix = torch.tensor(0.0, device=device)
-                    l_primary = torch.tensor(0.0, device=device)
-                    l_stft_mix = torch.tensor(0.0, device=device)
                     l_primary = torch.tensor(0.0, device=device)
                     l_stft_mix = torch.tensor(0.0, device=device)
 
@@ -632,6 +635,7 @@ def main() -> None:
                         "z_var_min": sig_stats_a["z_var_min"],
                         "z_var_med": sig_stats_a["z_var_med"],
                         "z_var_max": sig_stats_a["z_var_max"],
+                        "z_var_penalty": sig_stats_a["z_var_penalty"],
                     }
 
                     # Decoder
@@ -649,7 +653,12 @@ def main() -> None:
                     l_g_adv = torch.tensor(0.0, device=device)
                     l_fm = torch.tensor(0.0, device=device)
                     l_d = torch.tensor(0.0, device=device)
+                    g_adv_w = 0.0
+                    fm_w = 0.0
                     if gan_enabled and discriminators is not None and step >= gan_start:
+                        gan_progress = min(1.0, (step - gan_start) / max(1, gan_warmup_steps))
+                        g_adv_w = g_adv_w_max * gan_progress
+                        fm_w = fm_w_max * gan_progress
                         _set_requires_grad(discriminators, True)
                         d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
                         d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat.detach())
@@ -658,16 +667,15 @@ def main() -> None:
                         l_d = discriminator_loss(d_real_mpd, d_fake_mpd) + discriminator_loss(
                             d_real_msd, d_fake_msd
                         )
-                        scaler.scale(l_d / grad_accum).backward()
+                        d_scaler.scale(l_d / grad_accum).backward()
                         _set_requires_grad(discriminators, False)
                         d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
                         d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
-                        with torch.no_grad():
-                            d_real_mpd_g, fmap_real_mpd_g = discriminators["mpd"](wav_a)
-                            d_real_msd_g, fmap_real_msd_g = discriminators["msd"](wav_a)
+                        fmap_real_mpd_det = [[f.detach() for f in layer] for layer in fmap_real_mpd]
+                        fmap_real_msd_det = [[f.detach() for f in layer] for layer in fmap_real_msd]
                         l_g_adv = generator_loss(d_fake_mpd_g) + generator_loss(d_fake_msd_g)
-                        l_fm = feature_matching_loss(fmap_real_mpd_g, fmap_fake_mpd_g) + feature_matching_loss(
-                            fmap_real_msd_g, fmap_fake_msd_g
+                        l_fm = feature_matching_loss(fmap_real_mpd_det, fmap_fake_mpd_g) + feature_matching_loss(
+                            fmap_real_msd_det, fmap_fake_msd_g
                         )
 
                     l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
@@ -685,11 +693,10 @@ def main() -> None:
                     )
                     loss = loss / grad_accum
 
-                scaler.scale(loss).backward()
+                g_scaler.scale(loss).backward()
                 total_loss = total_loss + loss.detach()
 
-                stats = {
-                    "loss": total_loss,
+                mb_step_stats = {
                     "l_stft": l_stft.detach(),
                     "l_wav": l_wav.detach(),
                     "l_jepa": l_jepa.detach(),
@@ -700,28 +707,30 @@ def main() -> None:
                     "z_std": z_a.std(unbiased=False).detach(),
                     "vram_gb": torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
                 }
-                stats.update({k: v.detach() for k, v in stft_stats.items()})
-                stats.update({k: v.detach() for k, v in sig_stats.items()})
+                mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})
+                mb_step_stats.update({k: v.detach() for k, v in sig_stats.items()})
 
                 if mix_cfg.enabled:
-                    stats.update({
+                    mb_step_stats.update({
                         "l_jepa_mix": l_jepa_mix.detach(),
                         "l_stft_mix": l_stft_mix.detach(),
                         "mixed_frac": mixed_mask.float().mean().detach(),
                         "snr_db_mean": (snr_db_vals * mixed_mask.float()).sum().detach() / mixed_mask.float().sum().detach().clamp(min=1e-8),
                     })
                     if primary_enabled:
-                        stats["l_primary"] = l_primary.detach()
+                        mb_step_stats["l_primary"] = l_primary.detach()
 
                 if gan_enabled:
-                    stats.update({
+                    mb_step_stats.update({
                         "l_g_adv": l_g_adv.detach(),
                         "l_fm": l_fm.detach(),
                         "l_d": l_d.detach(),
+                        "g_adv_w": float(g_adv_w),
+                        "fm_w": float(fm_w),
                     })
 
                 if kl_weight > 0:
-                    stats["l_kl"] = l_kl.detach()
+                    mb_step_stats["l_kl"] = l_kl.detach()
 
                 unique_ds = set(dataset_names)
                 if len(unique_ds) > 1:
@@ -730,21 +739,32 @@ def main() -> None:
                         if not indices:
                             continue
                         idx_t = torch.tensor(indices, device=device)
-                        stats[f"loss_stft/{ds_name}"] = l_stft_ps[idx_t].mean().detach()
-                        stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
-                        stats[f"loss_jepa/{ds_name}"] = l_jepa_mask_ps[idx_t].mean().detach()
+                        mb_step_stats[f"loss_stft/{ds_name}"] = l_stft_ps[idx_t].mean().detach()
+                        mb_step_stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
+                        mb_step_stats[f"loss_jepa/{ds_name}"] = l_jepa_mask_ps[idx_t].mean().detach()
+
+                for k, v in mb_step_stats.items():
+                    if k not in mb_stats:
+                        mb_stats[k] = v if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
+                    else:
+                        mb_stats[k] = mb_stats[k] + (v if isinstance(v, torch.Tensor) else torch.tensor(v, device=device))
+
+            n_mb = len(microbatches)
+            stats = {k: v / n_mb for k, v in mb_stats.items()}
+            stats["loss"] = total_loss
 
             # Optimize
             if grad_clip and grad_clip > 0:
-                scaler.unscale_(optimizer)
+                g_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
+            g_scaler.step(optimizer)
+            g_scaler.update()
             if gan_enabled and d_optimizer is not None and step >= gan_start:
                 if grad_clip and grad_clip > 0:
-                    scaler.unscale_(d_optimizer)
+                    d_scaler.unscale_(d_optimizer)
                     torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
-                scaler.step(d_optimizer)
-            scaler.update()
+                d_scaler.step(d_optimizer)
+                d_scaler.update()
 
 
             for k, v in stats.items():
@@ -779,7 +799,7 @@ def main() -> None:
                     step=step,
                     model=model,
                     optimizer=optimizer,
-                    scaler=scaler if scaler.is_enabled() else None,
+                    scaler=g_scaler if g_scaler.is_enabled() else None,
                     cfg=cfg,
                     extra=_extra_state(),
                 )
@@ -880,7 +900,7 @@ def main() -> None:
                             step=step,
                             model=model,
                             optimizer=optimizer,
-                            scaler=scaler if scaler.is_enabled() else None,
+                            scaler=g_scaler if g_scaler.is_enabled() else None,
                             cfg=cfg,
                             extra=_extra_state(probe=results),
                         )
@@ -899,7 +919,7 @@ def main() -> None:
                             step=step,
                             model=model,
                             optimizer=optimizer,
-                            scaler=scaler if scaler.is_enabled() else None,
+                            scaler=g_scaler if g_scaler.is_enabled() else None,
                             cfg=cfg,
                             extra=_extra_state(probe=results, composite=composite),
                         )
@@ -919,7 +939,7 @@ def main() -> None:
                             step=step,
                             model=model,
                             optimizer=optimizer,
-                            scaler=scaler if scaler.is_enabled() else None,
+                            scaler=g_scaler if g_scaler.is_enabled() else None,
                             cfg=cfg,
                             extra=_extra_state(val=v),
                         )
@@ -937,7 +957,7 @@ def main() -> None:
         step=step,
         model=model,
         optimizer=optimizer,
-        scaler=scaler if scaler.is_enabled() else None,
+        scaler=g_scaler if g_scaler.is_enabled() else None,
         cfg=cfg,
         extra=_extra_state(),
     )
