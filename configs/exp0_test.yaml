@@ -45,12 +45,9 @@ gan:
   d_betas:
   - 0.8
   - 0.99
-  d_lr: 0.0002
-  d_steps_per_g_step: 1
+  d_lr: 5.0e-5
   d_weight_decay: 0.0
   enabled: true
-  fm_weight: 10.0
-  g_adv_weight: 1.0
   mpd_channels: 24
   msd_channels: 12
   msd_scales: 3
@@ -70,7 +67,6 @@ loss:
   jepa:
     mix_view_weight: 1.0
     weight: 15.0
-  kl_weight: 0.0
   mix_recon:
     enabled: true
     start_step: 0
@@ -100,7 +96,6 @@ loss:
     win_ratio: 1.0
     window: hann
   stft_weight: 10.0
-  use_lejepa_on_hE: false
   wav_l1_weight: 0.0
 model:
   decoder:

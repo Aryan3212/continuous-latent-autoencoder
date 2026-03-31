@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Tuple
 
 import torch
-import torch.distributed as dist
+
 import torch.nn.functional as F
 
 from data.augment import FeatureMaskConfig, MixConfig, WaveAugConfig, apply_feature_mask, apply_waveform_augment, maybe_mix_pair
@@ -80,9 +80,7 @@ def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
 def _encode(model: torch.nn.ModuleDict, wav: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     h0 = model["frontend"](wav)
     hE = model["encoder"](h0)
-    # The latent z IS the encoder output hE.
-    z = hE 
-    return h0, hE, z, {} # No extra stats
+    return h0, hE, hE, {}
 
 
 def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int, sigma: torch.Tensor) -> torch.Tensor:
@@ -367,9 +365,6 @@ def main() -> None:
     stft_w = float(cfg["loss"].get("stft_weight", 1.0))
     wav_l1_w = float(cfg["loss"].get("wav_l1_weight", 0.0))
 
-    use_lejepa_on_hE = bool(cfg["loss"].get("use_lejepa_on_hE", False))
-    kl_weight = float(cfg["loss"].get("kl_weight", 0.0))
-
     mix_recon_cfg = cfg["loss"].get("mix_recon") or {}
     mix_recon_enabled = bool(mix_recon_cfg.get("enabled", False))
     mix_recon_w = float(mix_recon_cfg.get("weight", 1.0))
@@ -381,8 +376,6 @@ def main() -> None:
 
     mix_view_w = float(jcfg.get("mix_view_weight", 1.0))
     gan_start = int(gan_cfg.get("start_step", 0))
-    g_adv_w_max = float(gan_cfg.get("g_adv_weight", 1.0))
-    fm_w_max = float(gan_cfg.get("fm_weight", 2.0))
     gan_warmup_steps = int(gan_cfg.get("warmup_steps", 5000))
 
     best: Dict[str, float] = {"val_jepa": float("inf"), "asr_wer": float("inf"), "composite": -float("inf")}
@@ -416,7 +409,7 @@ def main() -> None:
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for vb in val_dl:
                 vw = vb["wav"].to(device)
-                h0, hE, z, stats = _encode(model, vw)
+                h0, _, z, _ = _encode(model, vw)
                 h0m = apply_feature_mask(h0, feat_mask_cfg)
                 hEm = model["encoder"](h0m)
                 zm = hEm
@@ -470,7 +463,6 @@ def main() -> None:
             scheduler.step_epoch(epoch)
         
         train_it = iter(train_dl)
-        mix_it = iter(train_dl)
         
         epoch_done = False
         while not epoch_done and step < max_steps:
@@ -490,10 +482,10 @@ def main() -> None:
                     break
                 
                 try:
-                    batch_b = next(mix_it)
+                    batch_b = next(train_it)
                 except StopIteration:
-                    mix_it = iter(train_dl)
-                    batch_b = next(mix_it)
+                    train_it = iter(train_dl)
+                    batch_b = next(train_it)
                 
                 microbatches.append((batch, batch_b))
 
@@ -570,19 +562,9 @@ def main() -> None:
                     z_mask = hE_mask
 
                     # LeJEPA: masked+augmented view should match clean center
-                    if use_lejepa_on_hE:
-                        l_jepa_mask_ps = _lejepa_loss(hE_a, hE_mask, return_per_sample=True)
-                    else:
-                        l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
+                    l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
                     l_jepa_mask = l_jepa_mask_ps.mean()
                 
-                    # KL Divergence (on CLEAN or AUG? Usually on the one used for gen/prior. Clean makes sense for "prior" matching)
-                    l_kl = torch.tensor(0.0, device=device)
-                    if "mu" in stats_a and "logvar" in stats_a and float(cfg["loss"].get("kl_weight", 0.0)) > 0:
-                        mu, logvar = stats_a["mu"], stats_a["logvar"]
-                        l_kl_ps = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean(dim=-1)
-                        l_kl = l_kl_ps.mean()
-
                     l_jepa_mix = torch.tensor(0.0, device=device)
                     l_primary = torch.tensor(0.0, device=device)
                     l_stft_mix = torch.tensor(0.0, device=device)
@@ -642,8 +624,7 @@ def main() -> None:
                     sigma = _latent_noise_sigma(cfg, step, device)
                     x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
                 
-                    t_stfts = batch.get("target_stfts")
-                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True, target_mags=t_stfts)
+                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
                     l_stft = l_stft_ps.mean()
                     stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
 
@@ -653,12 +634,9 @@ def main() -> None:
                     l_g_adv = torch.tensor(0.0, device=device)
                     l_fm = torch.tensor(0.0, device=device)
                     l_d = torch.tensor(0.0, device=device)
-                    g_adv_w = 0.0
-                    fm_w = 0.0
+                    gan_w = 0.0
                     if gan_enabled and discriminators is not None and step >= gan_start:
                         gan_progress = min(1.0, (step - gan_start) / max(1, gan_warmup_steps))
-                        g_adv_w = g_adv_w_max * gan_progress
-                        fm_w = fm_w_max * gan_progress
                         _set_requires_grad(discriminators, True)
                         d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
                         d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat.detach())
@@ -678,6 +656,15 @@ def main() -> None:
                             fmap_real_msd_det, fmap_fake_msd_g
                         )
 
+                        # Adaptive GAN weight (VQGAN-style): balance GAN vs reconstruction
+                        # gradients at the decoder's last conv layer
+                        last_layer = model["decoder"].out_conv.weight
+                        rec_grads = torch.autograd.grad(stft_w * l_stft, last_layer, retain_graph=True)[0]
+                        gan_grads = torch.autograd.grad(l_g_adv + l_fm, last_layer, retain_graph=True)[0]
+                        d_weight = torch.norm(rec_grads) / (torch.norm(gan_grads) + 1e-6)
+                        d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+                        gan_w = d_weight.item() * gan_progress
+
                     l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
 
                     loss = (
@@ -685,9 +672,7 @@ def main() -> None:
                         + wav_l1_w * l_wav
                         + jepa_w * l_jepa
                         + sig_w * l_sig
-                        + g_adv_w * l_g_adv
-                        + fm_w * l_fm
-                        + kl_weight * l_kl
+                        + gan_w * (l_g_adv + l_fm)
                         + (mix_recon_w * l_stft_mix if (mix_recon_enabled and step >= mix_recon_start) else 0.0)
                         + (primary_w * l_primary if primary_enabled else 0.0)
                     )
@@ -725,12 +710,8 @@ def main() -> None:
                         "l_g_adv": l_g_adv.detach(),
                         "l_fm": l_fm.detach(),
                         "l_d": l_d.detach(),
-                        "g_adv_w": float(g_adv_w),
-                        "fm_w": float(fm_w),
+                        "gan_w": float(gan_w),
                     })
-
-                if kl_weight > 0:
-                    mb_step_stats["l_kl"] = l_kl.detach()
 
                 unique_ds = set(dataset_names)
                 if len(unique_ds) > 1:
@@ -783,8 +764,6 @@ def main() -> None:
             if step % log_interval == 0:
                 log_stats = {}
                 for k, v in accum_stats.items():
-                    if dist.is_available() and dist.is_initialized():
-                        dist.all_reduce(v, op=dist.ReduceOp.AVG)
                     log_stats[k] = v.item() / log_interval
                     v.zero_()
                 row = {"step": step, **log_stats}

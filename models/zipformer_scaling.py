@@ -24,8 +24,6 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch.cuda.amp import custom_bwd, custom_fwd
-
 try:
     from torch.amp import custom_fwd, custom_bwd
 except ImportError:

@@ -8,12 +8,9 @@ import torch.nn as nn
 from torch import distributed as dist
 
 
-def _all_reduce(x: torch.Tensor, op: str = "AVG") -> torch.Tensor:
+def _all_reduce(x: torch.Tensor) -> torch.Tensor:
     if dist.is_available() and dist.is_initialized():
-        if op == "MAX":
-            dist.all_reduce(x, dist.ReduceOp.MAX)
-        else:
-            dist.all_reduce(x, dist.ReduceOp.AVG)
+        dist.all_reduce(x, dist.ReduceOp.AVG)
     return x
 
 
@@ -67,12 +64,9 @@ class SlicingUnivariateTest(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            a = torch.randn(x.size(-1), self.num_slices, device=x.device)
-            # WARNING: dist.broadcast is a blocking collective operation.
-            # If DDP ranks become desynchronized (e.g., uneven batches at epoch end),
-            # this will deadlock. Ensure DataLoader or DistributedSampler uses drop_last=True!
-            if dist.is_available() and dist.is_initialized():
-                dist.broadcast(a, src=0)
+            seed = int(self.global_step.item()) + 137
+            gen = self._get_generator(x.device, seed)
+            a = torch.randn(x.size(-1), self.num_slices, device=x.device, generator=gen)
             a /= a.norm(p=2, dim=0)
             self.global_step.add_(1)
 

@@ -93,8 +93,6 @@ loss:
     sc_weight: 1.0
     mag_weight: 1.0
     logmag_weight: 1.0
-  use_lejepa_on_hE: false       # if true, compute JEPA on hE
-  kl_weight: 0.0                # weight for KL divergence
   wav_l1_weight: 0.0
   jepa:
     weight: 1.0
@@ -117,12 +115,9 @@ loss:
 gan:
   enabled: false
   start_step: 0
-  d_steps_per_g_step: 1
-  g_adv_weight: 1.0
-  fm_weight: 10.0
   periods: [2, 3, 5, 7, 11]
   msd_scales: 3
-  d_lr: 2.0e-4
+  d_lr: 5.0e-5
   d_betas: [0.8, 0.99]
   d_weight_decay: 0.0
 

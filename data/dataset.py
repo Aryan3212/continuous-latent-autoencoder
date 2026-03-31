@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import json
 import math
-import pathlib
 import random
-import logging
-import io
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-import numpy as np
 import torch
 import webdataset as wds
 
@@ -58,12 +53,6 @@ class PreprocessSample:
                 meta = v
                 break
 
-        stft_mags = None
-        for k, v in sample.items():
-            if k.endswith("stft.pth"):
-                stft_mags = v
-                break
-
         if isinstance(audio, bytes):
             try:
                 audio, _ = torchaudio.load(io.BytesIO(audio))
@@ -82,16 +71,10 @@ class PreprocessSample:
 
         if self.cfg.random_crop:
             audio = _random_crop(audio, self.num_samples)
-            stft_mags = None
         else:
             audio = _start_crop(audio, self.num_samples)
-            stft_mags = None
 
-        out = {"wav": audio, "meta": meta}
-        if stft_mags is not None:
-            out["target_stfts"] = stft_mags
-
-        return out
+        return {"wav": audio, "meta": meta}
 
 def is_valid_sample(x):
     return x is not None
@@ -117,14 +100,4 @@ def collate_fixed(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     wav = torch.stack([b["wav"] for b in batch], dim=0)  # (B,T)
     wav = wav.unsqueeze(1)  # (B,1,T)
     meta = [b["meta"] for b in batch]
-    out = {"wav": wav, "meta": meta}
-    
-    # Handle precomputed STFTs if all items in batch have them
-    if all("target_stfts" in b for b in batch):
-        target_stfts = {}
-        keys = batch[0]["target_stfts"].keys()
-        for k in keys:
-            target_stfts[k] = torch.stack([b["target_stfts"][k] for b in batch], dim=0)
-        out["target_stfts"] = target_stfts
-        
-    return out
+    return {"wav": wav, "meta": meta}

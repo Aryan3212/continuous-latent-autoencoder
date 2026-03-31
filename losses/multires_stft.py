@@ -49,7 +49,7 @@ class MultiResSTFTLoss(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, return_per_sample: bool = False, target_mags: Dict[str, torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, return_per_sample: bool = False) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         if x_hat.shape != x.shape:
             raise ValueError(f"x_hat and x must match; got {tuple(x_hat.shape)} vs {tuple(x.shape)}")
         
@@ -68,12 +68,9 @@ class MultiResSTFTLoss(nn.Module):
                 x_hat, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
             )
             
-            if target_mags is not None and str(n_fft) in target_mags:
-                mag = target_mags[str(n_fft)].to(x.device, dtype=x.dtype)
-            else:
-                mag = _stft_mag(
-                    x, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
-                )
+            mag = _stft_mag(
+                x, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
+            )
             
             # Reduce over Frequency (1) and Time (2) dimensions, keeping Batch (0)
             dims = (1, 2)
