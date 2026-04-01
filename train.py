@@ -635,36 +635,53 @@ def main() -> None:
                     l_fm = torch.tensor(0.0, device=device)
                     l_d = torch.tensor(0.0, device=device)
                     gan_w = 0.0
-                    if gan_enabled and discriminators is not None and step >= gan_start:
-                        gan_progress = min(1.0, (step - gan_start) / max(1, gan_warmup_steps))
-                        _set_requires_grad(discriminators, True)
-                        d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
-                        d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat.detach())
-                        d_real_msd, fmap_real_msd = discriminators["msd"](wav_a)
-                        d_fake_msd, fmap_fake_msd = discriminators["msd"](x_hat.detach())
-                        l_d = discriminator_loss(d_real_mpd, d_fake_mpd) + discriminator_loss(
-                            d_real_msd, d_fake_msd
-                        )
-                        d_scaler.scale(l_d / grad_accum).backward()
-                        _set_requires_grad(discriminators, False)
-                        d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
-                        d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
-                        fmap_real_mpd_det = [[f.detach() for f in layer] for layer in fmap_real_mpd]
-                        fmap_real_msd_det = [[f.detach() for f in layer] for layer in fmap_real_msd]
-                        l_g_adv = generator_loss(d_fake_mpd_g) + generator_loss(d_fake_msd_g)
-                        l_fm = feature_matching_loss(fmap_real_mpd_det, fmap_fake_mpd_g) + feature_matching_loss(
-                            fmap_real_msd_det, fmap_fake_msd_g
-                        )
 
-                        # Adaptive GAN weight (VQGAN-style): balance GAN vs reconstruction
-                        # gradients at the decoder's last conv layer
-                        last_layer = model["decoder"].out_conv.weight
-                        rec_grads = torch.autograd.grad(stft_w * l_stft, last_layer, retain_graph=True)[0]
-                        gan_grads = torch.autograd.grad(l_g_adv + l_fm, last_layer, retain_graph=True)[0]
-                        d_weight = torch.norm(rec_grads) / (torch.norm(gan_grads) + 1e-6)
-                        d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
-                        gan_w = d_weight.item() * gan_progress
+                # GAN runs outside autocast — float16 overflows in disc logits
+                # and adaptive-weight grad norms cause Inf losses and divergence.
+                if gan_enabled and discriminators is not None and step >= gan_start:
+                    gan_progress = min(1.0, (step - gan_start) / max(1, gan_warmup_steps))
+                    wav_a_f = wav_a.float()
+                    x_hat_f = x_hat.float()
 
+                    # --- Discriminator step ---
+                    _set_requires_grad(discriminators, True)
+                    d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a_f)
+                    d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat_f.detach())
+                    d_real_msd, fmap_real_msd = discriminators["msd"](wav_a_f)
+                    d_fake_msd, fmap_fake_msd = discriminators["msd"](x_hat_f.detach())
+                    l_d = 0.5 * (
+                        discriminator_loss(d_real_mpd, d_fake_mpd)
+                        + discriminator_loss(d_real_msd, d_fake_msd)
+                    )
+                    (l_d / grad_accum).backward()
+                    _set_requires_grad(discriminators, False)
+
+                    # --- Generator adversarial step ---
+                    d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat_f)
+                    d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat_f)
+                    fmap_real_mpd_det = [[f.detach() for f in layer] for layer in fmap_real_mpd]
+                    fmap_real_msd_det = [[f.detach() for f in layer] for layer in fmap_real_msd]
+                    l_g_adv = 0.5 * (
+                        generator_loss(d_fake_mpd_g) + generator_loss(d_fake_msd_g)
+                    )
+                    l_fm = 0.5 * (
+                        feature_matching_loss(fmap_real_mpd_det, fmap_fake_mpd_g)
+                        + feature_matching_loss(fmap_real_msd_det, fmap_fake_msd_g)
+                    )
+
+                    # Adaptive GAN weight (VQGAN-style) in float32
+                    last_layer = model["decoder"].out_conv.weight
+                    rec_grads = torch.autograd.grad(
+                        stft_w * l_stft.float(), last_layer, retain_graph=True
+                    )[0].float()
+                    gan_grads = torch.autograd.grad(
+                        l_g_adv + l_fm, last_layer, retain_graph=True
+                    )[0].float()
+                    d_weight = torch.norm(rec_grads) / (torch.norm(gan_grads) + 1e-4)
+                    d_weight = torch.clamp(d_weight, 0.0, 10.0).detach()
+                    gan_w = d_weight.item() * gan_progress
+
+                with torch.amp.autocast("cuda", enabled=use_amp):
                     l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
 
                     loss = (
@@ -742,10 +759,8 @@ def main() -> None:
             g_scaler.update()
             if gan_enabled and d_optimizer is not None and step >= gan_start:
                 if grad_clip and grad_clip > 0:
-                    d_scaler.unscale_(d_optimizer)
                     torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
-                d_scaler.step(d_optimizer)
-                d_scaler.update()
+                d_optimizer.step()
 
 
             for k, v in stats.items():

@@ -130,6 +130,8 @@ def run_all_probes(
             "--out",
             str(out),
         ]
+        if "segment_seconds" in asr:
+            cmd.extend(["--segment_seconds", str(float(asr["segment_seconds"]))])
         if asr.get("use_latent", False):
             cmd.append("--use_latent")
         _run("ASR Probe", cmd)

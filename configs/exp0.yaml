@@ -122,8 +122,8 @@ gan:
   warmup_steps: 5000
   periods: [2, 3, 5, 7, 11]
   msd_scales: 3
-  mpd_channels: 24
-  msd_channels: 12
+  mpd_channels: 32
+  msd_channels: 16
   d_lr: 5.0e-5
   d_betas: [0.8, 0.99]
   d_weight_decay: 0.0
@@ -178,4 +178,5 @@ eval:
     text_key: text
     steps: 2500           # Train probe for 2500 steps
     batch_size: 16
+    segment_seconds: 15.0 # Longer segments for CTC: 15s → ~187 frames
     use_latent: false
