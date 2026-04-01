@@ -179,4 +179,5 @@ eval:
     steps: 2500           # Train probe for 2500 steps
     batch_size: 16
     segment_seconds: 15.0 # Longer segments for CTC: 15s → ~187 frames
+    max_samples: 2000     # Cap samples to limit CPU RAM + disk IO during eval
     use_latent: false

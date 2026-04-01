@@ -52,6 +52,7 @@ class SlicingUnivariateTest(nn.Module):
         self.univariate_test = univariate_test
         self.clip_value = clip_value
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
+        self._step_int: int = 0
         self._generator = None
         self._generator_device = None
 
@@ -64,10 +65,11 @@ class SlicingUnivariateTest(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            seed = int(self.global_step.item()) + 137
+            seed = self._step_int + 137
             gen = self._get_generator(x.device, seed)
             a = torch.randn(x.size(-1), self.num_slices, device=x.device, generator=gen)
             a /= a.norm(p=2, dim=0)
+            self._step_int += 1
             self.global_step.add_(1)
 
         stats = self.univariate_test(x @ a)

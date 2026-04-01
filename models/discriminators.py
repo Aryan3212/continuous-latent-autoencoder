@@ -102,28 +102,20 @@ class MultiScaleDiscriminator(nn.Module):
 
 
 def discriminator_loss(real_logits: List[torch.Tensor], fake_logits: List[torch.Tensor]) -> torch.Tensor:
-    loss = 0.0
-    for r, f in zip(real_logits, fake_logits):
-        loss = loss + (F.relu(1.0 - r.float()).mean() + F.relu(1.0 + f.float()).mean())
-    n = max(len(real_logits), 1)
-    return loss / n
+    terms = [F.relu(1.0 - r.float()).mean() + F.relu(1.0 + f.float()).mean()
+             for r, f in zip(real_logits, fake_logits)]
+    return torch.stack(terms).mean()
 
 
 def generator_loss(fake_logits: List[torch.Tensor]) -> torch.Tensor:
-    loss = 0.0
-    for f in fake_logits:
-        loss = loss + (-f.float().mean())
-    n = max(len(fake_logits), 1)
-    return loss / n
+    terms = [-f.float().mean() for f in fake_logits]
+    return torch.stack(terms).mean()
 
 
 def feature_matching_loss(real_fmaps: List[List[torch.Tensor]], fake_fmaps: List[List[torch.Tensor]]) -> torch.Tensor:
-    loss = 0.0
-    total_layers = 0
-    for r_layers, f_layers in zip(real_fmaps, fake_fmaps):
-        for r, f in zip(r_layers, f_layers):
-            loss = loss + (r.float().detach() - f.float()).abs().mean()
-            total_layers += 1
-    if total_layers > 0:
-        loss = loss / total_layers
-    return loss
+    terms = [(r.float().detach() - f.float()).abs().mean()
+             for r_layers, f_layers in zip(real_fmaps, fake_fmaps)
+             for r, f in zip(r_layers, f_layers)]
+    if not terms:
+        return torch.tensor(0.0)
+    return torch.stack(terms).mean()

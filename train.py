@@ -84,9 +84,7 @@ def _encode(model: torch.nn.ModuleDict, wav: torch.Tensor) -> Tuple[torch.Tensor
 
 
 def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int, sigma: torch.Tensor) -> torch.Tensor:
-    z_dec = z
-    if sigma.item() > 0:
-        z_dec = z + torch.randn_like(z) * sigma
+    z_dec = z + torch.randn_like(z) * sigma
     return model["decoder"](z_dec, target_len=target_len)
 
 
@@ -404,7 +402,11 @@ def main() -> None:
             num_workers=0,
         )
         model.eval()
-        sums = {"val_stft": 0.0, "val_jepa": 0.0, "val_sig": 0.0}
+        sums = {
+            "val_stft": torch.tensor(0.0, device=device),
+            "val_jepa": torch.tensor(0.0, device=device),
+            "val_sig": torch.tensor(0.0, device=device),
+        }
         n = 0
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for vb in val_dl:
@@ -419,14 +421,14 @@ def main() -> None:
                 v_sig = 0.5 * (v_sig_a + v_sig_m)
                 xh = _decode(model, z, target_len=vw.size(-1), sigma=torch.tensor(0.0, device=device))
                 v_stft, _ = stft(xh, vw)
-                sums["val_stft"] += float(v_stft.detach().cpu())
-                sums["val_jepa"] += float(v_jepa.detach().cpu())
-                sums["val_sig"] += float(v_sig.detach().cpu())
+                sums["val_stft"] += v_stft.detach()
+                sums["val_jepa"] += v_jepa.detach()
+                sums["val_sig"] += v_sig.detach()
                 n += 1
                 if val_batches is not None and n >= val_batches:
                     break
         model.train()
-        return {k: v / max(1, n) for k, v in sums.items()}
+        return {k: (v / max(1, n)).item() for k, v in sums.items()}
 
     def _extra_state(**extra: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"best": dict(best), "scheduler": scheduler.state_dict() if scheduler else None}
@@ -679,7 +681,7 @@ def main() -> None:
                     )[0].float()
                     d_weight = torch.norm(rec_grads) / (torch.norm(gan_grads) + 1e-4)
                     d_weight = torch.clamp(d_weight, 0.0, 10.0).detach()
-                    gan_w = d_weight.item() * gan_progress
+                    gan_w = d_weight * gan_progress
 
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
@@ -881,6 +883,15 @@ def main() -> None:
                         if "visualization" in results:
                             import wandb
                             to_log["probe/latents"] = wandb.Image(results["visualization"], caption=f"Step {step} Latents")
+
+                        # Log probe timing so we can track eval duration on W&B
+                        to_log["probe/total_time_s"] = eval_elapsed
+                        probe_timing = results.get("_timing") or {}
+                        for probe_name, t_sec in probe_timing.items():
+                            safe_name = probe_name.lower().replace(" ", "_")
+                            to_log[f"probe/time_{safe_name}_s"] = abs(t_sec)
+                            if t_sec < 0:
+                                to_log[f"probe/failed_{safe_name}"] = 1
 
                         if to_log:
                             wb.log(to_log, step=step)

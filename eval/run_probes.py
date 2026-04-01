@@ -4,7 +4,7 @@ import json
 import pathlib
 import subprocess
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 def run_all_probes(
@@ -25,20 +25,36 @@ def run_all_probes(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     results: Dict[str, Any] = {}
+    timing: Dict[str, float] = {}
 
-    def _run(name: str, cmd: list[str]) -> None:
+    def _run(name: str, cmd: list[str]) -> bool:
         timestamp = time.strftime("%H:%M:%S")
         print(f"[{timestamp}] [Eval Step {step}] Starting {name}...", flush=True)
         start_t = time.perf_counter()
         try:
-            # We use subprocess.run to wait for the child process.
-            # Output is piped to stdout so it's visible in the main log.
-            subprocess.run(cmd, check=True)
+            proc = subprocess.run(
+                cmd, check=True,
+                stderr=subprocess.PIPE,
+                timeout=1800,  # 30 min hard timeout per probe
+            )
             elapsed = time.perf_counter() - start_t
-            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} finished in {elapsed:.2f}s", flush=True)
+            timing[name] = elapsed
+            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} finished in {elapsed:.1f}s", flush=True)
+            return True
         except subprocess.CalledProcessError as e:
-            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} FAILED with exit code {e.returncode}", flush=True)
-            raise
+            elapsed = time.perf_counter() - start_t
+            timing[name] = -elapsed  # negative = failed
+            stderr_tail = (e.stderr or b"").decode(errors="replace")[-2000:]
+            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} FAILED "
+                  f"(exit {e.returncode}, {elapsed:.1f}s)", flush=True)
+            if stderr_tail.strip():
+                print(f"  stderr (last 2000 chars):\n{stderr_tail}", flush=True)
+            return False
+        except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - start_t
+            timing[name] = -elapsed
+            print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} TIMED OUT after {elapsed:.1f}s", flush=True)
+            return False
 
     eval_cfg = exp_cfg.get("eval") or {}
     config_path = exp_cfg.get("_resolved_config_path")
@@ -49,7 +65,7 @@ def run_all_probes(
     emo = (eval_cfg.get("emotion") or {}) if isinstance(eval_cfg.get("emotion"), dict) else {}
     if emo.get("enabled", False):
         out = out_dir / "emotion.json"
-        _run(
+        ok = _run(
             "Emotion Probe",
             [
                 python_bin,
@@ -73,13 +89,14 @@ def run_all_probes(
                 str(out),
             ]
         )
-        results["emotion"] = json.loads(out.read_text())
+        if ok and out.exists():
+            results["emotion"] = json.loads(out.read_text())
 
     # Gender
     gen = (eval_cfg.get("gender") or {}) if isinstance(eval_cfg.get("gender"), dict) else {}
     if gen.get("enabled", False):
         out = out_dir / "gender.json"
-        _run(
+        ok = _run(
             "Gender Probe",
             [
                 python_bin,
@@ -103,7 +120,8 @@ def run_all_probes(
                 str(out),
             ]
         )
-        results["gender"] = json.loads(out.read_text())
+        if ok and out.exists():
+            results["gender"] = json.loads(out.read_text())
 
     # ASR
     asr = (eval_cfg.get("asr") or {}) if isinstance(eval_cfg.get("asr"), dict) else {}
@@ -132,15 +150,18 @@ def run_all_probes(
         ]
         if "segment_seconds" in asr:
             cmd.extend(["--segment_seconds", str(float(asr["segment_seconds"]))])
+        if asr.get("max_samples"):
+            cmd.extend(["--max_samples", str(int(asr["max_samples"]))])
         if asr.get("use_latent", False):
             cmd.append("--use_latent")
-        _run("ASR Probe", cmd)
-        results["asr"] = json.loads(out.read_text())
+        ok = _run("ASR Probe", cmd)
+        if ok and out.exists():
+            results["asr"] = json.loads(out.read_text())
 
     # Latent Visualization (PCA/UMAP)
     vis_out = out_dir / "latents.png"
     vis_manifest = eval_cfg.get("vis_manifest") or exp_cfg["data"].get("val_manifest") or exp_cfg["data"]["train_manifest"]
-    
+
     try:
         _run(
             "Latent Visualization",
@@ -156,13 +177,15 @@ def run_all_probes(
                 "--out",
                 str(vis_out),
                 "--limit",
-                "200" # Reduced from 500 for faster evaluation
+                "200"
             ]
         )
-        results["visualization"] = str(vis_out)
+        if vis_out.exists():
+            results["visualization"] = str(vis_out)
     except Exception as e:
         print(f"Visualization failed: {e}")
 
+    results["_timing"] = timing
     (out_dir / "summary.json").write_text(json.dumps(results, indent=2))
     (pathlib.Path(run_dir) / f"eval_step_{step}.json").write_text(json.dumps(results, indent=2))
     return results

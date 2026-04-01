@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import time
 from typing import Any, Dict, List, Tuple
 
 import torch
@@ -22,36 +23,24 @@ def _load_embs(
     label_key: str,
     batch_size: int,
     segment_seconds: float,
+    log_name: str = "",
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, int]]:
+    xs: List[torch.Tensor] = []
     metas: List[Dict[str, Any]] = []
-    for _, meta in iter_embeddings(
+    for emb, meta in iter_embeddings(
         lm,
         manifest,
         sample_rate=int(lm.cfg["data"]["sample_rate"]),
         segment_seconds=segment_seconds,
         batch_size=batch_size,
+        log_name=log_name,
     ):
+        xs.append(emb)
         metas.extend(meta)
 
     label_map = _build_label_map(metas, label_key)
-
-    xs: List[torch.Tensor] = []
-    ys: List[torch.Tensor] = []
-    meta_i = 0
-    for emb, _meta in iter_embeddings(
-        lm,
-        manifest,
-        sample_rate=int(lm.cfg["data"]["sample_rate"]),
-        segment_seconds=segment_seconds,
-        batch_size=batch_size,
-    ):
-        b = emb.size(0)
-        y = torch.tensor([label_map[metas[meta_i + j][label_key]] for j in range(b)], dtype=torch.long)
-        meta_i += b
-        xs.append(emb)
-        ys.append(y)
-
-    return torch.cat(xs, dim=0), torch.cat(ys, dim=0), label_map
+    ys = torch.tensor([label_map[m[label_key]] for m in metas], dtype=torch.long)
+    return torch.cat(xs, dim=0), ys, label_map
 
 
 def main() -> None:
@@ -72,20 +61,29 @@ def main() -> None:
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
     seg = float(args.segment_seconds if args.segment_seconds is not None else lm.cfg["data"]["segment_seconds"])
 
-    x_tr, y_tr, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg)
-    x_de, y_de, _ = _load_embs(lm, args.dev_manifest, args.label_key, args.batch_size, seg)
+    print(f"  [Gender] Extracting train embeddings...", flush=True)
+    x_tr, y_tr, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg, log_name="Gender train")
+    print(f"  [Gender] Extracting dev embeddings...", flush=True)
+    x_de, y_de, _ = _load_embs(lm, args.dev_manifest, args.label_key, args.batch_size, seg, log_name="Gender dev")
+
+    # Free frozen encoder
+    del lm
+    torch.cuda.empty_cache()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     x_tr, y_tr = x_tr.to(device), y_tr.to(device)
     x_de, y_de = x_de.to(device), y_de.to(device)
 
     num_classes = len(label_map)
+    print(f"  [Gender] Train: {x_tr.shape[0]}, Dev: {x_de.shape[0]}, Classes: {num_classes}", flush=True)
     head = nn.Sequential(nn.Linear(x_tr.size(1), 128), nn.GELU(), nn.Dropout(0.1), nn.Linear(128, num_classes)).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
     loss_fn = nn.CrossEntropyLoss()
 
     head.train()
-    for _ in range(args.steps):
+    t0 = time.perf_counter()
+    log_interval = max(1, args.steps // 5)
+    for step_i in range(args.steps):
         idx = torch.randint(0, x_tr.size(0), (args.batch_size,), device=device)
         xb, yb = x_tr[idx], y_tr[idx]
         logits = head(xb)
@@ -93,12 +91,16 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        if (step_i + 1) % log_interval == 0:
+            elapsed = time.perf_counter() - t0
+            print(f"  [Gender] step {step_i+1}/{args.steps}  loss={loss.item():.4f}  ({elapsed:.1f}s)", flush=True)
 
     head.eval()
     with torch.no_grad():
         pred = head(x_de).argmax(dim=-1)
         acc = (pred == y_de).float().mean().item()
 
+    print(f"  [Gender] Accuracy: {acc:.4f}", flush=True)
     out = {"accuracy": float(acc), "num_classes": num_classes, "num_train": int(x_tr.size(0)), "num_dev": int(x_de.size(0))}
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
@@ -106,4 +108,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
