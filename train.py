@@ -681,7 +681,7 @@ def main() -> None:
                     )[0].float()
                     d_weight = torch.norm(rec_grads) / (torch.norm(gan_grads) + 1e-4)
                     d_weight = torch.clamp(d_weight, 0.0, 10.0).detach()
-                    gan_w = d_weight * gan_progress
+                    gan_w = d_weight.item() * gan_progress
 
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     l_jepa = l_jepa_mask + mix_view_w * l_jepa_mix
