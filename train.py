@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 import time
 from typing import Any, Dict, Tuple
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 
@@ -638,29 +641,30 @@ def main() -> None:
                     l_d = torch.tensor(0.0, device=device)
                     gan_w = 0.0
 
-                # GAN runs outside autocast — float16 overflows in disc logits
-                # and adaptive-weight grad norms cause Inf losses and divergence.
+                # GAN: forward passes run in AMP (float16 activations to save VRAM),
+                # but losses are cast to float32 to avoid hinge-loss overflow.
                 if gan_enabled and discriminators is not None and step >= gan_start:
                     gan_progress = min(1.0, (step - gan_start) / max(1, gan_warmup_steps))
-                    wav_a_f = wav_a.float()
-                    x_hat_f = x_hat.float()
 
-                    # --- Discriminator step ---
+                    # --- Discriminator step (AMP forward, float32 loss) ---
                     _set_requires_grad(discriminators, True)
-                    d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a_f)
-                    d_fake_mpd, fmap_fake_mpd = discriminators["mpd"](x_hat_f.detach())
-                    d_real_msd, fmap_real_msd = discriminators["msd"](wav_a_f)
-                    d_fake_msd, fmap_fake_msd = discriminators["msd"](x_hat_f.detach())
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
+                        d_fake_mpd, _ = discriminators["mpd"](x_hat.detach())
+                        d_real_msd, fmap_real_msd = discriminators["msd"](wav_a)
+                        d_fake_msd, _ = discriminators["msd"](x_hat.detach())
+                    # Loss in float32 (discriminator_loss casts logits via .float())
                     l_d = 0.5 * (
                         discriminator_loss(d_real_mpd, d_fake_mpd)
                         + discriminator_loss(d_real_msd, d_fake_msd)
                     )
-                    (l_d / grad_accum).backward()
+                    d_scaler.scale(l_d / grad_accum).backward()
                     _set_requires_grad(discriminators, False)
 
-                    # --- Generator adversarial step ---
-                    d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat_f)
-                    d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat_f)
+                    # --- Generator adversarial step (AMP forward, float32 loss) ---
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
+                        d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
                     fmap_real_mpd_det = [[f.detach() for f in layer] for layer in fmap_real_mpd]
                     fmap_real_msd_det = [[f.detach() for f in layer] for layer in fmap_real_msd]
                     l_g_adv = 0.5 * (
@@ -761,8 +765,10 @@ def main() -> None:
             g_scaler.update()
             if gan_enabled and d_optimizer is not None and step >= gan_start:
                 if grad_clip and grad_clip > 0:
+                    d_scaler.unscale_(d_optimizer)
                     torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
-                d_optimizer.step()
+                d_scaler.step(d_optimizer)
+                d_scaler.update()
 
 
             for k, v in stats.items():
