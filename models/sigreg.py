@@ -121,17 +121,13 @@ class SIGReg(nn.Module):
         ecf_loss = self.test(x)
 
         var = x.var(dim=1, unbiased=False).squeeze(0)  # Variance across samples (N)
-        mean = x.mean(dim=1).squeeze(0) # Mean across samples (N)
         l_var = (var - 1.0).pow(2).mean()
-        l_mean = mean.pow(2).mean()
-        loss = ecf_loss + self.var_weight * l_var + l_mean
+        loss = ecf_loss + self.var_weight * l_var
         stats = {
             "sigreg_loss": loss.detach(),
-            "z_mean_abs": mean.abs().mean().detach(),
             "z_var_min": var.min().detach(),
             "z_var_med": var.median().detach(),
             "z_var_max": var.max().detach(),
             "z_var_penalty": l_var.detach(),
-            "z_mean_penalty": l_mean.detach(),
         }
         return loss, stats

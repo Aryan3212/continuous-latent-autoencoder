@@ -414,8 +414,8 @@ def main() -> None:
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for vb in val_dl:
                 vw = vb["wav"].to(device)
-                h0, _, z, _ = _encode(model, vw)
-                h0m = apply_feature_mask(h0, feat_mask_cfg)
+                h0, hE, z, stats = _encode(model, vw)
+                h0m, mask = apply_feature_mask(h0, feat_mask_cfg)
                 hEm = model["encoder"](h0m)
                 zm = hEm
                 v_jepa = _lejepa_loss(z, zm)
@@ -562,9 +562,13 @@ def main() -> None:
                     h0_aug = model["frontend"](wav_aug)
 
                     # Masked feature view (V1) - applied to Augmented view features
-                    h0_masked = apply_feature_mask(h0_aug, feat_mask_cfg)
+                    h0_masked, time_mask = apply_feature_mask(h0_aug, feat_mask_cfg)
                     hE_mask = model["encoder"](h0_masked)
                     z_mask = hE_mask
+
+                    # Up-sample time_mask to match raw audio resolution
+                    # time_mask is (B, 1, T_latent), wav is (B, 1, T_raw)
+                    wav_mask = F.interpolate(time_mask, size=(wav_a.size(-1),), mode='nearest')
 
                     # LeJEPA: masked+augmented view should match clean center
                     l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
@@ -630,11 +634,13 @@ def main() -> None:
                     sigma = _latent_noise_sigma(cfg, step, device)
                     x_hat = _decode(model, z_mask, target_len=wav_a.size(-1), sigma=sigma)
                 
-                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
+                    # MASKED STFT: Calculate loss only on the parts we hid!
+                    # This makes the reconstruction problem "much harder" (MAR)
+                    l_stft_ps, stft_stats_ps = stft(x_hat * wav_mask, wav_a * wav_mask, return_per_sample=True)
                     l_stft = l_stft_ps.mean()
                     stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
 
-                    l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
+                    l_wav_ps = ((x_hat - wav_a) * wav_mask).abs().mean(dim=(1, 2))
                     l_wav = l_wav_ps.mean()
 
                     l_g_adv = torch.tensor(0.0, device=device)

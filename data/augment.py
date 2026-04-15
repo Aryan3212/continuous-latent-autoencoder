@@ -17,14 +17,17 @@ class FeatureMaskConfig:
     channel_mask_len: int = 32
 
 
-def apply_feature_mask(h0: torch.Tensor, cfg: FeatureMaskConfig) -> torch.Tensor:
+def apply_feature_mask(h0: torch.Tensor, cfg: FeatureMaskConfig) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     SpecAug-style masking on learned features.
       h0: (B,C,T')
+    Returns (masked_h0, mask) where mask is 1 at masked positions.
     """
-    if not cfg.enabled:
-        return h0
     b, c, t = h0.shape
+    mask = torch.zeros((b, 1, t), device=h0.device, dtype=h0.dtype)
+    if not cfg.enabled:
+        return h0, mask
+    
     out = h0.clone()
 
     if random.random() < cfg.time_mask_prob:
@@ -32,14 +35,17 @@ def apply_feature_mask(h0: torch.Tensor, cfg: FeatureMaskConfig) -> torch.Tensor
         if m > 0:
             start = random.randint(0, max(0, t - m))
             out[:, :, start : start + m] = 0.0
+            mask[:, :, start : start + m] = 1.0
 
     if random.random() < cfg.channel_mask_prob:
         m = min(cfg.channel_mask_len, c)
         if m > 0:
             start = random.randint(0, max(0, c - m))
             out[:, start : start + m, :] = 0.0
+            # Channel masking doesn't affect time-domain reconstruction loss targeting as easily
+            # but we could mark it. For now, focus on time masking for MAR.
 
-    return out
+    return out, mask
 
 
 def rms(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
