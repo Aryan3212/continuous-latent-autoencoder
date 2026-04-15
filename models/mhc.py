@@ -73,6 +73,7 @@ class MHCWrapper(nn.Module):
 
         if add_branch_out_to_residual:
             self.H_post_logits = nn.Parameter(torch.zeros(1, num_streams))
+            self.branch_scale = nn.Parameter(torch.zeros(1))
 
         if identity_mix:
             # Learned alpha via sigmoid to keep it in (0, 1)
@@ -122,7 +123,9 @@ class MHCWrapper(nn.Module):
 
         if self.add_branch_out_to_residual:
             h_post = self.H_post_logits.softmax(dim=-1)
-            branch_to_residuals = torch.einsum("vs, t b d -> s t b d", h_post, branch_out)
+            # Apply learned scale (tanh to keep it bounded)
+            branch_out_scaled = branch_out * torch.tanh(self.branch_scale)
+            branch_to_residuals = torch.einsum("vs, t b d -> s t b d", h_post, branch_out_scaled)
             residuals_out = residuals_out + branch_to_residuals
 
         return residuals_out

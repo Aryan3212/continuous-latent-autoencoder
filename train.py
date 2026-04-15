@@ -625,9 +625,10 @@ def main() -> None:
                         "z_var_penalty": sig_stats_a["z_var_penalty"],
                     }
 
-                    # Decoder
+                    # Decoder: Reconstruct from Masked/Augmented view (z_mask) instead of clean (z_a)
+                    # This turns the model into a Denoising Autoencoder / Audio-MAE hybrid.
                     sigma = _latent_noise_sigma(cfg, step, device)
-                    x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
+                    x_hat = _decode(model, z_mask, target_len=wav_a.size(-1), sigma=sigma)
                 
                     l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
                     l_stft = l_stft_ps.mean()
@@ -704,12 +705,21 @@ def main() -> None:
                 g_scaler.scale(loss).backward()
                 total_loss = total_loss + loss.detach()
 
+                # Calculate Participation Ratio (Effective Rank) for diagnostics
+                with torch.no_grad():
+                    z_flat = z_a.permute(0, 2, 1).reshape(-1, z_a.size(1))
+                    z_centered = z_flat - z_flat.mean(dim=0)
+                    z_cov = (z_centered.T @ z_centered) / (z_flat.size(0) - 1)
+                    z_eigvals = torch.linalg.eigvalsh(z_cov)
+                    z_rank = (z_eigvals.sum()**2) / (z_eigvals.pow(2).sum() + 1e-8)
+
                 mb_step_stats = {
                     "l_stft": l_stft.detach(),
                     "l_wav": l_wav.detach(),
                     "l_jepa": l_jepa.detach(),
                     "l_jepa_mask": l_jepa_mask.detach(),
                     "l_sig": l_sig.detach(),
+                    "z_rank": z_rank.detach(),
                     "sigma": sigma.detach(),
                     "z_mean": z_a.mean().detach(),
                     "z_std": z_a.std(unbiased=False).detach(),
