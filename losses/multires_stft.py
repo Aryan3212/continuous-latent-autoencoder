@@ -49,7 +49,14 @@ class MultiResSTFTLoss(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, return_per_sample: bool = False) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def forward(
+        self,
+        x_hat: torch.Tensor,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_per_sample: bool = False,
+        target_mags: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         if x_hat.shape != x.shape:
             raise ValueError(f"x_hat and x must match; got {tuple(x_hat.shape)} vs {tuple(x.shape)}")
         
@@ -61,19 +68,29 @@ class MultiResSTFTLoss(nn.Module):
         total_mag = torch.zeros(batch_size, device=x.device)
         total_log = torch.zeros(batch_size, device=x.device)
         
-        for n_fft in self.cfg.fft_sizes:
+        for i_res, n_fft in enumerate(self.cfg.fft_sizes):
             hop = max(1, int(n_fft * self.cfg.hop_ratio))
             win = max(1, int(n_fft * self.cfg.win_ratio))
             mag_hat = _stft_mag(
                 x_hat, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
             )
             
-            mag = _stft_mag(
-                x, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
-            )
+            if target_mags is not None:
+                mag = target_mags[i_res]
+            else:
+                mag = _stft_mag(
+                    x, n_fft=n_fft, hop_length=hop, win_length=win, center=self.cfg.center, window=self.cfg.window
+                )
             
             # Reduce over Frequency (1) and Time (2) dimensions, keeping Batch (0)
             dims = (1, 2)
+
+            if mask is not None:
+                # Up-sample/Down-sample time mask to match spectrogram resolution
+                # mag is (B, F, T_stft)
+                m = torch.nn.functional.interpolate(mask, size=(mag.size(-1),), mode='nearest')
+                mag_hat = mag_hat * m
+                mag = mag * m
             
             # Spectral Convergence
             numer = (mag_hat - mag).norm(p="fro", dim=dims)
@@ -110,6 +127,11 @@ class MultiResSTFTLoss(nn.Module):
             return per_sample_losses, stats
         else:
             loss = per_sample_losses.mean()
+            # If masking, normalize by the active mask fraction to keep loss scales stable
+            if mask is not None:
+                mask_frac = mask.mean().clamp(min=1e-3)
+                loss = loss / mask_frac
+
             stats = {
                 "stft_loss": loss.detach(),
                 "stft_sc": total_sc.mean().detach(),

@@ -635,8 +635,8 @@ def main() -> None:
                     x_hat = _decode(model, z_mask, target_len=wav_a.size(-1), sigma=sigma)
                 
                     # MASKED STFT: Calculate loss only on the parts we hid!
-                    # This makes the reconstruction problem "much harder" (MAR)
-                    l_stft_ps, stft_stats_ps = stft(x_hat * wav_mask, wav_a * wav_mask, return_per_sample=True)
+                    # We pass the time_mask to the loss function which applies it to spectrogram magnitudes.
+                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, mask=time_mask, return_per_sample=True)
                     l_stft = l_stft_ps.mean()
                     stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
 
