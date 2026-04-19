@@ -103,7 +103,8 @@ def _primary_infonce(z_a: torch.Tensor, z_mask: torch.Tensor, temp: float = 0.1)
     sim = e_all @ e_all.t() / temp                   # (B, B)
     eye_mask = torch.eye(B, dtype=torch.bool, device=e_all.device)
     pos = (e_all * e_pos).sum(dim=-1, keepdim=True) / temp  # (B, 1)
-    logits = torch.cat([pos, sim.masked_fill(eye_mask, -1e9)], dim=1)  # (B, 1+B)
+    neg_inf = torch.finfo(sim.dtype).min
+    logits = torch.cat([pos, sim.masked_fill(eye_mask, neg_inf)], dim=1)  # (B, 1+B)
     target = torch.zeros(B, dtype=torch.long, device=e_all.device)
     return F.cross_entropy(logits, target)
 
@@ -248,10 +249,6 @@ def main() -> None:
             "sigreg": sigreg,
         }
     ).to(device)
-
-    if device.type == "cuda":
-        model["encoder"] = torch.compile(model["encoder"], mode="reduce-overhead")
-        model["decoder"] = torch.compile(model["decoder"], mode="reduce-overhead")
 
     gan_cfg = cfg.get("gan") or {}
     gan_enabled = bool(gan_cfg.get("enabled", False))
