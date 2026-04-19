@@ -71,8 +71,11 @@ def _lejepa_loss(center: torch.Tensor, view: torch.Tensor, return_per_sample: bo
 
 
 def _pool(z: torch.Tensor) -> torch.Tensor:
-    # z: (B,d,T') -> (B,2d)
-    return torch.cat([z.mean(dim=-1), z.std(dim=-1, unbiased=False)], dim=1)
+    # z: (B,d,T') -> (B,3d)
+    avg_p = z.mean(dim=-1)
+    std_p = z.std(dim=-1, unbiased=False)
+    max_p = z.max(dim=-1)[0]
+    return torch.cat([avg_p, std_p, max_p], dim=1)
 
 
 def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
@@ -91,14 +94,18 @@ def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int, sigma:
     return model["decoder"](z_dec, target_len=target_len)
 
 
-def _primary_logits(e_mix: torch.Tensor, e_a: torch.Tensor, e_b: torch.Tensor) -> torch.Tensor:
-    # cosine sim logits between e_mix and (e_a, e_b)
-    em = F.normalize(e_mix, dim=-1)
-    ea = F.normalize(e_a, dim=-1)
-    eb = F.normalize(e_b, dim=-1)
-    s_a = (em * ea).sum(dim=-1, keepdim=True)
-    s_b = (em * eb).sum(dim=-1, keepdim=True)
-    return torch.cat([s_a, s_b], dim=-1)  # (B,2)
+def _primary_infonce(z_a: torch.Tensor, z_mask: torch.Tensor, temp: float = 0.1) -> torch.Tensor:
+    # In-batch InfoNCE over pooled utterance embeddings.
+    # Positives: clean vs masked view of the same utterance. Negatives: other utterances in batch.
+    e_all = F.normalize(_pool(z_a), dim=-1)          # (B, 3D)
+    e_pos = F.normalize(_pool(z_mask), dim=-1)       # (B, 3D)
+    B = e_all.size(0)
+    sim = e_all @ e_all.t() / temp                   # (B, B)
+    eye_mask = torch.eye(B, dtype=torch.bool, device=e_all.device)
+    pos = (e_all * e_pos).sum(dim=-1, keepdim=True) / temp  # (B, 1)
+    logits = torch.cat([pos, sim.masked_fill(eye_mask, -1e9)], dim=1)  # (B, 1+B)
+    target = torch.zeros(B, dtype=torch.long, device=e_all.device)
+    return F.cross_entropy(logits, target)
 
 
 def main() -> None:
@@ -242,6 +249,10 @@ def main() -> None:
         }
     ).to(device)
 
+    if device.type == "cuda":
+        model["encoder"] = torch.compile(model["encoder"], mode="reduce-overhead")
+        model["decoder"] = torch.compile(model["decoder"], mode="reduce-overhead")
+
     gan_cfg = cfg.get("gan") or {}
     gan_enabled = bool(gan_cfg.get("enabled", False))
     discriminators = None
@@ -374,6 +385,7 @@ def main() -> None:
     primary_cfg = cfg["loss"].get("primary") or {}
     primary_enabled = bool(primary_cfg.get("enabled", False))
     primary_w = float(primary_cfg.get("weight", 0.0))
+    primary_temp = float(primary_cfg.get("temp", 0.1))
 
     mix_view_w = float(jcfg.get("mix_view_weight", 1.0))
     gan_start = int(gan_cfg.get("start_step", 0))
@@ -600,13 +612,8 @@ def main() -> None:
                             l_stft_mix_ps, _ = stft(x_hat_mix, wav_tgt, return_per_sample=True)
                             l_stft_mix = (l_stft_mix_ps * mix_mask_f).sum() / mix_mask_sum
 
-                        if primary_enabled:
-                            e_mix = _pool(z_mix)
-                            e_a = _pool(z_a)
-                            e_b = _pool(z_b)
-                            logits = _primary_logits(e_mix, e_a, e_b)
-                            l_primary_ps = F.cross_entropy(logits, primary_idx, reduction='none')
-                            l_primary = (l_primary_ps * mix_mask_f).sum() / mix_mask_sum
+                    if primary_enabled:
+                        l_primary = _primary_infonce(z_a, z_mask, temp=primary_temp)
 
                     # SIGReg on clean embeddings
                     sig_losses = []
@@ -632,15 +639,15 @@ def main() -> None:
                     # Decoder: Reconstruct from Masked/Augmented view (z_mask) instead of clean (z_a)
                     # This turns the model into a Denoising Autoencoder / Audio-MAE hybrid.
                     sigma = _latent_noise_sigma(cfg, step, device)
-                    x_hat = _decode(model, z_mask, target_len=wav_a.size(-1), sigma=sigma)
+                    x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
                 
                     # MASKED STFT: Calculate loss only on the parts we hid!
                     # We pass the time_mask to the loss function which applies it to spectrogram magnitudes.
-                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, mask=time_mask, return_per_sample=True)
+                    l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
                     l_stft = l_stft_ps.mean()
                     stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
 
-                    l_wav_ps = ((x_hat - wav_a) * wav_mask).abs().mean(dim=(1, 2))
+                    l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
                     l_wav = l_wav_ps.mean()
 
                     l_g_adv = torch.tensor(0.0, device=device)

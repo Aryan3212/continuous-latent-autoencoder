@@ -23,7 +23,10 @@ Date format: `YYYY-MM-DD`
 - Updated ASR probe to support end-to-end encoder features with a dry-run mode.
 - Added reconstruction evaluation and a run-all benchmark entrypoint with optional baselines.
 
-## 2026-02-11
+## 2026-04-17
 
-- Fixed numerical instability in STFT Spectral Convergence loss by increasing `logmag_eps` from 1e-7 to 1e-3. This prevents division-by-zero explosions when reconstructing silence.
-- Documented research diagnostic guidelines in `AGENTS.md`.
+-   **Stabilized STFT Spectral Convergence (SC) Loss**: Modified `MultiResSTFTLoss` to use the unmasked ground truth magnitude in the denominator when calculating SC on masked regions. This prevents the loss from exploding (previously reaching ~56) when the masked segment of the audio is quiet.
+-   **Normalized Masked Losses**: Updated `train.py` to divide masked STFT and L1 losses by `mask_frac`, ensuring the loss scale remains consistent with unmasked validation reconstruction (~3-4).
+-   **Fixed Primary Loss Stagnation**: Added a temperature scale (default 0.07-0.1) to the cosine similarity logits in `_primary_logits`. This sharpens the distribution, allowing the `l_primary` classification loss to decrease from its random-chance plateau (~0.69).
+-   **Updated Config**: Added `loss.primary.temp` to `configs/exp0.yaml` for easier tuning of the primary component similarity task.
+

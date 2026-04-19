@@ -74,18 +74,6 @@ def main():
     }
     wb = maybe_init_wandb(wb_cfg, run_id, str(out_root))
 
-    # Charset / Vocab
-    texts = []
-    with open(args.train_manifest, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            texts.append(json.loads(line)["sentence"])
-            if i > 20000: break # Use more samples for full vocab
-    
-    charset = build_charset(texts)
-    vocab = {c: i for i, c in enumerate(charset)}
-    id2ch = charset
-    print(f"Vocab size: {len(charset)}")
-
     # Dataset
     d_cfg = lm.cfg["data"]
     ds_train = get_audio_wds(WebDatasetConfig(
@@ -105,6 +93,21 @@ def main():
     ))
     ds_val = ds_val.batched(args.batch_size, collation_fn=collate_fixed)
     dl_val = DataLoader(ds_val, batch_size=None, num_workers=4)
+
+    # Charset / Vocab
+    texts = []
+    print("Building vocabulary from the first 20,000 samples of the train stream...")
+    train_iter = iter(dl_train)
+    for batch in train_iter:
+        for m in batch["meta"]:
+            texts.append(m["sentence"])
+        if len(texts) > 20000:
+            break
+    
+    charset = build_charset(texts)
+    vocab = {c: i for i, c in enumerate(charset)}
+    id2ch = charset
+    print(f"Vocab size: {len(charset)}")
 
     # ASR Head
     d_model = lm.cfg["model"]["encoder"]["d_model"]

@@ -33,9 +33,12 @@ def apply_feature_mask(h0: torch.Tensor, cfg: FeatureMaskConfig) -> Tuple[torch.
     if random.random() < cfg.time_mask_prob:
         m = min(cfg.time_mask_len, t)
         if m > 0:
-            start = random.randint(0, max(0, t - m))
-            out[:, :, start : start + m] = 0.0
-            mask[:, :, start : start + m] = 1.0
+            num_spans = max(1, int(0.5 * t / cfg.time_mask_len))
+            max_start = max(0, t - m)
+            for _ in range(num_spans):
+                start = random.randint(0, max_start)
+                out[:, :, start : start + m] = 0.0
+                mask[:, :, start : start + m] = 1.0
 
     if random.random() < cfg.channel_mask_prob:
         m = min(cfg.channel_mask_len, c)

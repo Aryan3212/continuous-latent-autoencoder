@@ -85,6 +85,9 @@ class MultiResSTFTLoss(nn.Module):
             # Reduce over Frequency (1) and Time (2) dimensions, keeping Batch (0)
             dims = (1, 2)
 
+            # Spectral Convergence: Use unmasked denominator for stability
+            denom = mag.norm(p="fro", dim=dims) + self.cfg.logmag_eps
+
             if mask is not None:
                 # Up-sample/Down-sample time mask to match spectrogram resolution
                 # mag is (B, F, T_stft)
@@ -92,9 +95,7 @@ class MultiResSTFTLoss(nn.Module):
                 mag_hat = mag_hat * m
                 mag = mag * m
             
-            # Spectral Convergence
             numer = (mag_hat - mag).norm(p="fro", dim=dims)
-            denom = mag.norm(p="fro", dim=dims) + self.cfg.logmag_eps
             sc = numer / denom
             
             # Log Mag

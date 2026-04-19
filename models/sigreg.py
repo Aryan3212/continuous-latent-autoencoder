@@ -93,6 +93,7 @@ class SIGRegConfig:
     reduction: str = "mean"
     clip_value: Optional[float] = None
     var_weight: float = 1.0
+    residual_weight: float = 0.2
 
 
 class SIGReg(nn.Module):
@@ -105,6 +106,7 @@ class SIGReg(nn.Module):
         self.dim = dim
         self.cfg = cfg
         self.var_weight = cfg.var_weight
+        self.residual_weight = cfg.residual_weight
         univariate = EppsPulley(t_max=cfg.t_max, n_points=cfg.n_points)
         self.test = SlicingUnivariateTest(
             univariate_test=univariate,
@@ -117,17 +119,33 @@ class SIGReg(nn.Module):
         if z.dim() != 3:
             raise ValueError(f"Expected z as (B,d,T'), got {tuple(z.shape)}")
         b, d, t = z.shape
-        x = z.permute(0, 2, 1).reshape(b * t, d).unsqueeze(0)  # (1,N,D)
-        ecf_loss = self.test(x)
 
-        var = x.var(dim=1, unbiased=False).squeeze(0)  # Variance across samples (N)
+        # Decomposed SIGReg: split z into utterance mean and per-frame residuals.
+        m = z.mean(dim=-1)  # (B, D)
+        r = z - m.unsqueeze(-1)  # (B, D, T)
+
+        # Utterance-level Gaussianity test on pooled means.
+        ecf_loss_utt = self.test(m.unsqueeze(0))  # (1, B, D)
+
+        # Residual-level Gaussianity test on flattened residuals.
+        r_flat = r.permute(0, 2, 1).reshape(b * t, d).unsqueeze(0)  # (1, B*T, D)
+        ecf_loss_res = self.test(r_flat)
+
+        # Variance penalty on utterance means only.
+        var = m.var(dim=0, unbiased=False)  # (D,)
         l_var = (var - 1.0).pow(2).mean()
-        loss = ecf_loss + self.var_weight * l_var
+
+        loss = ecf_loss_utt + self.residual_weight * ecf_loss_res + self.var_weight * l_var
+
+        var_res = r_flat.var(dim=1, unbiased=False).squeeze(0)  # (D,)
         stats = {
             "sigreg_loss": loss.detach(),
             "z_var_min": var.min().detach(),
             "z_var_med": var.median().detach(),
             "z_var_max": var.max().detach(),
             "z_var_penalty": l_var.detach(),
+            "z_var_min_res": var_res.min().detach(),
+            "z_var_med_res": var_res.median().detach(),
+            "z_var_max_res": var_res.max().detach(),
         }
         return loss, stats
