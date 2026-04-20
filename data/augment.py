@@ -22,23 +22,27 @@ def apply_feature_mask(h0: torch.Tensor, cfg: FeatureMaskConfig) -> Tuple[torch.
     SpecAug-style masking on learned features.
       h0: (B,C,T')
     Returns (masked_h0, mask) where mask is 1 at masked positions.
+    Masks are now per-sample (each batch element gets independent span starts).
     """
     b, c, t = h0.shape
     mask = torch.zeros((b, 1, t), device=h0.device, dtype=h0.dtype)
     if not cfg.enabled:
         return h0, mask
-    
+
     out = h0.clone()
 
     if random.random() < cfg.time_mask_prob:
         m = min(cfg.time_mask_len, t)
         if m > 0:
-            num_spans = max(1, int(0.5 * t / cfg.time_mask_len))
+            num_spans = max(1, int(0.49 * t / cfg.time_mask_len))
             max_start = max(0, t - m)
-            for _ in range(num_spans):
-                start = random.randint(0, max_start)
-                out[:, :, start : start + m] = 0.0
-                mask[:, :, start : start + m] = 1.0
+            # Per-sample mask starts: shape (num_spans, b)
+            starts = torch.randint(0, max_start + 1, (num_spans, b))
+            for s_idx in range(num_spans):
+                for i in range(b):
+                    s = int(starts[s_idx, i].item())
+                    out[i, :, s : s + m] = 0.0
+                    mask[i, :, s : s + m] = 1.0
 
     if random.random() < cfg.channel_mask_prob:
         m = min(cfg.channel_mask_len, c)

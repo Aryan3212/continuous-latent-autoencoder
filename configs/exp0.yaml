@@ -22,17 +22,22 @@ data:
 aug:
   feature_mask:
     enabled: true
-    time_mask_prob: 1.0       # Typical wav2vec2/HuBERT masking ratio
-    time_mask_len: 10           # 5 tokens @ 12.5Hz = 400ms masking span
+    time_mask_prob: 1.0
+    time_mask_len: 5            # 5 frames @ 12.5Hz = 400ms; multi-span coverage targets ~49%
   wave_aug:
     enabled: true
-    noise_prob: 0.1
-    noise_snr_min: 5.0
-    noise_snr_max: 20.0
-    reverb_prob: 0.0      # RIR dataset needed for true reverb, placeholder for now
-    lowpass_prob: 0.1
-    gain_prob: 0.1
-    clip_prob: 0.05
+    noise_prob: 1.0             # always add noise; intensity sampled per-sample
+    noise_snr_min: 0.0          # loud end: noise matches speech
+    noise_snr_max: 25.0         # gentle end: barely audible
+    reverb_prob: 0.0            # leave disabled (no RIR data)
+    lowpass_prob: 1.0           # always lowpass; cutoff sampled per-sample
+    lowpass_min_freq: 1500.0    # harsh: telephone-band
+    lowpass_max_freq: 8000.0    # gentle: Nyquist, ≈ identity
+    gain_prob: 1.0              # always vary volume
+    gain_min: 0.6
+    gain_max: 1.5
+    clip_prob: 0.3              # keep occasional — clipping is non-linear/destructive
+    clip_min: 0.5
   mix:
     enabled: false
     snr_db_min: 3.0
