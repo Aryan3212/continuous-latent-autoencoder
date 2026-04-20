@@ -715,13 +715,36 @@ def main() -> None:
                 g_scaler.scale(loss).backward()
                 total_loss = total_loss + loss.detach()
 
-                # Calculate Participation Ratio (Effective Rank) for diagnostics
+                # Diagnostic metrics for collapse detection
                 with torch.no_grad():
-                    z_flat = z_a.permute(0, 2, 1).reshape(-1, z_a.size(1))
+                    # Flattened full rank (existing metric, keep for compatibility)
+                    z_flat = z_a.permute(0, 2, 1).reshape(-1, z_a.size(1))   # (B*T, D)
                     z_centered = z_flat - z_flat.mean(dim=0)
                     z_cov = (z_centered.T @ z_centered) / (z_flat.size(0) - 1)
                     z_eigvals = torch.linalg.eigvalsh(z_cov)
                     z_rank = (z_eigvals.sum()**2) / (z_eigvals.pow(2).sum() + 1e-8)
+
+                    # Utterance-level rank: pool over time, measure between-utterance diversity
+                    z_utt = z_a.mean(dim=2)                                   # (B, D)
+                    z_utt_c = z_utt - z_utt.mean(dim=0)
+                    z_utt_cov = (z_utt_c.T @ z_utt_c) / max(z_utt.size(0) - 1, 1)
+                    z_utt_eig = torch.linalg.eigvalsh(z_utt_cov)
+                    z_rank_utt = (z_utt_eig.sum()**2) / (z_utt_eig.pow(2).sum() + 1e-8)
+
+                    # Residual rank: frame-level variation after removing utterance mean
+                    z_res = z_a - z_a.mean(dim=2, keepdim=True)               # (B, D, T)
+                    z_res_flat = z_res.permute(0, 2, 1).reshape(-1, z_a.size(1))
+                    z_res_cov = (z_res_flat.T @ z_res_flat) / max(z_res_flat.size(0) - 1, 1)
+                    z_res_eig = torch.linalg.eigvalsh(z_res_cov)
+                    z_rank_res = (z_res_eig.sum()**2) / (z_res_eig.pow(2).sum() + 1e-8)
+
+                    # JEPA collapse detector: if both views collapse to zero,
+                    # l_jepa_mask looks small but actually signals failure.
+                    # jepa_to_norm_ratio > 0.1 means views genuinely differ.
+                    z_a_rms = z_a.pow(2).mean().sqrt()
+                    z_mask_rms = z_mask.pow(2).mean().sqrt()
+                    jepa_diff_rms = (z_a - z_mask).pow(2).mean().sqrt()
+                    jepa_to_norm_ratio = jepa_diff_rms / z_a_rms.clamp_min(1e-6)
 
                 mb_step_stats = {
                     "l_stft": l_stft.detach(),
@@ -730,6 +753,12 @@ def main() -> None:
                     "l_jepa_mask": l_jepa_mask.detach(),
                     "l_sig": l_sig.detach(),
                     "z_rank": z_rank.detach(),
+                    "z_rank_utt": z_rank_utt.detach(),
+                    "z_rank_res": z_rank_res.detach(),
+                    "z_a_rms": z_a_rms.detach(),
+                    "z_mask_rms": z_mask_rms.detach(),
+                    "jepa_diff_rms": jepa_diff_rms.detach(),
+                    "jepa_to_norm_ratio": jepa_to_norm_ratio.detach(),
                     "sigma": sigma.detach(),
                     "z_mean": z_a.mean().detach(),
                     "z_std": z_a.std(unbiased=False).detach(),
