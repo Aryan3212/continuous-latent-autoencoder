@@ -180,6 +180,15 @@ def main() -> None:
     cfg = apply_overrides(load_config(args.config), args.overrides)
     cfg["_resolved_config_path"] = args.config
 
+    # Resume path layout: <out_dir>/<run_id>/checkpoints/<name>.pt
+    # Infer the existing run_id so we reuse its out_dir and wandb run.
+    if args.resume:
+        resume_path = pathlib.Path(args.resume)
+        if resume_path.parent.name == "checkpoints":
+            inferred_run_id = resume_path.parent.parent.name
+            if not cfg["run"].get("run_id"):
+                cfg["run"]["run_id"] = inferred_run_id
+
     seed_all(int(cfg["run"]["seed"]))
     device = _select_device(cfg)
 
@@ -191,7 +200,7 @@ def main() -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     jsonl = JsonlLogger(str(log_dir / "train.jsonl"))
-    wb = maybe_init_wandb(cfg, run_id, str(out_root))
+    wb = maybe_init_wandb(cfg, run_id, str(out_root), resume=bool(args.resume))
     
     # Initialize CodeCarbon
     codecarbon_tracker = None

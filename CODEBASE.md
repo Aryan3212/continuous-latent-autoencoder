@@ -1,5 +1,11 @@
 # Codebase summary (quick reference)
 
+## Core documentation
+
+- `README.md`: Project overview and setup.
+- `CHANGELOG.md`: Log of major repository changes and decisions.
+- `HISTORICAL_CHANGES.md`: Detailed audit of the project's commit history, outcomes, and hypotheses.
+
 ## Core pipeline (Exp0)
 
 - Frontend: `models/frontend_conv.py` (strided Conv1D → ~12.5Hz tokens)

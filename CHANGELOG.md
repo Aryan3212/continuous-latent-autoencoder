@@ -30,3 +30,10 @@ Date format: `YYYY-MM-DD`
 -   **Fixed Primary Loss Stagnation**: Added a temperature scale (default 0.07-0.1) to the cosine similarity logits in `_primary_logits`. This sharpens the distribution, allowing the `l_primary` classification loss to decrease from its random-chance plateau (~0.69).
 -   **Updated Config**: Added `loss.primary.temp` to `configs/exp0.yaml` for easier tuning of the primary component similarity task.
 
+## 2026-04-21
+
+-   **Historical Commit Analysis & Documentation**: Conducted a comprehensive audit of all 23 repository commits. For each commit, analyzed changes, expected outcomes, and underlying research hypotheses.
+-   **Created HISTORICAL_CHANGES.md**: Compiled the audit findings into a structured historical reference document.
+-   **Git History Rewrite**: Systematically updated all commit messages and descriptions in the repository's history to reflect the refined technical understanding, outcomes, and hypotheses.
+-   **Improved Repository Observability**: Standardized commit nomenclature (feat/fix/perf/refactor) and provided detailed context in the commit bodies to improve future maintainability.
+
