@@ -62,12 +62,27 @@ def _latent_noise_sigma(cfg: Dict[str, Any], step: int, device: torch.device) ->
     return torch.empty((), device=device).uniform_(0.0, sigma_max)
 
 
-def _lejepa_loss(center: torch.Tensor, view: torch.Tensor, return_per_sample: bool = False) -> torch.Tensor:
-    # center, view: (B, D, T)
-    diff = (center - view).pow(2).mean(dim=(1, 2))
+def _pool_utt(z: torch.Tensor) -> torch.Tensor:
+    # z: (B, D, T) -> (B, D) utterance-level mean pool.
+    return z.mean(dim=-1)
+
+
+def _lejepa_invariance(z_cat: torch.Tensor, num_views: int, return_per_sample: bool = False) -> torch.Tensor:
+    """
+    Algorithm 2 invariance term: pull every view to the shared center
+    where center = mean of (utterance-pooled) view embeddings across views.
+    No stop-gradient; anti-collapse is provided by averaging.
+    z_cat: (V*B, D, T) concatenated view embeddings.
+    """
+    V = num_views
+    VB, D, T = z_cat.shape
+    B = VB // V
+    emb = _pool_utt(z_cat).view(V, B, D)          # (V, B, D)
+    centers = emb.mean(dim=0)                     # (B, D)
+    per_view = (centers.unsqueeze(0) - emb).square().mean(dim=-1)  # (V, B)
     if return_per_sample:
-        return diff
-    return diff.mean()
+        return per_view.mean(dim=0)               # (B,)
+    return per_view.mean()
 
 
 def _pool(z: torch.Tensor) -> torch.Tensor:
@@ -237,8 +252,8 @@ def main() -> None:
         stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
         decoder.set_latent_stats(stats["mean"], stats["var"])
     sigreg_cfg = cfg["loss"]["sigreg"].copy()
-    if "weight" in sigreg_cfg:
-        del sigreg_cfg["weight"]
+    _allowed = {"num_slices", "t_max", "n_points"}
+    sigreg_cfg = {k: v for k, v in sigreg_cfg.items() if k in _allowed}
     sigreg = SIGReg(latent_dim, SIGRegConfig(**sigreg_cfg))
 
     model = torch.nn.ModuleDict(
@@ -370,6 +385,9 @@ def main() -> None:
 
     jcfg = cfg["loss"]["jepa"]
     jepa_w = float(jcfg["weight"])
+    num_views = int(jcfg.get("num_views", 2))
+    if num_views < 2:
+        raise ValueError(f"loss.jepa.num_views must be >= 2 (Algorithm 2 needs averaging); got {num_views}")
     sig_w = float(cfg["loss"]["sigreg"]["weight"])
     stft_w = float(cfg["loss"].get("stft_weight", 1.0))
     wav_l1_w = float(cfg["loss"].get("wav_l1_weight", 0.0))
@@ -427,9 +445,13 @@ def main() -> None:
                 h0m, mask = apply_feature_mask(h0, feat_mask_cfg)
                 hEm = model["encoder"](h0m)
                 zm = hEm
-                v_jepa = _lejepa_loss(z, zm)
-                v_sig_a, _ = sigreg(z, step=step)
-                v_sig_m, _ = sigreg(zm, step=step)
+                # Validation uses two views (clean and masked) just for monitoring.
+                z_pair = torch.cat([z, zm], dim=0)
+                v_jepa = _lejepa_invariance(z_pair, num_views=2)
+                def _flatten(t: torch.Tensor) -> torch.Tensor:
+                    return t.permute(0, 2, 1).reshape(-1, t.size(1))
+                v_sig_a, _ = sigreg(_flatten(z), step=step)
+                v_sig_m, _ = sigreg(_flatten(zm), step=step)
                 v_sig = 0.5 * (v_sig_a + v_sig_m)
                 xh = _decode(model, z, target_len=vw.size(-1), sigma=torch.tensor(0.0, device=device))
                 v_stft, _ = stft(xh, vw)
@@ -541,105 +563,52 @@ def main() -> None:
                 wav_b = wav_b.to(device, non_blocking=True)
 
                 with torch.amp.autocast("cuda", enabled=use_amp):
-                    # Clean view (V0) - NO augmentation on target, but maybe on input if we want denoising?
-                    # The user asked for "augmentations".
-                    # Standard RAE/LeJEPA: "View" is augmented, "Center" is clean(er).
-                    # Current code: _encode(model, wav_a) -> z_a.
-                    # If we want Denoising, we should encode augmented, decode to clean.
-                    # But LeJEPA logic in this file: z_mask matches z_a.
-                    # If we augment wav_a, z_a changes.
-                
-                    # Let's apply augmentation to get wav_aug.
-                    # wav_a is CLEAN target.
-                    wav_aug = apply_waveform_augment(wav_a, int(dcfg["sample_rate"]), wave_aug_cfg)
-                
-                    # Encode Clean (Center)
-                    h0_a, hE_a, z_a, stats_a = _encode(model, wav_a)
-                
-                    # Encode Augmented (View 1)
-                    # If we just want simple denoising, we can use wav_aug as input for "clean view" path
-                    # but "clean view" is used as target for reconstruction in current code: 
-                    # x_hat = _decode(z_a) -> loss(x_hat, wav_a)
-                
-                    # To implement "Denoising", we should encode wav_aug -> z_aug -> decode -> wav_a
-                    # But we also have LeJEPA z_aug vs z_clean.
-                
-                    # Let's define:
-                    # Center = Clean
-                    # View = Augmented + Masked
-                
-                    h0_aug = model["frontend"](wav_aug)
+                    # --- Algorithm 2 (LeJEPA): V independently-augmented views,
+                    #     single fused forward, invariance to their averaged center.
+                    B = wav_a.size(0)
+                    sr = int(dcfg["sample_rate"])
+                    view_wavs = [apply_waveform_augment(wav_a, sr, wave_aug_cfg) for _ in range(num_views)]
+                    wav_cat = torch.cat(view_wavs, dim=0)  # (V*B, 1, T)
 
-                    # Masked feature view (V1) - applied to Augmented view features
-                    h0_masked, time_mask = apply_feature_mask(h0_aug, feat_mask_cfg)
-                    hE_mask = model["encoder"](h0_masked)
-                    z_mask = hE_mask
+                    h0_cat = model["frontend"](wav_cat)
+                    # Feature-mask applied per-sample on the fused batch (independent masks per view).
+                    h0_masked, time_mask = apply_feature_mask(h0_cat, feat_mask_cfg)
+                    z_cat = model["encoder"](h0_masked)  # (V*B, D, T')
 
-                    # Up-sample time_mask to match raw audio resolution
-                    # time_mask is (B, 1, T_latent), wav is (B, 1, T_raw)
-                    wav_mask = F.interpolate(time_mask, size=(wav_a.size(-1),), mode='nearest')
+                    # Invariance: every view pulls to the shared average center (no stop-grad).
+                    l_jepa_mask = _lejepa_invariance(z_cat, num_views=num_views)
 
-                    # LeJEPA: masked+augmented view should match clean center
-                    l_jepa_mask_ps = _lejepa_loss(z_a, z_mask, return_per_sample=True)
-                    l_jepa_mask = l_jepa_mask_ps.mean()
-                
+                    # SIGReg per view on flattened frame distribution (N = B*T' per view).
+                    def _flatten_view(z: torch.Tensor) -> torch.Tensor:
+                        return z.permute(0, 2, 1).reshape(-1, z.size(1))
+
+                    sig_losses = []
+                    sig_stats_last: Dict[str, torch.Tensor] = {}
+                    for v in range(num_views):
+                        z_v = z_cat[v * B : (v + 1) * B]
+                        l_sig_v, sig_stats_v = sigreg(_flatten_view(z_v), step=step)
+                        sig_losses.append(l_sig_v)
+                        sig_stats_last = sig_stats_v
+                    l_sig = torch.stack(sig_losses).mean()
+                    sig_stats = {
+                        "sigreg_view": l_sig.detach(),
+                        "z_var_min": sig_stats_last["z_var_min"],
+                        "z_var_med": sig_stats_last["z_var_med"],
+                        "z_var_max": sig_stats_last["z_var_max"],
+                    }
+
+                    # Bind names used downstream (diagnostics, decoding).
+                    z_a = z_cat[:B]               # view-0 embeddings (used for decode + diagnostics)
+                    z_mask = z_cat[B : 2 * B]     # view-1 embeddings (used for diagnostics only)
+
                     l_jepa_mix = torch.tensor(0.0, device=device)
                     l_primary = torch.tensor(0.0, device=device)
                     l_stft_mix = torch.tensor(0.0, device=device)
 
-                    # Exp1+: mix view (V2)
-                    if mix_cfg.enabled and has_mix:
-                        _, _, z_b, _ = _encode(model, wav_b)
-                        _, _, z_mix, _ = _encode(model, wav_mix)
-
-                        pidx_view = primary_idx.view(-1, *([1]*(z_a.ndim - 1)))
-                        z_tgt_mix = torch.where(pidx_view == 1, z_b, z_a)
-
-                        mix_mask_f = mixed_mask.float()
-                        mix_mask_sum = mix_mask_f.sum().clamp(min=1e-8)
-
-                        l_jepa_mix_ps = _lejepa_loss(z_tgt_mix, z_mix, return_per_sample=True)
-                        l_jepa_mix = (l_jepa_mix_ps * mix_mask_f).sum() / mix_mask_sum
-
-                        if mix_recon_enabled and step >= mix_recon_start:
-                            sigma_mix = _latent_noise_sigma(cfg, step, device)
-                            x_hat_mix = _decode(
-                                model, z_mix, target_len=wav_tgt.size(-1), sigma=sigma_mix
-                            )
-                            l_stft_mix_ps, _ = stft(x_hat_mix, wav_tgt, return_per_sample=True)
-                            l_stft_mix = (l_stft_mix_ps * mix_mask_f).sum() / mix_mask_sum
-
-                    if primary_enabled:
-                        l_primary = _primary_infonce(z_a, z_mask, temp=primary_temp)
-
-                    # SIGReg on clean embeddings
-                    sig_losses = []
-                    l_sig_a, sig_stats_a = sigreg(z_a, step=step)
-                    sig_losses.append(l_sig_a)
-                    # SIGReg on masked/augmented embeddings? Usually just one view is enough or both.
-                    # Let's keep it on both to ensure isotropy everywhere.
-                    l_sig_m, sig_stats_m = sigreg(z_mask, step=step)
-                    sig_losses.append(l_sig_m)
-                    if mix_cfg.enabled and has_mix:
-                        l_sig_mix, _ = sigreg(z_mix, step=step)
-                        sig_losses.append(l_sig_mix)
-                    l_sig = torch.stack(sig_losses).mean()
-                    sig_stats = {
-                        "sigreg_clean": sig_stats_a["sigreg_loss"],
-                        "sigreg_masked": sig_stats_m["sigreg_loss"],
-                        "z_var_min": sig_stats_a["z_var_min"],
-                        "z_var_med": sig_stats_a["z_var_med"],
-                        "z_var_max": sig_stats_a["z_var_max"],
-                        "z_var_penalty": sig_stats_a["z_var_penalty"],
-                    }
-
-                    # Decoder: Reconstruct from Masked/Augmented view (z_mask) instead of clean (z_a)
-                    # This turns the model into a Denoising Autoencoder / Audio-MAE hybrid.
+                    # Decode from view-0 to clean wav_a (denoising reconstruction).
                     sigma = _latent_noise_sigma(cfg, step, device)
                     x_hat = _decode(model, z_a, target_len=wav_a.size(-1), sigma=sigma)
-                
-                    # MASKED STFT: Calculate loss only on the parts we hid!
-                    # We pass the time_mask to the loss function which applies it to spectrogram magnitudes.
+
                     l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
                     l_stft = l_stft_ps.mean()
                     stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
@@ -794,7 +763,6 @@ def main() -> None:
                         idx_t = torch.tensor(indices, device=device)
                         mb_step_stats[f"loss_stft/{ds_name}"] = l_stft_ps[idx_t].mean().detach()
                         mb_step_stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
-                        mb_step_stats[f"loss_jepa/{ds_name}"] = l_jepa_mask_ps[idx_t].mean().detach()
 
                 for k, v in mb_step_stats.items():
                     if k not in mb_stats:
