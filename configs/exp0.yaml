@@ -80,7 +80,7 @@ model:
     res_blocks_per_up: 2
     res_dilations: [1, 3, 9]
     film_hidden: 128
-    latent_norm: true
+    latent_norm: false          # retired: RAE latent-stats normalization is a heuristic
     latent_norm_eps: 1.0e-5
     latent_stats_path: null
 
@@ -99,22 +99,19 @@ loss:
   wav_l1_weight: 0.1
   jepa:
     weight: 1.0
-    mix_view_weight: 1.0        # Exp1+: z_mix -> z_primary alignment
+    num_views: 2                # Algorithm 2: V>=2 augmented views, center = mean across views
+    mix_view_weight: 1.0        # legacy; unused with multi-view LeJEPA
   sigreg:
     weight: 0.05
     num_slices: 1024
-    t_max: 3.0
+    t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
-    reduction: mean
-    clip_value: null
-    var_weight: 1.0
-    residual_weight: 0.2
   mix_recon:
     enabled: false              # Exp1+: decode from mix -> primary
     weight: 1.0
     start_step: 0
   primary:
-    enabled: true
+    enabled: false              # retired: InfoNCE head is a heuristic outside Alg. 2
     weight: 0.1
     temp: 0.1
 
@@ -131,10 +128,10 @@ gan:
   d_weight_decay: 0.0
 
 latent_noise:
-  enabled: true               # RAE Trick: Train decoder on noisy latents
+  enabled: false              # retired: RAE noise injection is a heuristic outside Alg. 2
   kind: uniform
   warmup_steps: 5000
-  sigma_max: 0.02              # Reduced to prevent divergence during GAN warmup
+  sigma_max: 0.02
 
 optim:
   kind: scaled_adam             # scaled_adam | adamw
