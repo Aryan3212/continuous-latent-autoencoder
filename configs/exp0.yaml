@@ -102,7 +102,7 @@ loss:
     num_views: 2                # Algorithm 2: V>=2 augmented views, center = mean across views
     mix_view_weight: 1.0        # legacy; unused with multi-view LeJEPA
   sigreg:
-    weight: 0.05
+    weight: 0.1
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
@@ -135,7 +135,7 @@ latent_noise:
 
 optim:
   kind: scaled_adam             # scaled_adam | adamw
-  lr: 2.0e-3
+  lr: 1.0e-3
   betas: [0.9, 0.98]
   eps: 3.0e-5
   weight_decay: 1.0e-3
@@ -150,17 +150,17 @@ optim:
     kind: eden
     lr_batches: 20000
     lr_epochs: 4
-    warmup_batches: 5000
+    warmup_batches: 10000
     warmup_start: 0.5
-  grad_clip: 1.0
+  grad_clip: 0.5
 
 train:
-  batch_size: 20
-  grad_accum_steps: 2
-  max_steps: 85000
+  batch_size: 50
+  grad_accum_steps: 4
+  max_steps: 30000
   log_interval_steps: 10
-  eval_interval_steps: 10000
-  save_interval_steps: 20000
+  eval_interval_steps: 5000
+  save_interval_steps: 10000
   val_batches: null       # Evaluate on the entire validation set
   run_eval_on_save: true
 

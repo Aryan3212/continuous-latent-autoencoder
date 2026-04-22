@@ -457,9 +457,13 @@ def main() -> None:
                 # Validation uses two views (clean and masked) just for monitoring.
                 z_pair = torch.cat([z, zm], dim=0)
                 v_jepa = _lejepa_invariance(z_pair, num_views=2)
-                v_sig_a, _ = sigreg(_pool_utt(z), step=step)
-                v_sig_m, _ = sigreg(_pool_utt(zm), step=step)
-                v_sig = 0.5 * (v_sig_a + v_sig_m)
+                def _flatten(t: torch.Tensor) -> torch.Tensor:
+                    return t.permute(0, 2, 1).reshape(-1, t.size(1))
+                v_sig_a_u, _ = sigreg(_pool_utt(z), step=step)
+                v_sig_m_u, _ = sigreg(_pool_utt(zm), step=step)
+                v_sig_a_f, _ = sigreg(_flatten(z), step=step)
+                v_sig_m_f, _ = sigreg(_flatten(zm), step=step)
+                v_sig = 0.25 * (v_sig_a_u + v_sig_m_u + v_sig_a_f + v_sig_m_f)
                 xh = _decode(model, z, target_len=vw.size(-1), sigma=torch.tensor(0.0, device=device))
                 v_stft, _ = stft(xh, vw)
                 sums["val_stft"] += v_stft.detach()
@@ -585,18 +589,28 @@ def main() -> None:
                     # Invariance: every view pulls to the shared average center (no stop-grad).
                     l_jepa_mask = _lejepa_invariance(z_cat, num_views=num_views)
 
-                    # SIGReg per view on utterance-pooled embeddings (Algorithm 2, pool_mode="mean").
+                    # Dual-scale SIGReg: utterance-pooled + frame-level, same encoder output.
+                    D_lat = z_cat.size(1)
                     utt_cat = _pool_utt(z_cat)                       # (V*B, D)
-                    utt_views = utt_cat.view(num_views, B, -1)       # (V, B, D)
-                    sig_losses = []
+                    frm_cat = z_cat.permute(0, 2, 1).reshape(-1, D_lat)  # (V*B*T, D)
+                    utt_views = utt_cat.view(num_views, B, D_lat)
+                    frm_per_view = frm_cat.view(num_views, -1, D_lat)
+
+                    sig_utt_losses, sig_frm_losses = [], []
                     sig_stats_last: Dict[str, torch.Tensor] = {}
                     for v in range(num_views):
-                        l_sig_v, sig_stats_v = sigreg(utt_views[v], step=step)
-                        sig_losses.append(l_sig_v)
-                        sig_stats_last = sig_stats_v
-                    l_sig = torch.stack(sig_losses).mean()
+                        l_utt_v, _ = sigreg(utt_views[v], step=step)
+                        l_frm_v, stats_frm_v = sigreg(frm_per_view[v], step=step)
+                        sig_utt_losses.append(l_utt_v)
+                        sig_frm_losses.append(l_frm_v)
+                        sig_stats_last = stats_frm_v
+                    l_sig_utt = torch.stack(sig_utt_losses).mean()
+                    l_sig_frm = torch.stack(sig_frm_losses).mean()
+                    l_sig = 0.5 * (l_sig_utt + l_sig_frm)
                     sig_stats = {
                         "sigreg_view": l_sig.detach(),
+                        "l_sig_utt": l_sig_utt.detach(),
+                        "l_sig_frm": l_sig_frm.detach(),
                         "z_var_min": sig_stats_last["z_var_min"],
                         "z_var_med": sig_stats_last["z_var_med"],
                         "z_var_max": sig_stats_last["z_var_max"],
