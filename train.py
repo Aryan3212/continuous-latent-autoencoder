@@ -457,10 +457,8 @@ def main() -> None:
                 # Validation uses two views (clean and masked) just for monitoring.
                 z_pair = torch.cat([z, zm], dim=0)
                 v_jepa = _lejepa_invariance(z_pair, num_views=2)
-                def _flatten(t: torch.Tensor) -> torch.Tensor:
-                    return t.permute(0, 2, 1).reshape(-1, t.size(1))
-                v_sig_a, _ = sigreg(_flatten(z), step=step)
-                v_sig_m, _ = sigreg(_flatten(zm), step=step)
+                v_sig_a, _ = sigreg(_pool_utt(z), step=step)
+                v_sig_m, _ = sigreg(_pool_utt(zm), step=step)
                 v_sig = 0.5 * (v_sig_a + v_sig_m)
                 xh = _decode(model, z, target_len=vw.size(-1), sigma=torch.tensor(0.0, device=device))
                 v_stft, _ = stft(xh, vw)
@@ -587,15 +585,13 @@ def main() -> None:
                     # Invariance: every view pulls to the shared average center (no stop-grad).
                     l_jepa_mask = _lejepa_invariance(z_cat, num_views=num_views)
 
-                    # SIGReg per view on flattened frame distribution (N = B*T' per view).
-                    def _flatten_view(z: torch.Tensor) -> torch.Tensor:
-                        return z.permute(0, 2, 1).reshape(-1, z.size(1))
-
+                    # SIGReg per view on utterance-pooled embeddings (Algorithm 2, pool_mode="mean").
+                    utt_cat = _pool_utt(z_cat)                       # (V*B, D)
+                    utt_views = utt_cat.view(num_views, B, -1)       # (V, B, D)
                     sig_losses = []
                     sig_stats_last: Dict[str, torch.Tensor] = {}
                     for v in range(num_views):
-                        z_v = z_cat[v * B : (v + 1) * B]
-                        l_sig_v, sig_stats_v = sigreg(_flatten_view(z_v), step=step)
+                        l_sig_v, sig_stats_v = sigreg(utt_views[v], step=step)
                         sig_losses.append(l_sig_v)
                         sig_stats_last = sig_stats_v
                     l_sig = torch.stack(sig_losses).mean()

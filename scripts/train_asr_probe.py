@@ -100,7 +100,7 @@ def main():
     train_iter = iter(dl_train)
     for batch in train_iter:
         for m in batch["meta"]:
-            texts.append(m["sentence"])
+            texts.append(m["text"])
         if len(texts) > 20000:
             break
     
@@ -137,7 +137,7 @@ def main():
 
         target_list = []
         target_lens = []
-        sentences = [m["sentence"] for m in batch["meta"]]
+        sentences = [m["text"] for m in batch["meta"]]
         for s in sentences:
             encoded = encode_text(s, vocab)
             target_list.append(torch.tensor(encoded, dtype=torch.long))
@@ -176,7 +176,7 @@ def main():
                     vhE = lm.encoder(lm.frontend(vwav))
                     vlogits = head(vhE.transpose(1, 2))
                     vhyp = greedy_decode(vlogits.log_softmax(dim=-1), id2ch)
-                    vref = [m["sentence"] for m in vbatch["meta"]]
+                    vref = [m["text"] for m in vbatch["meta"]]
                     total_wer += wer(vref, vhyp)
                     n_val += 1
                     if n_val >= 20: break 
