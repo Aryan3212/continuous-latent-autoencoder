@@ -459,10 +459,12 @@ def main() -> None:
                 v_jepa = _lejepa_invariance(z_pair, num_views=2)
                 def _flatten(t: torch.Tensor) -> torch.Tensor:
                     return t.permute(0, 2, 1).reshape(-1, t.size(1))
-                v_sig_a_u, _ = sigreg(_pool_utt(z), step=step)
-                v_sig_m_u, _ = sigreg(_pool_utt(zm), step=step)
-                v_sig_a_f, _ = sigreg(_flatten(z), step=step)
-                v_sig_m_f, _ = sigreg(_flatten(zm), step=step)
+                pz = _pool_utt(z); pzm = _pool_utt(zm)
+                fz = _flatten(z); fzm = _flatten(zm)
+                v_sig_a_u, _ = sigreg(pz, step=step); v_sig_a_u = v_sig_a_u / max(1, pz.size(0))
+                v_sig_m_u, _ = sigreg(pzm, step=step); v_sig_m_u = v_sig_m_u / max(1, pzm.size(0))
+                v_sig_a_f, _ = sigreg(fz, step=step); v_sig_a_f = v_sig_a_f / max(1, fz.size(0))
+                v_sig_m_f, _ = sigreg(fzm, step=step); v_sig_m_f = v_sig_m_f / max(1, fzm.size(0))
                 v_sig = 0.25 * (v_sig_a_u + v_sig_m_u + v_sig_a_f + v_sig_m_f)
                 xh = _decode(model, z, target_len=vw.size(-1), sigma=torch.tensor(0.0, device=device))
                 v_stft, _ = stft(xh, vw)
@@ -598,11 +600,14 @@ def main() -> None:
 
                     sig_utt_losses, sig_frm_losses = [], []
                     sig_stats_last: Dict[str, torch.Tensor] = {}
+                    n_utt = float(utt_views.size(1))             # N per utt view
+                    n_frm = float(frm_per_view.size(1))           # N per frame view
                     for v in range(num_views):
                         l_utt_v, _ = sigreg(utt_views[v], step=step)
                         l_frm_v, stats_frm_v = sigreg(frm_per_view[v], step=step)
-                        sig_utt_losses.append(l_utt_v)
-                        sig_frm_losses.append(l_frm_v)
+                        # Normalize by N so the two scales are gradient-comparable.
+                        sig_utt_losses.append(l_utt_v / n_utt)
+                        sig_frm_losses.append(l_frm_v / n_frm)
                         sig_stats_last = stats_frm_v
                     l_sig_utt = torch.stack(sig_utt_losses).mean()
                     l_sig_frm = torch.stack(sig_frm_losses).mean()

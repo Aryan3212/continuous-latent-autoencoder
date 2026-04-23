@@ -102,7 +102,7 @@ loss:
     num_views: 2                # Algorithm 2: V>=2 augmented views, center = mean across views
     mix_view_weight: 1.0        # legacy; unused with multi-view LeJEPA
   sigreg:
-    weight: 0.1
+    weight: 2.0
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
