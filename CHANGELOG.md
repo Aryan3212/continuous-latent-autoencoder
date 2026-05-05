@@ -8,6 +8,11 @@ Date format: `YYYY-MM-DD`
 - Research-note audit: current codebase does not yet implement Zipformer+mHC encoder, LeJEPA Algorithm 2 wiring, LeJEPA SIGReg (Algorithm 1), RAE-inspired decoder mechanics, or GAN training; these gaps are now captured in `.plans/*` and `UNCERTAINTIES.md`.
 - Ported Zipformer2 encoder layers + scaling into `models/zipformer.py`/`models/zipformer_scaling.py`, integrated mHC streams into `models/encoder.py`, and added a smoke test (`scripts/smoke_encoder_mhc.py`).
 
+## 2026-04-30
+
+- Created `COMMANDS.md` as a quick reference for training, evaluation, and data preparation commands.
+- Updated `CODEBASE.md` to include `COMMANDS.md` in core documentation.
+
 ## 2026-02-02
 
 - Added `REUSE.md` to document vendored repos and clarify that code is currently referenced (not yet ported) into core modules.

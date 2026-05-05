@@ -55,6 +55,7 @@ class MHCWrapper(nn.Module):
         if num_streams < 1:
             raise ValueError("num_streams must be >= 1")
         self.branch = branch
+        self.layer_index = int(layer_index)
         self.num_streams = num_streams
         self.mhc_num_iters = int(sinkhorn_iters)
         self.mhc_tau = float(tau)

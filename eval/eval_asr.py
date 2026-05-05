@@ -165,6 +165,8 @@ def main() -> None:
     head = nn.Linear(feats_tr.size(-1), len(charset)).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
     ctc = nn.CTCLoss(blank=0, zero_infinity=True)
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     head.train()
     n = feats_tr.size(0)
@@ -173,15 +175,18 @@ def main() -> None:
     for step_i in range(args.steps):
         idx = torch.randint(0, n, (args.batch_size,))
         xb = feats_tr[idx].to(device)  # (B,T,D) — only batch on GPU
-        log_probs = head(xb).log_softmax(dim=-1)  # (B,T,V)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits = head(xb)
+        log_probs = logits.float().log_softmax(dim=-1)  # (B,T,V), CTC in fp32
         input_lens = torch.full((xb.size(0),), xb.size(1), dtype=torch.long, device=device)
         yb = [targets_tr[i] for i in idx.tolist()]
         target_lens = torch.tensor([t.numel() for t in yb], dtype=torch.long, device=device)
         ycat = torch.cat([t.to(device) for t in yb], dim=0) if target_lens.sum().item() > 0 else torch.zeros((0,), dtype=torch.long, device=device)
         loss = ctc(log_probs.transpose(0, 1), ycat, input_lens, target_lens)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
         if (step_i + 1) % log_interval == 0:
             elapsed = time.perf_counter() - t0
             rate = (step_i + 1) / elapsed

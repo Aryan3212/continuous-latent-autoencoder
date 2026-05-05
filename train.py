@@ -26,6 +26,7 @@ from models.discriminators import (
 )
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
+from models.mhc import sinkhorn_log
 from models.sigreg import SIGReg, SIGRegConfig
 from optim.lr_schedulers import Eden, Eden2
 from optim.scaled_adam import ScaledAdam
@@ -830,7 +831,28 @@ def main() -> None:
                 for k, v in accum_stats.items():
                     log_stats[k] = v.item() / log_interval
                     v.zero_()
-                row = {"step": step, **log_stats}
+                epoch_idx = scheduler.epoch if scheduler is not None else epoch
+                row = {"step": step, "epoch": epoch_idx, **log_stats}
+
+                encoder_mod = model.get("encoder") if isinstance(model, dict) else None
+                if encoder_mod is not None and hasattr(encoder_mod, "mhc_wrappers"):
+                    for wrapper in encoder_mod.mhc_wrappers:
+                        if not hasattr(wrapper, "H_res_alpha_logit"):
+                            continue
+                        l_idx = getattr(wrapper, "layer_index", -1)
+                        with torch.no_grad():
+                            alpha = torch.sigmoid(wrapper.H_res_alpha_logit).item()
+                            row[f"mhc/layer_{l_idx}_alpha"] = alpha
+                            S = sinkhorn_log(
+                                wrapper.H_res_logits,
+                                num_iters=wrapper.mhc_num_iters,
+                                tau=wrapper.mhc_tau,
+                            )
+                            # Row entropy of doubly-stochastic mixing matrix:
+                            # ~0 = identity (no mixing), log(num_streams) = uniform mixing.
+                            row_ent = -(S * (S.clamp_min(1e-12)).log()).sum(dim=-1).mean().item()
+                            row[f"mhc/layer_{l_idx}_S_row_entropy"] = row_ent
+
                 jsonl.log(row)
                 if wb is not None:
                     wb.log(row, step=step)
