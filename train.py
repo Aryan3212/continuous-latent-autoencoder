@@ -86,6 +86,76 @@ def _lejepa_invariance(z_cat: torch.Tensor, num_views: int, return_per_sample: b
     return per_view.mean()
 
 
+def _dense_jepa_loss(
+    z_cat: torch.Tensor,
+    mask_cat: torch.Tensor,
+    num_views: int,
+    lam_context: float = 1.0,
+    distance_weight: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    V-JEPA 2.1 'Dense Predictive Loss' adapted to audio (1-D time).
+
+    For every frame t and every view v, pull z[v,b,:,t] toward the per-frame
+    center across views: center[b,:,t] = mean_v z[v,b,:,t]. Apply two
+    weight schedules:
+      L_predict  : on frames the SpecAug time-mask zeroed out (weight = 1).
+      L_context  : on the surviving (visible) frames, weighted by
+                   lam_context / sqrt(d_min(t)) where d_min is the distance
+                   in frames to the nearest masked position in the same view.
+                   This is V-JEPA 2.1's masks_dist.py rule, 1-D specialisation.
+
+    z_cat:    (V*B, D, T)   concatenated view embeddings.
+    mask_cat: (V*B, 1, T)   1 at masked positions, 0 elsewhere
+                            (output of apply_feature_mask).
+
+    Returns (loss, l_predict_scalar, l_context_scalar) for logging.
+    """
+    V = num_views
+    VB, D, T = z_cat.shape
+    B = VB // V
+    z = z_cat.view(V, B, D, T)
+    centers = z.mean(dim=0, keepdim=True)              # (1, B, D, T)
+    err = (z - centers).pow(2).mean(dim=2)             # (V, B, T)  per-frame MSE
+
+    m = mask_cat.view(V, B, T).to(z.dtype)             # 1 on masked frames
+    one_minus_m = 1.0 - m
+
+    # L_predict: average over masked frames.
+    pred_num = (err * m).sum()
+    pred_den = m.sum().clamp_min(1.0)
+    l_predict = pred_num / pred_den
+
+    # Distance-weighted L_context: for each (v,b,t) with m=0, find min |t - t'|
+    # over t' where m[v,b,t']=1. Done via two passes of a parallel scan.
+    if distance_weight:
+        big = float(T + 1)
+        # Forward pass: distance to nearest masked frame at index <= t.
+        d_fwd = torch.full_like(err, big)
+        d_bwd = torch.full_like(err, big)
+        # Vectorised: walk through T, accumulate.
+        # d_fwd[..., t] = 0 if m[t] else d_fwd[..., t-1] + 1
+        prev = torch.full((V, B), big, device=err.device, dtype=err.dtype)
+        for t in range(T):
+            prev = torch.where(m[..., t] > 0.5, torch.zeros_like(prev), prev + 1.0)
+            d_fwd[..., t] = prev
+        nxt = torch.full((V, B), big, device=err.device, dtype=err.dtype)
+        for t in range(T - 1, -1, -1):
+            nxt = torch.where(m[..., t] > 0.5, torch.zeros_like(nxt), nxt + 1.0)
+            d_bwd[..., t] = nxt
+        d_min = torch.minimum(d_fwd, d_bwd).clamp_min(1.0)  # avoid div-by-zero
+        ctx_w = one_minus_m / d_min.sqrt()
+    else:
+        ctx_w = one_minus_m
+
+    ctx_num = (err * ctx_w).sum()
+    ctx_den = ctx_w.sum().clamp_min(1e-6)
+    l_context = ctx_num / ctx_den
+
+    loss = l_predict + lam_context * l_context
+    return loss, l_predict.detach(), l_context.detach()
+
+
 def _pool(z: torch.Tensor) -> torch.Tensor:
     # z: (B,d,T') -> (B,3d)
     avg_p = z.mean(dim=-1)
@@ -413,6 +483,9 @@ def main() -> None:
     primary_temp = float(primary_cfg.get("temp", 0.1))
 
     mix_view_w = float(jcfg.get("mix_view_weight", 1.0))
+    # V-JEPA 2.1 context-loss weight: relative weight of L_context vs L_predict
+    # in the Dense Predictive Loss. Paper uses ~1.0 with distance weighting.
+    lam_context_w = float(jcfg.get("context_weight", 1.0))
     gan_start = int(gan_cfg.get("start_step", 0))
     gan_warmup_steps = int(gan_cfg.get("warmup_steps", 5000))
 
@@ -589,34 +662,39 @@ def main() -> None:
                     h0_masked, time_mask = apply_feature_mask(h0_cat, feat_mask_cfg)
                     z_cat = model["encoder"](h0_masked)  # (V*B, D, T')
 
-                    # Invariance: every view pulls to the shared average center (no stop-grad).
-                    l_jepa_mask = _lejepa_invariance(z_cat, num_views=num_views)
+                    # ---- Invariance objective ---------------------------------------
+                    # V-JEPA 2.1 'Dense Predictive Loss' adapted to audio:
+                    #   per-frame MSE between each view and the cross-view center,
+                    #   split into L_predict (masked frames) + λ * L_context (visible
+                    #   frames, weighted 1/sqrt(d_min) to enforce local coherence).
+                    # The old utterance-pooled invariance discarded all phonetic content
+                    # before the loss saw it (frames averaged over time).
+                    l_jepa_mask, l_jepa_pred_dbg, l_jepa_ctx_dbg = _dense_jepa_loss(
+                        z_cat,
+                        time_mask if time_mask.shape[-1] == z_cat.shape[-1] else
+                            F.interpolate(time_mask, size=z_cat.shape[-1], mode="nearest"),
+                        num_views=num_views,
+                        lam_context=lam_context_w,
+                        distance_weight=True,
+                    )
 
-                    # Dual-scale SIGReg: utterance-pooled + frame-level, same encoder output.
+                    # ---- SIGReg (LeWM-style, frame-level only) ----------------------
+                    # Reshape z_cat (V*B, D, T') -> (T', V*B, D): SIGReg treats each
+                    # frame index as an independent test on V*B samples — same recipe
+                    # as le-wm/module.py and le-wm/train.py:41. Paper N-scaling is left
+                    # to SIGReg itself; no extra /N rescaling here.
                     D_lat = z_cat.size(1)
-                    utt_cat = _pool_utt(z_cat)                       # (V*B, D)
-                    frm_cat = z_cat.permute(0, 2, 1).reshape(-1, D_lat)  # (V*B*T, D)
-                    utt_views = utt_cat.view(num_views, B, D_lat)
-                    frm_per_view = frm_cat.view(num_views, -1, D_lat)
-
-                    sig_utt_losses, sig_frm_losses = [], []
-                    sig_stats_last: Dict[str, torch.Tensor] = {}
-                    n_utt = float(utt_views.size(1))             # N per utt view
-                    n_frm = float(frm_per_view.size(1))           # N per frame view
-                    for v in range(num_views):
-                        l_utt_v, _ = sigreg(utt_views[v], step=step)
-                        l_frm_v, stats_frm_v = sigreg(frm_per_view[v], step=step)
-                        # Normalize by N so the two scales are gradient-comparable.
-                        sig_utt_losses.append(l_utt_v / n_utt)
-                        sig_frm_losses.append(l_frm_v / n_frm)
-                        sig_stats_last = stats_frm_v
-                    l_sig_utt = torch.stack(sig_utt_losses).mean()
-                    l_sig_frm = torch.stack(sig_frm_losses).mean()
-                    l_sig = 0.5 * (l_sig_utt + l_sig_frm)
+                    sig_input = z_cat.permute(2, 0, 1)                # (T', V*B, D)
+                    l_sig, sig_stats_last = sigreg(
+                        sig_input.reshape(-1, D_lat),                 # (T'*V*B, D)
+                        step=step,
+                    )
                     sig_stats = {
                         "sigreg_view": l_sig.detach(),
-                        "l_sig_utt": l_sig_utt.detach(),
-                        "l_sig_frm": l_sig_frm.detach(),
+                        "l_sig_utt": torch.tensor(0.0, device=device),
+                        "l_sig_frm": l_sig.detach(),
+                        "l_jepa_predict": l_jepa_pred_dbg,
+                        "l_jepa_context": l_jepa_ctx_dbg,
                         "z_var_min": sig_stats_last["z_var_min"],
                         "z_var_med": sig_stats_last["z_var_med"],
                         "z_var_max": sig_stats_last["z_var_max"],
