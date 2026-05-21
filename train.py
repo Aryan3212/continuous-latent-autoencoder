@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from data.augment import FeatureMaskConfig, MixConfig, WaveAugConfig, apply_feature_mask, apply_waveform_augment, maybe_mix_pair
 from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
+from eval.inline_probe import InlineProbe
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
 from models.discriminators import (
@@ -27,6 +28,7 @@ from models.discriminators import (
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from models.mhc import sinkhorn_log
+from models.projector import Projector, ProjectorConfig
 from models.sigreg import SIGReg, SIGRegConfig
 from optim.lr_schedulers import Eden, Eden2
 from optim.scaled_adam import ScaledAdam
@@ -331,15 +333,21 @@ def main() -> None:
     if decoder_cfg.latent_stats_path:
         stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
         decoder.set_latent_stats(stats["mean"], stats["var"])
+    proj_cfg_raw = (mcfg.get("projector") or {}).copy()
+    projector_cfg = ProjectorConfig(**{k: v for k, v in proj_cfg_raw.items() if k in {"hidden_dim", "output_dim", "n_hidden_layers"}})
+    projector = Projector(latent_dim, projector_cfg)
+    proj_dim = projector.output_dim
+
     sigreg_cfg = cfg["loss"]["sigreg"].copy()
     _allowed = {"num_slices", "t_max", "n_points"}
     sigreg_cfg = {k: v for k, v in sigreg_cfg.items() if k in _allowed}
-    sigreg = SIGReg(latent_dim, SIGRegConfig(**sigreg_cfg))
+    sigreg = SIGReg(proj_dim, SIGRegConfig(**sigreg_cfg))
 
     model = torch.nn.ModuleDict(
         {
             "frontend": frontend,
             "encoder": encoder,
+            "projector": projector,
             "decoder": decoder,
             "sigreg": sigreg,
         }
@@ -495,6 +503,14 @@ def main() -> None:
             if k in resume_best:
                 best[k] = float(resume_best[k])
 
+    inline_probe = InlineProbe(
+        cfg_probe=(cfg.get("loss") or {}).get("inline_probe") or {},
+        sample_rate=int(dcfg["sample_rate"]),
+        encoder_dim=latent_dim,
+        device=device,
+        out_root=out_root,
+    )
+
     def _validate_one() -> Dict[str, float]:
         if not dcfg.get("val_manifest"):
             return {}
@@ -528,18 +544,18 @@ def main() -> None:
                 h0m, mask = apply_feature_mask(h0, feat_mask_cfg)
                 hEm = model["encoder"](h0m)
                 zm = hEm
-                # Validation uses two views (clean and masked) just for monitoring.
-                z_pair = torch.cat([z, zm], dim=0)
-                v_jepa = _lejepa_invariance(z_pair, num_views=2)
+                # Validation uses two views (clean and masked) for monitoring.
+                # JEPA + SIGReg act on projected output to mirror training.
+                p_clean = model["projector"](z)
+                p_mask = model["projector"](zm)
+                p_pair = torch.cat([p_clean, p_mask], dim=0)
+                v_jepa = _lejepa_invariance(p_pair, num_views=2)
                 def _flatten(t: torch.Tensor) -> torch.Tensor:
                     return t.permute(0, 2, 1).reshape(-1, t.size(1))
-                pz = _pool_utt(z); pzm = _pool_utt(zm)
-                fz = _flatten(z); fzm = _flatten(zm)
-                v_sig_a_u, _ = sigreg(pz, step=step); v_sig_a_u = v_sig_a_u / max(1, pz.size(0))
-                v_sig_m_u, _ = sigreg(pzm, step=step); v_sig_m_u = v_sig_m_u / max(1, pzm.size(0))
-                v_sig_a_f, _ = sigreg(fz, step=step); v_sig_a_f = v_sig_a_f / max(1, fz.size(0))
-                v_sig_m_f, _ = sigreg(fzm, step=step); v_sig_m_f = v_sig_m_f / max(1, fzm.size(0))
-                v_sig = 0.25 * (v_sig_a_u + v_sig_m_u + v_sig_a_f + v_sig_m_f)
+                fp = _flatten(p_clean); fpm = _flatten(p_mask)
+                v_sig_a_f, _ = sigreg(fp, step=step); v_sig_a_f = v_sig_a_f / max(1, fp.size(0))
+                v_sig_m_f, _ = sigreg(fpm, step=step); v_sig_m_f = v_sig_m_f / max(1, fpm.size(0))
+                v_sig = 0.5 * (v_sig_a_f + v_sig_m_f)
                 xh = _decode(model, z, target_len=vw.size(-1), sigma=torch.tensor(0.0, device=device))
                 v_stft, _ = stft(xh, vw)
                 sums["val_stft"] += v_stft.detach()
@@ -662,31 +678,36 @@ def main() -> None:
                     h0_masked, time_mask = apply_feature_mask(h0_cat, feat_mask_cfg)
                     z_cat = model["encoder"](h0_masked)  # (V*B, D, T')
 
+                    # ---- Projector (LeJEPA / LeWM) ----------------------------------
+                    # Decouple loss-space from representation-space: JEPA + SIGReg act
+                    # on p_cat; decoder + probes keep reading z_cat. BatchNorm in the
+                    # projector is what lets SIGReg actually reshape the distribution
+                    # to N(0, I); applying it directly on the BiasNorm-conditioned
+                    # encoder output resists Gaussianisation.
+                    p_cat = model["projector"](z_cat)  # (V*B, P, T')
+
                     # ---- Invariance objective ---------------------------------------
                     # V-JEPA 2.1 'Dense Predictive Loss' adapted to audio:
                     #   per-frame MSE between each view and the cross-view center,
                     #   split into L_predict (masked frames) + λ * L_context (visible
                     #   frames, weighted 1/sqrt(d_min) to enforce local coherence).
-                    # The old utterance-pooled invariance discarded all phonetic content
-                    # before the loss saw it (frames averaged over time).
                     l_jepa_mask, l_jepa_pred_dbg, l_jepa_ctx_dbg = _dense_jepa_loss(
-                        z_cat,
-                        time_mask if time_mask.shape[-1] == z_cat.shape[-1] else
-                            F.interpolate(time_mask, size=z_cat.shape[-1], mode="nearest"),
+                        p_cat,
+                        time_mask if time_mask.shape[-1] == p_cat.shape[-1] else
+                            F.interpolate(time_mask, size=p_cat.shape[-1], mode="nearest"),
                         num_views=num_views,
                         lam_context=lam_context_w,
                         distance_weight=True,
                     )
 
-                    # ---- SIGReg (LeWM-style, frame-level only) ----------------------
-                    # Reshape z_cat (V*B, D, T') -> (T', V*B, D): SIGReg treats each
-                    # frame index as an independent test on V*B samples — same recipe
-                    # as le-wm/module.py and le-wm/train.py:41. Paper N-scaling is left
-                    # to SIGReg itself; no extra /N rescaling here.
-                    D_lat = z_cat.size(1)
-                    sig_input = z_cat.permute(2, 0, 1)                # (T', V*B, D)
+                    # ---- SIGReg (LeWM-style, frame-level only, on projector out) ---
+                    # Reshape p_cat (V*B, P, T') -> (T'*V*B, P) so SIGReg treats each
+                    # (frame, view, sample) triple as an independent point. Paper
+                    # N-scaling is left to SIGReg itself; no extra /N rescaling here.
+                    D_lat = p_cat.size(1)
+                    sig_input = p_cat.permute(2, 0, 1)                # (T', V*B, P)
                     l_sig, sig_stats_last = sigreg(
-                        sig_input.reshape(-1, D_lat),                 # (T'*V*B, D)
+                        sig_input.reshape(-1, D_lat),                 # (T'*V*B, P)
                         step=step,
                     )
                     sig_stats = {
@@ -701,8 +722,10 @@ def main() -> None:
                     }
 
                     # Bind names used downstream (diagnostics, decoding).
-                    z_a = z_cat[:B]               # view-0 embeddings (used for decode + diagnostics)
-                    z_mask = z_cat[B : 2 * B]     # view-1 embeddings (used for diagnostics only)
+                    z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + rank diag)
+                    z_mask = z_cat[B : 2 * B]     # view-1 encoder embeddings (rank diag only)
+                    p_a = p_cat[:B]               # view-0 projected (JEPA-space diagnostics)
+                    p_mask = p_cat[B : 2 * B]     # view-1 projected (JEPA-space diagnostics)
 
                     l_jepa_mix = torch.tensor(0.0, device=device)
                     l_primary = torch.tensor(0.0, device=device)
@@ -813,10 +836,13 @@ def main() -> None:
                     # JEPA collapse detector: if both views collapse to zero,
                     # l_jepa_mask looks small but actually signals failure.
                     # jepa_to_norm_ratio > 0.1 means views genuinely differ.
+                    # Measured in PROJECTOR space (where JEPA acts), not encoder space.
                     z_a_rms = z_a.pow(2).mean().sqrt()
                     z_mask_rms = z_mask.pow(2).mean().sqrt()
-                    jepa_diff_rms = (z_a - z_mask).pow(2).mean().sqrt()
-                    jepa_to_norm_ratio = jepa_diff_rms / z_a_rms.clamp_min(1e-6)
+                    p_a_rms = p_a.pow(2).mean().sqrt()
+                    p_mask_rms = p_mask.pow(2).mean().sqrt()
+                    jepa_diff_rms = (p_a - p_mask).pow(2).mean().sqrt()
+                    jepa_to_norm_ratio = jepa_diff_rms / p_a_rms.clamp_min(1e-6)
 
                 mb_step_stats = {
                     "l_stft": l_stft.detach(),
@@ -829,6 +855,8 @@ def main() -> None:
                     "z_rank_res": z_rank_res.detach(),
                     "z_a_rms": z_a_rms.detach(),
                     "z_mask_rms": z_mask_rms.detach(),
+                    "p_a_rms": p_a_rms.detach(),
+                    "p_mask_rms": p_mask_rms.detach(),
                     "jepa_diff_rms": jepa_diff_rms.detach(),
                     "jepa_to_norm_ratio": jepa_to_norm_ratio.detach(),
                     "sigma": sigma.detach(),
@@ -902,6 +930,13 @@ def main() -> None:
             step += 1
             if scheduler is not None:
                 scheduler.step_batch(step)
+
+            # Inline detached CTC probe — diagnoses latent quality without
+            # waiting for the offline ASR eval (eval_interval_steps). Encoder
+            # forward runs under torch.no_grad inside InlineProbe; only the
+            # probe's linear head is trained.
+            inline_probe.step(model, step, use_amp)
+            inline_probe.maybe_emit(step, wb)
 
             log_interval = int(cfg["train"]["log_interval_steps"])
             if step % log_interval == 0:

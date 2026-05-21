@@ -83,6 +83,14 @@ model:
     latent_norm: false          # retired: RAE latent-stats normalization is a heuristic
     latent_norm_eps: 1.0e-5
     latent_stats_path: null
+  projector:
+    # LeJEPA / LeWM projector: encoder out -> JEPA + SIGReg loss space.
+    # Decoder and downstream probes still read raw encoder output (hE).
+    # BatchNorm is load-bearing — it's what lets SIGReg actually reshape
+    # to N(0, I) (LayerNorm-style encoder outputs resist Gaussianisation).
+    hidden_dim: 2048
+    output_dim: 128
+    n_hidden_layers: 2
 
 loss:
   stft_weight: 0.005
@@ -116,6 +124,20 @@ loss:
     enabled: false              # retired: InfoNCE head is a heuristic outside Alg. 2
     weight: 0.1
     temp: 0.1
+  inline_probe:
+    # Detached CTC probe on encoder output hE. Never backprops into encoder.
+    # Diagnoses latent quality every log_interval steps without waiting for
+    # the offline ASR eval. Treat WER here as a relative trend, not absolute.
+    enabled: true
+    manifest: "data/shards/asr_eval_train/asr_eval_train-{000000..000010}.tar"
+    batch_size: 8
+    segment_seconds: 15.0
+    num_workers: 1
+    shuffle_size: 200
+    step_interval: 1            # train head every N main steps
+    log_interval: 500           # emit probe/{ctc_loss,wer} to W&B every M main steps
+    vocab_bootstrap_samples: 1000
+    lr: 1.0e-3
 
 gan:
   enabled: false
