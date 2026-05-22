@@ -1,0 +1,16 @@
+data/augment.py:65:21: RUF046 Value being cast to `int` is already an integer
+data/dataset.py:58:28: RUF046 Value being cast to `int` is already an integer
+eval/common.py:14:12: RUF005 Consider `["<blank>", *chars]` instead of concatenation
+eval/common.py:123:5: ARG001 Unused function argument: `use_latent`
+eval/eval_asr.py:171:54: ARG001 Unused function argument: `targets`
+eval/run_probes.py:38:13: F841 Local variable `proc` is assigned to but never used
+losses/multires_stft.py:93:17: ERA001 Found commented-out code
+models/conformer.py:71:9: ERA001 Found commented-out code
+models/conformer.py:130:9: ERA001 Found commented-out code
+models/decoder_generator.py:48:9: ERA001 Found commented-out code
+models/mhc.py:43:9: ARG002 Unused method argument: `dim`
+models/sigreg.py:41:9: ERA001 Found commented-out code
+models/sigreg.py:70:9: ERA001 Found commented-out code
+models/sigreg.py:103:40: ARG002 Unused method argument: `step`
+Found 14 errors.
+No fixes available (4 hidden fixes can be enabled with the `--unsafe-fixes` option).
