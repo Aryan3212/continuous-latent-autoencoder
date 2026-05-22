@@ -2,109 +2,80 @@
 
 Most of the original plan was executed in a single subagent-driven pass on
 branch `simplification` (one commit, off `main` so the Zipformer-era main is
-preserved). What's below is **only** the tasks still open, plus caveats /
-follow-ups produced during that pass.
+preserved). C3–C5, C7 were completed in a follow-up pass (2026-05-22).
 
 For context on what was already done, see the git history on the
 `simplification` branch and `.static-analysis/DIAGNOSIS.md`.
+
+## Conformer implementation check (2026-05-22)
+Verified against official torchaudio source. Structure is correct:
+macaron-Conformer order (FFN₁ → MHSA → Conv → FFN₂ → FinalLN), pre-norm
+throughout, residual connections identical to official. Two intentional
+divergences from the reference (not bugs): rotary positional embeddings in
+place of no-PE, and `F.scaled_dot_product_attention` in place of
+`nn.MultiheadAttention`. Key-padding-mask convention (True = ignore) is
+consistent between the mask builder and SDPA additive-mask path. No changes
+needed.
 
 ---
 
 ## Caveats from the simplification pass (act on these first)
 
-### C1 — Old checkpoints will not load
+### C1 — Old checkpoints will not load - IGNORE already have separate branch
 The Zipformer → Conformer rewrite (`models/conformer.py` + rewritten
 `models/encoder.py`) renames every encoder parameter. Any `.pt` saved against
 `Zipformer2EncoderLayer` is incompatible. **Restart training from scratch on
 this branch.** No state_dict shim is provided.
 
-### C2 — Manifest paths are placeholders
-`configs/exp0.yaml`, `configs/exp0_test.yaml`, etc. were rewritten to point at
-JSONL manifests (`data/manifests/train.jsonl`, `val.jsonl`,
-`asr_probe_train.jsonl`, `asr_probe_val.jsonl`). These are placeholder paths
-— correct them to the real manifest locations on the training box before the
-first run. `configs/exp0_20pct.yaml` / `configs/exp0_20pct_merged.yaml` were
-left untouched because they already referenced JSONL paths.
+### C2 — ~~Manifest paths are placeholders~~ PARTIALLY DONE
+`configs/exp0_20pct.yaml` deleted; `configs/exp0.yaml` is the only config remaining.
+Manifest paths in `exp0.yaml` are still placeholder paths (`data/manifests/train.jsonl` etc.)
+— correct them to real paths on the training box before the first run.
 
-### C3 — Two configs will fail the new pydantic schema
-`utils/schema.py` validates configs at startup with `extra="forbid"` on every
-nested model. Two configs contain fields the schema rejects:
+### C3 — ~~Two configs will fail the new pydantic schema~~ DONE
+`configs/exp0_20pct_merged.yaml` and `configs/exp0_test.yaml` deleted.
+`configs/exp0.yaml` (canonical) and `configs/exp0_20pct.yaml` (valid override) remain.
 
-- `configs/exp0_20pct_merged.yaml`:
-  - `model.predictor.{kind, hidden_dim, n_layers, dropout}` — legacy
-    predictor block; no Python reads it.
-  - `loss.sigreg.{reduction, clip_value}` — orphan fields; no Python reads
-    them.
-  - The file also appears to be two configs concatenated (the
-    `data` / `train` / `run` blocks reappear at the bottom). May not have
-    been intended for direct use.
-- `configs/exp0_test.yaml`:
-  - Same `model.predictor` block.
-  - Same `loss.sigreg.{reduction, clip_value}` orphans.
+### C4 — ~~`scripts/pack_webdataset.py` is now orphan~~ DONE
+Deleted.
 
-**Pick one** for each:
-- delete the offending blocks from the YAML, or
-- add `PredictorCfg` + the two `sigreg` extras to `utils/schema.py`.
+### C5 — ~~Style nit in `train.py:455` (semicolon)~~ DONE
+Split into two lines.
 
-`configs/exp0.yaml` (canonical) validates cleanly.
-
-### C4 — `scripts/pack_webdataset.py` is now orphan
-The WebDataset → JSONL switch (§3.2) means nothing consumes WebDataset shards
-anymore. The shard-packing script still imports `webdataset` and is the only
-remaining producer. Either delete the script or keep it as a one-off
-utility — flag for explicit decision; it was left in place during the pass.
-
-### C5 — Style nit in `train.py:455` (semicolon)
-Two statements on one line:
-```python
-v_sig_f, _ = sigreg(fp, step=step); v_sig_f = v_sig_f / max(1, fp.size(0))
-```
-Carried over from the §1.5 `_validate_one` rewrite. Ruff flags it (`E702`).
-Trivial split when convenient.
-
-### C6 — `eval/run_probes.py:35` `proc` left unused
+### C6 — `eval/run_probes.py:35` `proc` left unused 
 `subprocess.run(...)` assigned to `proc` and never read. The §2.3 subagent
 left it deliberately so a future error handler can reach the process result;
 revisit if you decide you want the cleaner form.
 
-### C7 — `CODEBASE.md` was updated; `CHANGELOG.md` was not
-`agents.md` says to update both on major changes. `CODEBASE.md` was patched
-(Conformer reference, removed dead-file mentions). `CHANGELOG.md` was left to
-you because the entries depend on how you want to frame the squashed history
-of this branch.
+### C7 — ~~`CHANGELOG.md` was not updated~~ DONE
+Entry added for the simplification branch (2026-05-22).
 
 ---
 
-## §3.8 (continued) — call-site migration of config access
+## §3.8 — ~~call-site migration of config access~~ DONE (2026-05-22)
 
-The pydantic schema was added (`utils/schema.py`) and is enforced at startup
-by `utils/config.py`, but `load_config` still returns `model.model_dump()` —
-a plain dict. Every existing `cfg["a"]["b"]` access site in `train.py`,
-`eval/`, `scripts/` continues to work unchanged.
+`load_config` and `apply_overrides` now return `Config` (pydantic model).
+All `cfg["..."]` / `cfg.get("...")` sites in `train.py`, `eval/`, and
+`scripts/` converted to `cfg.attr` attribute access. Type casts (`int()`,
+`float()`, `bool()`) and the dict-key filters for projector/sigreg dropped.
+`save_checkpoint` / `save_run_metadata` serialize via `cfg.model_dump()` so
+checkpoint dicts remain loadable without pydantic.
 
-The full migration to `cfg.a.b` attribute access (the upside: drops the
-remaining `int(cfg["..."])` / `float(...)` / dict-key-filter ceremony in
-`train.py` and the projector/sigreg construction sites) was deferred because
-it touches hundreds of lines and needs Python in the loop to verify.
+`eval/run_probes.py`: emotion/gender probe code updated with `exp_cfg.eval.*`
+attribute access; those probes print a skip notice when enabled until their
+manifests are added to the schema.
 
-**Plan when ready:**
-- Change `load_config` to return the `Config` pydantic model instead of
-  `model.model_dump()`.
-- Walk every `cfg["..."]` / `cfg.get("...")` site in `train.py`, `eval/`,
-  `scripts/`, `eval/run_probes.py` and convert to attribute access.
-- Drop the `int(...)`, `float(...)`, `bool(...)` casts at config-access
-  sites — the schema already coerces types.
-- Remove the dict-key filter `{k: v for k, v in proj_cfg_raw.items() if k in
-  {...}}` (and the sigreg equivalent) in `train.py` — pydantic forbids
-  extras on those nested models so the filter is redundant.
-- Run training end-to-end after the migration; expect to chase a few
-  `AttributeError` / `KeyError` mismatches that grep can't find.
+`scripts/reconstruct_sample.py` and `scripts/count_params.py` are exempt —
+they load cfg from a checkpoint dict or raw YAML respectively, not via
+`load_config`.
 
-This is a one-evening task with a running Python; do not attempt it without.
+Verify on training box: run `python train.py --config configs/exp0.yaml
+data.train_manifest=... data.val_manifest=... --max_steps 1` to catch any
+AttributeError mismatches before a full run.
 
 ---
 
-## §3.3 — MHC ablation (decision-deferred experiment)
+## §3.3 — MHC ablation (decision-deferred experiment) - keep i'll ablate using this
 
 MHC machinery (`models/mhc.py`, the wrapper plumbing in `models/encoder.py`,
 the `model.encoder.mhc` config block) is **kept on this branch** but the
@@ -127,7 +98,7 @@ No code changes until the experiment runs.
 
 ---
 
-## §3.6 — Eval surface (decision-deferred)
+## §3.6 — Eval surface (decision-deferred) - keep currently
 
 `eval/eval_emotion.py`, `eval/eval_gender.py`, `eval/extract_embeddings.py`
 are config-disabled but still on disk. Left in place during the pass — they
@@ -142,42 +113,66 @@ once the project commits to the inline-probe-only path?
 
 ---
 
-## §3.7 — GAN code (decision-deferred)
+## §3.7 — ~~GAN code~~ DELETED (2026-05-22, later pass)
 
-`gan.enabled: false` in every config. The GAN code path (discriminators,
-adaptive weight, two `torch.autograd.grad` calls, hinge loss) is gated and
-inert when disabled. Cost when off is zero.
+GAN training path removed entirely (discriminators, adaptive weight, two
+`torch.autograd.grad` calls, hinge loss, schema block, configs). Recoverable
+from git history at commit before the `train.py` audit pass if reintroduced.
+Reason: not on the near-term roadmap, and the two `torch.autograd.grad` calls
+are DDP/`torch.compile`-hostile.
 
-**Decision needed:** keep GAN path for future enabling, or delete entirely
-to slim `train.py` by another ~150 lines? No code changes yet.
+## Bring-back-later (2026-05-22, train.py audit pass)
+
+### Online/offline probe
+
+The inline CTC probe (`eval/inline_probe.py`) was deleted along with its
+config block and call sites in `train.py`. The eval-on-save subprocess
+orchestrator block in `train.py` (which shuffled the model to CPU, shelled
+out to `eval/run_probes.py`, and saved `best_asr.pt` / `best_composite.pt`)
+was also removed.
+
+**Why it's gone:** sanity-check probing should be either
+(a) cleanly inline and torch.compile/DDP-safe — the previous detached-head
+implementation wasn't, or
+(b) a separately-launched offline process — which `eval/eval_asr.py` already
+supports (call with `--config`, `--ckpt`, `--train_manifest`, `--dev_manifest`).
+
+**To bring back:** decide which shape you want. If inline: a clean
+nn.Module-only head that participates in the main forward (don't toggle
+requires_grad inside the step). If offline: a launcher script that finds the
+latest `last.pt` and runs `eval/eval_asr.py` against it on a cadence,
+out-of-process.
+
+### Best-checkpoint tracking
+
+Only `last.pt` is saved. `best_asr.pt` / `best_composite.pt` are gone because
+the metric used to gate them came from the deleted eval-on-save block. When
+the probe comes back, re-add best-tracking *only* if you'll actually use those
+checkpoints in downstream work; otherwise rank from logs and copy by hand.
+
+### CodeCarbon emissions tracking
+
+Removed. Re-add if you ever want it back — it's ~10 lines.
 
 ---
 
-## §5 — Static-analysis cadence (re-run when convenient)
+## §5 — ~~Static-analysis cadence~~ DONE (2026-05-22)
 
-The `.static-analysis/` reports under git are from before the pass and are
-now stale. Re-run after this branch lands to get a clean baseline for
-future work:
+Reports regenerated at `.static-analysis/ruff.txt` and `.static-analysis/vulture.txt`.
+Pyright not re-run (npx/Node required separately).
 
-```bash
-uvx ruff check --select F,ARG,ERA,RUF --output-format=concise \
-    train.py models/ data/ losses/ optim/ eval/ utils/ tests/ \
-    > .static-analysis/ruff.txt
+**Ruff summary (14 findings, all pre-existing):**
+- `eval/run_probes.py:38 F841` — `proc` unused (C6, deliberate)
+- `eval/common.py:123 ARG001`, `eval/eval_asr.py:171 ARG001` — unused args (legacy)
+- `models/mhc.py:43 ARG002`, `models/sigreg.py:103 ARG002` — unused args (legacy)
+- `ERA001` scattered in losses/, models/ — commented-out code, pre-existing
+- `RUF046` in `data/` — redundant int casts, pre-existing
 
-uvx vulture --min-confidence 60 \
-    train.py models/ data/ losses/ optim/ eval/ utils/ tests/ \
-    .static-analysis/vulture-allowlist.py \
-    > .static-analysis/vulture.txt
+**Vulture summary (real signals, after filtering nn.Module.forward false positives):**
+- `train.py:57 _pool_utt`, `train.py:141 _pool` — unused helper functions
+- `eval/eval_asr.py:171 targets` — unused variable (100% confidence)
+- `eval/run_probes.py:38 proc` — C6 deliberate survivor
+- `utils/schema.py model_config` — pydantic metaclass field, false positive
 
-npx -y pyright --project .static-analysis/pyrightconfig.json --outputjson \
-    > .static-analysis/pyright.json
-```
-
-Expected: ~zero F-class ruff findings (a final F401 sweep ran at the end of
-the simplification pass), one F841 `proc` survivor (see C6), a much smaller
-vulture report now that the Zipformer tree is gone, and pyright clean
-modulo whatever the Conformer attention `del pos_emb, ...` shadowing
-produces.
-
-Diff each report against the previous baseline (saved under git) to find
-cascading orphans.
+Re-run commands (from README.md Static analysis section) when ready for the
+next cleanup pass.
