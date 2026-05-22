@@ -10,7 +10,8 @@ run:
     name: null
 
 data:
-  # Note: manifests are JSONL files produced by scripts/create_clean_manifest.py
+  # Note: manifests are JSONL files produced by `python -m clae_data build`
+  # (or fetched from HF Hub via `make fetch-data`).
   sample_rate: 16000
   segment_seconds: 3.0
   train_manifest: "data/manifests/train.jsonl"
@@ -107,31 +108,6 @@ loss:
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
-  inline_probe:
-    # Detached CTC probe on encoder output hE. Never backprops into encoder.
-    # Diagnoses latent quality every log_interval steps without waiting for
-    # the offline ASR eval. Treat WER here as a relative trend, not absolute.
-    enabled: true
-    manifest: "data/manifests/asr_probe_train.jsonl"
-    batch_size: 8
-    segment_seconds: 15.0
-    num_workers: 1
-    step_interval: 1            # train head every N main steps
-    log_interval: 500           # emit probe/{ctc_loss,wer} to W&B every M main steps
-    vocab_bootstrap_samples: 1000
-    lr: 1.0e-3
-
-gan:
-  enabled: false
-  start_step: 15000
-  warmup_steps: 5000
-  periods: [2, 3, 5, 7, 11]
-  msd_scales: 3
-  mpd_channels: 32
-  msd_channels: 16
-  d_lr: 5.0e-5
-  d_betas: [0.8, 0.99]
-  d_weight_decay: 0.0
 
 optim:
   lr: 5.0e-4                    # LeJEPA paper range: 5e-4 to 5e-3
@@ -152,7 +128,6 @@ train:
   eval_interval_steps: 5000
   save_interval_steps: 10000
   val_batches: null       # Evaluate on the entire validation set
-  run_eval_on_save: true
 
 eval:
   enabled: true
