@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from data.dataset import WebDatasetConfig, collate_fixed, get_audio_wds
+from data.dataset import AudioDataset, DatasetConfig, collate_fixed
 from eval.common import BLANK_IDX, build_charset, greedy_decode_ctc
 
 
@@ -43,13 +43,12 @@ class InlineProbe:
         manifest = str(cfg_probe["manifest"])
         seg_sec = float(cfg_probe.get("segment_seconds", 15.0))
 
-        ds = get_audio_wds(
-            WebDatasetConfig(
-                urls=manifest,
+        ds = AudioDataset(
+            DatasetConfig(
+                manifest=manifest,
                 sample_rate=int(sample_rate),
                 segment_seconds=seg_sec,
-                shuffle_size=int(cfg_probe.get("shuffle_size", 200)),
-                resampled=True,
+                random_crop=True,
             )
         )
         self._dl = torch.utils.data.DataLoader(
@@ -58,6 +57,7 @@ class InlineProbe:
             num_workers=int(cfg_probe.get("num_workers", 1)),
             collate_fn=collate_fixed,
             drop_last=True,
+            shuffle=True,
         )
         self._it = iter(self._dl)
 

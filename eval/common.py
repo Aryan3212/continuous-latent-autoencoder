@@ -30,7 +30,7 @@ def greedy_decode_ctc(log_probs: torch.Tensor, id2ch: List[str]) -> List[str]:
         outs.append("".join(chars))
     return outs
 
-from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
+from data.dataset import AudioDataset, DatasetConfig, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import apply_overrides, load_config
@@ -81,18 +81,18 @@ def iter_embeddings(
     num_workers: int = 0,
     log_name: str = "",
 ) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = get_audio_wds(
-        WebDatasetConfig(
-            urls=manifest_path,
+    ds = AudioDataset(
+        DatasetConfig(
+            manifest=manifest_path,
             sample_rate=sample_rate,
             segment_seconds=segment_seconds,
             random_crop=False,
-            resampled=False,
-            shuffle_size=0,
         )
     )
-    ds = ds.batched(batch_size, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=num_workers)
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=batch_size, num_workers=num_workers,
+        collate_fn=collate_fixed, drop_last=False,
+    )
     use_amp = lm.device.type == "cuda"
     start_t = time.perf_counter()
     n_samples = 0
@@ -123,18 +123,18 @@ def iter_frame_features(
     use_latent: bool = False, # deprecated
     log_name: str = "",
 ) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = get_audio_wds(
-        WebDatasetConfig(
-            urls=manifest_path,
+    ds = AudioDataset(
+        DatasetConfig(
+            manifest=manifest_path,
             sample_rate=sample_rate,
             segment_seconds=segment_seconds,
             random_crop=False,
-            resampled=False,
-            shuffle_size=0,
         )
     )
-    ds = ds.batched(batch_size, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=num_workers)
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=batch_size, num_workers=num_workers,
+        collate_fn=collate_fixed, drop_last=False,
+    )
     use_amp = lm.device.type == "cuda"
     start_t = time.perf_counter()
     n_samples = 0

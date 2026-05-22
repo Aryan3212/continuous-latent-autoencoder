@@ -6,7 +6,6 @@ import pathlib
 import subprocess
 from typing import Any, Dict
 
-from eval.baselines import run_encodec_baseline, run_hubert_baseline
 from eval.run_probes import run_all_probes
 from utils.config import load_config
 
@@ -56,11 +55,6 @@ def main() -> None:
             ckpt_path=args.ckpt,
             python_bin=args.python_bin,
         )
-
-    results["baselines"] = {
-        "encodec": run_encodec_baseline(manifest=args.manifest),
-        "hubert": run_hubert_baseline(manifest=args.manifest),
-    }
 
     (out_dir / "summary.json").write_text(json.dumps(results, indent=2))
 

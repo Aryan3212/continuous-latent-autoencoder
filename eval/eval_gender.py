@@ -61,9 +61,9 @@ def main() -> None:
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
     seg = float(args.segment_seconds if args.segment_seconds is not None else lm.cfg["data"]["segment_seconds"])
 
-    print(f"  [Gender] Extracting train embeddings...", flush=True)
+    print("  [Gender] Extracting train embeddings...", flush=True)
     x_tr, y_tr, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg, log_name="Gender train")
-    print(f"  [Gender] Extracting dev embeddings...", flush=True)
+    print("  [Gender] Extracting dev embeddings...", flush=True)
     x_de, y_de, _ = _load_embs(lm, args.dev_manifest, args.label_key, args.batch_size, seg, log_name="Gender dev")
 
     # Free frozen encoder

@@ -1,0 +1,26 @@
+{
+  "include": [
+    "../train.py",
+    "../models",
+    "../data",
+    "../losses",
+    "../optim",
+    "../eval",
+    "../utils"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "../reference-implementations",
+    "../.venv",
+    "../scripts",
+    "../tests"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "off",
+  "reportUnusedImport": "error",
+  "reportUnusedFunction": "error",
+  "reportUnusedClass": "error",
+  "reportUnusedVariable": "error",
+  "reportUnusedExpression": "error",
+  "reportUnreachable": "error"
+}

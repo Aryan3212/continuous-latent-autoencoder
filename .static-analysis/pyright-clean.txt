@@ -1,0 +1,45 @@
+error    reportUnusedImport       data/augment.py              5     Import "List" is not accessed
+error    reportUnusedImport       data/augment.py              5     Import "Optional" is not accessed
+error    reportUnusedImport       data/augment.py              6     Import "math" is not accessed
+error    reportUnusedVariable     data/augment.py              202   Variable "B" is not accessed
+error    reportUnusedVariable     data/augment.py              202   Variable "C" is not accessed
+error    reportUnusedVariable     data/augment.py              222   Variable "device" is not accessed
+error    reportUnusedImport       eval/baselines.py            8     Import "encodec" is not accessed
+error    reportUnusedImport       eval/baselines.py            16    Import "fairseq" is not accessed
+error    reportUnusedImport       eval/eval_recon.py           6     Import "Any" is not accessed
+error    reportUnusedVariable     eval/run_probes.py           35    Variable "proc" is not accessed
+warning  reportUndefinedVariable  losses/multires_stft.py      56    "Optional" is not defined
+warning  reportUndefinedVariable  losses/multires_stft.py      58    "Optional" is not defined
+error    reportUnusedVariable     models/decoder_generator.py  121   Variable "up_i" is not accessed
+error    reportUnusedImport       models/encoder.py            4     Import "Tuple" is not accessed
+error    reportUnusedImport       models/encoder.py            4     Import "Dict" is not accessed
+error    reportUnusedImport       models/mhc.py                9     Import "F" is not accessed
+error    reportUnusedVariable     models/predictor.py          22    Variable "i" is not accessed
+error    reportUnusedVariable     models/zipformer.py          215   Variable "num_frames0" is not accessed
+error    reportUnusedVariable     models/zipformer.py          497   Variable "layer" is not accessed
+error    reportUnusedVariable     models/zipformer.py          758   Variable "i" is not accessed
+error    reportUnusedVariable     models/zipformer.py          791   Variable "i" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1453  Variable "num_heads" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1453  Variable "batch_size" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1453  Variable "seq_len" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1453  Variable "seq_len" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1504  Variable "embed_dim" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1548  Variable "embed_dim" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1647  Variable "embed_dim" is not accessed
+error    reportUnusedVariable     models/zipformer.py          1690  Variable "embed_dim" is not accessed
+error    reportUnusedExpression   models/zipformer.py          1906  Expression value is unused
+error    reportUnusedVariable     models/zipformer_scaling.py  1762  Variable "y" is not accessed
+error    reportUnusedVariable     models/zipformer_scaling.py  1776  Variable "y" is not accessed
+error    reportUnusedVariable     models/zipformer_scaling.py  1790  Variable "y" is not accessed
+error    reportUnusedVariable     train.py                     92    Variable "T" is not accessed
+error    reportUnusedFunction     train.py                     202   Function "_primary_infonce" is not accessed
+error    reportUnusedVariable     train.py                     546   Variable "primary_temp" is not accessed
+error    reportUnusedVariable     train.py                     598   Variable "hE" is not accessed
+error    reportUnusedVariable     train.py                     598   Variable "stats" is not accessed
+error    reportUnusedVariable     train.py                     599   Variable "mask" is not accessed
+error    reportUnusedVariable     train.py                     671   Variable "micro" is not accessed
+error    reportUnusedVariable     train.py                     689   Variable "i_mb" is not accessed
+error    reportUnusedVariable     train.py                     700   Variable "has_mix" is not accessed
+error    reportUnusedVariable     train.py                     708   Variable "has_mix" is not accessed
+error    reportUnusedImport       utils/config.py              5     Import "Tuple" is not accessed
+error    reportUnusedImport       utils/logging.py             5     Import "Optional" is not accessed

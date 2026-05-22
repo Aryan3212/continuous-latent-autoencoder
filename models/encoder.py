@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, Dict
-
 import copy
+from dataclasses import dataclass, field
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
+from models.conformer import ConformerLayer
 from models.mhc import MHCConfig, MHCWrapper
-from models.zipformer import CompactRelPositionalEncoding, Zipformer2EncoderLayer
 
 
 @dataclass
@@ -16,14 +16,9 @@ class EncoderConfig:
     d_model: int = 256
     n_layers: int = 6
     num_heads: int = 4
-    query_head_dim: int = 32
-    pos_head_dim: int = 4
-    value_head_dim: int = 16
     feedforward_dim: int = 512
     dropout: float = 0.1
     cnn_module_kernel: int = 31
-    pos_dim: int = 192
-    warmup_batches: float = 4000.0
     mhc: MHCConfig = field(default_factory=MHCConfig)
 
     def __post_init__(self) -> None:
@@ -32,32 +27,24 @@ class EncoderConfig:
 
 
 class Encoder(nn.Module):
-    """
-    Encoder over low-rate tokens.
+    """Conformer-based encoder over low-rate tokens.
 
-    Input:
-      h0: (B, C, T')  -> output hE: (B, D, T')
+    Input:  h0 (B, C, T')  -> Output: hE (B, D, T').
     """
 
     def __init__(self, in_channels: int, cfg: EncoderConfig):
         super().__init__()
         self.cfg = cfg
         self.in_proj = nn.Conv1d(in_channels, cfg.d_model, kernel_size=1)
-        layer = Zipformer2EncoderLayer(
-            embed_dim=cfg.d_model,
-            pos_dim=cfg.pos_dim,
+
+        layer = ConformerLayer(
+            d_model=cfg.d_model,
             num_heads=cfg.num_heads,
-            query_head_dim=cfg.query_head_dim,
-            pos_head_dim=cfg.pos_head_dim,
-            value_head_dim=cfg.value_head_dim,
             feedforward_dim=cfg.feedforward_dim,
-            dropout=cfg.dropout,
             cnn_module_kernel=cfg.cnn_module_kernel,
-            causal=False,
+            dropout=cfg.dropout,
         )
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(cfg.n_layers)])
-        self.pos_enc = CompactRelPositionalEncoding(cfg.pos_dim, dropout_rate=0.15, length_factor=1.0)
-
 
         self.mhc_cfg = cfg.mhc
         self._use_mhc = bool(cfg.mhc.enabled and cfg.mhc.num_streams > 1)
@@ -90,9 +77,8 @@ class Encoder(nn.Module):
     def forward(self, h0: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         if h0.dim() != 3:
             raise ValueError(f"Expected h0 as (B,C,T'), got {tuple(h0.shape)}")
-        x = self.in_proj(h0).transpose(1, 2)  # (B,T',D)
-        x = x.transpose(0, 1)  # (T',B,D)
-        pos_emb = self.pos_enc(x)
+        x = self.in_proj(h0).transpose(1, 2)                 # (B, T', D)
+        x = x.transpose(0, 1)                                 # (T', B, D)
 
         residuals: torch.Tensor = x
         if key_padding_mask is not None and key_padding_mask.dim() != 2:
@@ -108,7 +94,7 @@ class Encoder(nn.Module):
                     residuals = residuals.unsqueeze(0).expand(streams, -1, -1, -1)
                 residuals = self.mhc_wrappers[i](
                     residuals,
-                    pos_emb=pos_emb,
+                    pos_emb=None,
                     chunk_size=-1,
                     attn_mask=None,
                     src_key_padding_mask=key_padding_mask,
@@ -116,12 +102,12 @@ class Encoder(nn.Module):
             else:
                 if mhc_active and residuals.dim() == 4:
                     residuals = self._apply_per_stream(
-                        residuals, layer, pos_emb=pos_emb, key_padding_mask=key_padding_mask
+                        residuals, layer, key_padding_mask=key_padding_mask
                     )
                 else:
                     residuals = layer(
                         residuals,
-                        pos_emb,
+                        pos_emb=None,
                         chunk_size=-1,
                         attn_mask=None,
                         src_key_padding_mask=key_padding_mask,
@@ -130,7 +116,7 @@ class Encoder(nn.Module):
         if residuals.dim() == 4:
             residuals = residuals.sum(dim=0)
 
-        x = residuals.transpose(0, 1).transpose(1, 2)  # (B,D,T')
+        x = residuals.transpose(0, 1).transpose(1, 2)         # (B, D, T')
         return x
 
     def _apply_per_stream(
@@ -138,7 +124,6 @@ class Encoder(nn.Module):
         residuals: torch.Tensor,
         layer: nn.Module,
         *,
-        pos_emb: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         streams, seq_len, batch, dim = residuals.shape
@@ -149,7 +134,7 @@ class Encoder(nn.Module):
             flat_mask = None
         out = layer(
             flat,
-            pos_emb,
+            pos_emb=None,
             chunk_size=-1,
             attn_mask=None,
             src_key_padding_mask=flat_mask,

@@ -1,0 +1,8 @@
+Installed 1 package in 7ms
+eval/eval_asr.py:171: unused variable 'targets' (100% confidence)
+models/zipformer.py:749: unused variable 'warmup_begin' (100% confidence)
+models/zipformer.py:750: unused variable 'warmup_end' (100% confidence)
+scripts/create_clean_manifest.py:4: unused import 'defaultdict' (90% confidence)
+scripts/datasets_download.py:2: unused import 'shutil' (90% confidence)
+scripts/prepare_asr_manifest.py:3: unused import 'csv' (90% confidence)
+scripts/prepare_hf_parquet.py:12: unused import 'pc' (90% confidence)

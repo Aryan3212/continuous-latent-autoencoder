@@ -120,12 +120,6 @@ CALM-like preset:
 uv run python train.py --config configs/calm_like_exp0.yaml data.train_manifest=/path/train.jsonl
 ```
 
-Compute latent stats (for decoder normalization):
-
-```bash
-uv run python scripts/compute_latent_stats.py --config configs/exp0.yaml --ckpt /path/to/ckpt.pt --out runs/latent_stats.pt
-```
-
 Recon evaluation:
 
 ```bash
@@ -143,5 +137,42 @@ Smoke tests:
 ```bash
 PYTHONPATH=. uv run --no-project python scripts/smoke_encoder_mhc.py
 PYTHONPATH=. uv run --no-project python scripts/smoke_gan_step.py
-PYTHONPATH=. uv run --no-project python tests/test_scaled_adam_parity.py
 ```
+
+## Static analysis (dead-code / unused-symbol audit)
+
+The project has no static-analysis deps installed. Tools below run via
+ephemeral `uvx` / `npx` envs and write reports under `.static-analysis/`.
+None of them touch `pyproject.toml`.
+
+```bash
+mkdir -p .static-analysis
+
+# 1. ruff — fast linter (Rust). Finds unused imports/vars, dead branches,
+#    undefined names (real bugs), commented-out code.
+uvx ruff check --select F,ARG,ERA,RUF --output-format=concise \
+    train.py models/ data/ losses/ optim/ eval/ utils/ tests/ \
+    > .static-analysis/ruff.txt
+
+# 2. vulture — flags unused functions/classes/methods/attrs across modules.
+#    The allowlist suppresses framework magic (torch.nn.Module.forward, etc.)
+uvx vulture --min-confidence 60 \
+    train.py models/ data/ losses/ optim/ eval/ utils/ tests/ \
+    .static-analysis/vulture-allowlist.py \
+    > .static-analysis/vulture.txt
+
+# 3. pyright — cross-file unused-symbol + unreachable + undefined-name pass.
+#    Ignore `reportMissingImports` warnings (torch/yaml/etc. aren't installed).
+npx -y pyright --project .static-analysis/pyrightconfig.json --outputjson \
+    > .static-analysis/pyright.json
+jq -r '.generalDiagnostics[]
+       | select(.rule | test("reportUnused|reportUndefined|reportUnreachable"))
+       | "\(.severity)\t\(.rule)\t\(.file)\t\(.range.start.line + 1)\t\(.message)"' \
+    .static-analysis/pyright.json \
+    > .static-analysis/pyright-clean.txt
+```
+
+Static analysis catches **symbol-level** dead code (unused imports/functions/
+vars, undefined names). It cannot catch **config-gated** dead branches (e.g.
+`if mix_recon_enabled:`). For those, delete the branches by hand first, then
+re-run the tools — orphans cascade out.

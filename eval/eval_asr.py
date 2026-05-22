@@ -183,7 +183,7 @@ def main() -> None:
             examples.append({"ref": texts[i], "hyp": all_hyp[i]})
         return {"wer": float(w), "num_samples": len(texts), "examples": examples}
 
-    print(f"  [ASR] Evaluating...", flush=True)
+    print("  [ASR] Evaluating...", flush=True)
     out = {
         "train": _eval(feats_tr, text_tr, targets_tr),
         "dev": _eval(feats_de, text_de, targets_de),

@@ -1,14 +1,4 @@
 aug:
-  feature_mask:
-    enabled: true
-    time_mask_len: 5
-    time_mask_prob: 0.65
-  mix:
-    enabled: true
-    prob: 0.5
-    snr_db_max: 15.0
-    snr_db_min: 3.0
-    swap_prob: 0.5
   wave_aug:
     clip_prob: 0.05
     enabled: true
@@ -17,24 +7,23 @@ aug:
     noise_prob: 0.1
     noise_snr_max: 20.0
     noise_snr_min: 5.0
-    reverb_prob: 0.0
 data:
+  # Note: manifests are JSONL files produced by scripts/create_clean_manifest.py
   num_workers: 8
   persistent_workers: true
   pin_memory: true
   sample_rate: 16000
   segment_seconds: 3.0
-  shuffle_size: 1000
-  train_manifest: data/shards/train/train-{000000..000058}.tar
-  val_manifest: data/shards/val/val-000000.tar
+  train_manifest: data/manifests/train.jsonl
+  val_manifest: data/manifests/val.jsonl
 eval:
   asr:
     batch_size: 16
-    dev_manifest: data/shards/asr_eval_val/asr_eval_val-{000000..000001}.tar
+    dev_manifest: data/manifests/asr_probe_val.jsonl
     enabled: true
     steps: 2
     text_key: text
-    train_manifest: data/shards/asr_eval_train/asr_eval_train-{000000..000010}.tar
+    train_manifest: data/manifests/asr_probe_train.jsonl
     use_latent: false
   emotion:
     enabled: false
@@ -58,22 +47,9 @@ gan:
   - 7
   - 11
   start_step: 0
-latent_noise:
-  enabled: true
-  kind: uniform
-  sigma_max: 0.1
-  warmup_steps: 10000
 loss:
   jepa:
-    mix_view_weight: 1.0
     weight: 15.0
-  mix_recon:
-    enabled: true
-    start_step: 0
-    weight: 1.0
-  primary:
-    enabled: true
-    weight: 1.0
   sigreg:
     clip_value: null
     n_points: 17
@@ -101,9 +77,6 @@ model:
   decoder:
     channels: 512
     film_hidden: 128
-    latent_norm: false
-    latent_norm_eps: 1.0e-05
-    latent_stats_path: null
     res_blocks_per_up: 2
     res_dilations:
     - 1
@@ -126,6 +99,7 @@ model:
     d_model: 192
     dropout: 0.1
     feedforward_dim: 768
+    num_heads: 4
     mhc:
       alpha_init: 0.01
       dropout: 0.0
@@ -137,12 +111,6 @@ model:
       start_layer: 2
       tau: 0.05
     n_layers: 4
-    num_heads: 4
-    pos_dim: 192
-    pos_head_dim: 4
-    query_head_dim: 48
-    value_head_dim: 48
-    warmup_batches: 20000.0
   frontend:
     channels:
     - 64
@@ -172,23 +140,13 @@ optim:
   betas:
   - 0.9
   - 0.98
-  clipping_scale: 3.0
-  clipping_update_period: 100
   eps: 3.0e-05
   grad_clip: 1.0
-  kind: scaled_adam
   lr: 0.0001
-  param_max_rms: 3.0
-  param_min_rms: 1.0e-05
-  scalar_lr_scale: 0.1
-  scalar_max: 10.0
   scheduler:
-    kind: eden
-    lr_batches: 10000
-    lr_epochs: 4
-    warmup_batches: 1000
-    warmup_start: 0.5
-  size_update_period: 4
+    warmup_steps: 1000
+    total_steps: 5
+    min_lr_ratio: 0.0
   weight_decay: 0.001
 run:
   amp: true

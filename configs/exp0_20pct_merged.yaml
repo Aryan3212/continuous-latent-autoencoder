@@ -10,6 +10,7 @@ run:
     name: null
 
 data:
+  # Note: manifests are JSONL files produced by scripts/create_clean_manifest.py
   sample_rate: 16000
   segment_seconds: 2.0
   train_manifest: "data/manifests/experiment_v1/train.jsonl"
@@ -18,25 +19,14 @@ data:
   pin_memory: true
 
 aug:
-  feature_mask:
-    enabled: true
-    time_mask_prob: 0.7
-    time_mask_len: 8         # in tokens at 12.5Hz
   wave_aug:
     enabled: true
     noise_prob: 0.1
     noise_snr_min: 5.0
     noise_snr_max: 20.0
-    reverb_prob: 0.0      # RIR dataset needed for true reverb, placeholder for now
     lowpass_prob: 0.1
     gain_prob: 0.1
     clip_prob: 0.05
-  mix:
-    enabled: false
-    snr_db_min: 3.0
-    snr_db_max: 15.0
-    prob: 0.0
-    swap_prob: 0.0
 
 model:
   frontend:
@@ -48,14 +38,9 @@ model:
     d_model: 256
     n_layers: 6
     num_heads: 4
-    query_head_dim: 32
-    pos_head_dim: 4
-    value_head_dim: 16
     feedforward_dim: 512
     dropout: 0.1
     cnn_module_kernel: 31
-    pos_dim: 192
-    warmup_batches: 4000.0
     mhc:
       enabled: true
       num_streams: 2
@@ -78,9 +63,6 @@ model:
     res_blocks_per_up: 2
     res_dilations: [1, 3, 9]
     film_hidden: 128
-    latent_norm: false
-    latent_norm_eps: 1.0e-5
-    latent_stats_path: null
 
 loss:
   stft:
@@ -96,7 +78,6 @@ loss:
   wav_l1_weight: 0.0
   jepa:
     weight: 1.0
-    mix_view_weight: 1.0        # Exp1+: z_mix -> z_primary alignment
   sigreg:
     weight: 0.1
     num_slices: 256
@@ -104,13 +85,6 @@ loss:
     n_points: 17
     reduction: mean
     clip_value: null
-  mix_recon:
-    enabled: false              # Exp1+: decode from mix -> primary
-    weight: 1.0
-    start_step: 0
-  primary:
-    enabled: false
-    weight: 0.0
 
 gan:
   enabled: false
@@ -121,31 +95,15 @@ gan:
   d_betas: [0.8, 0.99]
   d_weight_decay: 0.0
 
-latent_noise:
-  enabled: true               # RAE Trick: Train decoder on noisy latents
-  kind: uniform
-  warmup_steps: 2000
-  sigma_max: 0.1              # Increased for robustness
-
 optim:
-  kind: scaled_adam             # scaled_adam | adamw
   lr: 3.0e-2
   betas: [0.9, 0.98]
   eps: 1.0e-8
   weight_decay: 1.0e-3
-  clipping_scale: 3.0
-  scalar_lr_scale: 0.1
-  param_min_rms: 1.0e-5
-  param_max_rms: 3.0
-  scalar_max: 10.0
-  size_update_period: 4
-  clipping_update_period: 100
   scheduler:
-    kind: eden
-    lr_batches: 5000
-    lr_epochs: 6
-    warmup_batches: 500
-    warmup_start: 0.5
+    warmup_steps: 2000
+    total_steps: 10000
+    min_lr_ratio: 0.0
   grad_clip: 1.0
 
 train:
@@ -174,6 +132,7 @@ eval:
     use_latent: false
 # Inherit from exp0 but override for 20% data run
 data:
+  # Note: manifests are JSONL files produced by scripts/create_clean_manifest.py
   train_manifest: "data/manifests/experiment_v1/train_20pct.jsonl"
   # Keep same val manifest for consistent evaluation
   val_manifest: "data/manifests/experiment_v1/val.jsonl"

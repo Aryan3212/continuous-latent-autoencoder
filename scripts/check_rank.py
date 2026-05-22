@@ -8,7 +8,7 @@ sys.path.append(os.getcwd())
 
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
-from data.dataset import get_audio_wds, WebDatasetConfig, collate_fixed
+from data.dataset import AudioDataset, DatasetConfig, collate_fixed
 from utils.config import load_config
 import numpy as np
 
@@ -46,13 +46,16 @@ def main():
     # Fallback for manifests if path is relative
     manifest = dcfg["val_manifest"]
     
-    ds = get_audio_wds(WebDatasetConfig(
-        urls=manifest,
+    ds = AudioDataset(DatasetConfig(
+        manifest=manifest,
         sample_rate=int(dcfg["sample_rate"]),
         segment_seconds=float(dcfg["segment_seconds"]),
-        shuffle_size=0
+        random_crop=False,
     ))
-    dl = torch.utils.data.DataLoader(ds, batch_size=int(cfg["train"]["batch_size"]), collate_fn=collate_fixed)
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=int(cfg["train"]["batch_size"]),
+        collate_fn=collate_fixed, drop_last=False,
+    )
 
     all_z = []
     print(f"Collecting latents from {args.num_batches} batches...")

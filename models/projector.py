@@ -21,7 +21,7 @@ class Projector(nn.Module):
     (decoder + downstream probes). Mirrors LeJEPA's
     `MLP(in, [hidden, hidden, out], norm_layer=BatchNorm1d)` recipe and
     LeWM's projector. BatchNorm is required because LayerNorm-style encoder
-    outputs (Zipformer's BiasNorm here) resist being reshaped to N(0, I).
+    outputs (LayerNorm-normalised) resist being reshaped to N(0, I).
 
     Input:  (B, D, T)   encoder output
     Output: (B, P, T)   projected output

@@ -1,103 +1,94 @@
 from __future__ import annotations
 
+import json
 import math
 import random
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
 import torch
-import webdataset as wds
+import torch.nn.functional as F
+
+
+@dataclass
+class DatasetConfig:
+    manifest: str | List[str]
+    sample_rate: int = 16000
+    segment_seconds: float = 2.0
+    random_crop: bool = True
+
+
+def _read_manifest(paths: str | List[str]) -> List[Dict[str, Any]]:
+    if isinstance(paths, str):
+        paths = [paths]
+    items: List[Dict[str, Any]] = []
+    for p in paths:
+        with open(p, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                items.append(json.loads(line))
+    return items
 
 
 def _random_crop(wav: torch.Tensor, num_samples: int) -> torch.Tensor:
     if wav.numel() < num_samples:
-        return torch.nn.functional.pad(wav, (0, num_samples - wav.numel()))
+        return F.pad(wav, (0, num_samples - wav.numel()))
     start = random.randint(0, wav.numel() - num_samples)
     return wav[start : start + num_samples]
 
 
 def _start_crop(wav: torch.Tensor, num_samples: int) -> torch.Tensor:
     if wav.numel() < num_samples:
-        return torch.nn.functional.pad(wav, (0, num_samples - wav.numel()))
+        return F.pad(wav, (0, num_samples - wav.numel()))
     return wav[:num_samples]
 
 
-@dataclass
-class WebDatasetConfig:
-    urls: str | List[str]
-    sample_rate: int = 16000
-    segment_seconds: float = 2.0
-    random_crop: bool = True
-    shuffle_size: int = 1000
-    resampled: bool = True
+class AudioDataset(torch.utils.data.Dataset):
+    """Map-style dataset over a JSONL manifest.
 
+    Each manifest line is `{"audio_filepath": "...", ...}` (other keys like
+    `duration`, `text`, `dataset` are passed through as metadata).
+    """
 
-class PreprocessSample:
-    def __init__(self, cfg: WebDatasetConfig, num_samples: int):
+    def __init__(self, cfg: DatasetConfig):
         self.cfg = cfg
-        self.num_samples = num_samples
+        self.items = _read_manifest(cfg.manifest)
+        self.num_samples = int(math.ceil(cfg.segment_seconds * cfg.sample_rate))
+        self._resamplers: Dict[int, Any] = {}  # cached torchaudio Resample per source rate
 
-    def __call__(self, sample):
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def _resample(self, wav: torch.Tensor, src_sr: int) -> torch.Tensor:
+        if src_sr == self.cfg.sample_rate:
+            return wav
         import torchaudio
-        import io
-        
-        audio = None
-        for k, v in sample.items():
-            if k.endswith("flac") or k.endswith("wav"):
-                audio = v
-                break
-                
-        meta = None
-        for k, v in sample.items():
-            if k.endswith("json"):
-                meta = v
-                break
+        key = src_sr
+        if key not in self._resamplers:
+            self._resamplers[key] = torchaudio.transforms.Resample(src_sr, self.cfg.sample_rate)
+        return self._resamplers[key](wav)
 
-        if isinstance(audio, bytes):
-            try:
-                audio, _ = torchaudio.load(io.BytesIO(audio))
-            except Exception as e:
-                print(f"Error loading audio: {e}")
-                return None
-        elif audio is None:
-            return None
-
-        if audio.ndim > 1:
-            audio = audio.mean(dim=0)
-        elif audio.ndim == 1:
-            pass # already mono
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        import torchaudio
+        item = self.items[idx]
+        path = item.get("audio_filepath") or item.get("path") or item["audio"]
+        wav, sr = torchaudio.load(path)
+        if wav.ndim > 1:
+            wav = wav.mean(dim=0)
         else:
-            audio = audio.flatten()
-
+            wav = wav.flatten()
+        wav = self._resample(wav, int(sr))
         if self.cfg.random_crop:
-            audio = _random_crop(audio, self.num_samples)
+            wav = _random_crop(wav, self.num_samples)
         else:
-            audio = _start_crop(audio, self.num_samples)
+            wav = _start_crop(wav, self.num_samples)
+        return {"wav": wav, "meta": item}
 
-        return {"wav": audio, "meta": meta}
-
-def is_valid_sample(x):
-    return x is not None
-
-def get_audio_wds(cfg: WebDatasetConfig) -> wds.WebDataset:
-    num_samples = int(math.ceil(cfg.segment_seconds * cfg.sample_rate))
-    preprocess_fn = PreprocessSample(cfg, num_samples)
-
-    # Using .decode() with "torch" then a custom map
-    dataset = wds.WebDataset(cfg.urls, resampled=cfg.resampled, shardshuffle=False)
-    if cfg.resampled and cfg.shuffle_size > 0:
-        dataset = dataset.shuffle(cfg.shuffle_size)
-
-    dataset = (
-        dataset
-        .decode("torch")
-        .map(preprocess_fn)
-        .select(is_valid_sample)
-    )
-    return dataset
 
 def collate_fixed(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    wav = torch.stack([b["wav"] for b in batch], dim=0)  # (B,T)
-    wav = wav.unsqueeze(1)  # (B,1,T)
+    wav = torch.stack([b["wav"] for b in batch], dim=0)  # (B, T)
+    wav = wav.unsqueeze(1)                                # (B, 1, T)
     meta = [b["meta"] for b in batch]
     return {"wav": wav, "meta": meta}

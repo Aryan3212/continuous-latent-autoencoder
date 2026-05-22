@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-from typing import Any, Dict
+from typing import Dict
 
 import torch
 
-from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
+from data.dataset import AudioDataset, DatasetConfig, collate_fixed
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
 from models.encoder import Encoder, EncoderConfig
@@ -36,12 +36,9 @@ def main() -> None:
     encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
     
     latent_dim = int(mcfg["encoder"]["d_model"])
-    
+
     decoder_cfg = DecoderConfig(**mcfg["decoder"])
     decoder = WaveformDecoder(latent_dim, decoder_cfg)
-    if decoder_cfg.latent_stats_path:
-        stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
-        decoder.set_latent_stats(stats["mean"], stats["var"])
 
     model = torch.nn.ModuleDict(
         {"frontend": frontend, "encoder": encoder, "decoder": decoder}
@@ -54,16 +51,18 @@ def main() -> None:
     loss_cfg = MultiResSTFTConfig(**cfg["loss"]["stft"])
     stft = MultiResSTFTLoss(loss_cfg).to(device)
 
-    ds = get_audio_wds(
-        WebDatasetConfig(
-            urls=args.manifest,
+    ds = AudioDataset(
+        DatasetConfig(
+            manifest=args.manifest,
             sample_rate=int(cfg["data"]["sample_rate"]),
             segment_seconds=seg,
             random_crop=False,
         )
     )
-    ds = ds.batched(args.batch_size, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=0)
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=args.batch_size, num_workers=0,
+        collate_fn=collate_fixed, drop_last=False,
+    )
 
     sums: Dict[str, float] = {"stft": 0.0, "wav_l1": 0.0}
     n = 0

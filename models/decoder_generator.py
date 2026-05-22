@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -16,9 +16,6 @@ class DecoderConfig:
     res_blocks_per_up: int = 2
     res_dilations: List[int] = None
     film_hidden: int = 128
-    latent_norm: bool = False
-    latent_norm_eps: float = 1.0e-5
-    latent_stats_path: Optional[str] = None
 
 
 class FiLM(nn.Module):
@@ -102,23 +99,11 @@ class WaveformDecoder(nn.Module):
         self.out_conv = nn.Conv1d(in_ch, 1, kernel_size=7, padding=3)
         self.up_strides = up_strides
         self.res_blocks_per_up = cfg.res_blocks_per_up
-        self.register_buffer("latent_mean", torch.zeros(1, latent_dim, 1))
-        self.register_buffer("latent_var", torch.ones(1, latent_dim, 1))
-
-    def set_latent_stats(self, mean: torch.Tensor, var: torch.Tensor) -> None:
-        if mean.dim() == 1:
-            mean = mean.view(1, -1, 1)
-        if var.dim() == 1:
-            var = var.view(1, -1, 1)
-        self.latent_mean.copy_(mean.detach())
-        self.latent_var.copy_(var.detach())
 
     def forward(self, z: torch.Tensor, target_len: int | None = None) -> torch.Tensor:
-        if self.cfg.latent_norm:
-            z = (z - self.latent_mean) / torch.sqrt(self.latent_var + self.cfg.latent_norm_eps)
         x = self.in_conv(z)
         rb_i = 0
-        for up_i, up in enumerate(self.ups):
+        for up in self.ups:
             x = F.gelu(up(x))
             for _ in range(self.res_blocks_per_up):
                 x = self.resblocks[rb_i](x, z)

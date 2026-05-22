@@ -73,9 +73,9 @@ def main() -> None:
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
     seg = float(args.segment_seconds if args.segment_seconds is not None else lm.cfg["data"]["segment_seconds"])
 
-    print(f"  [Emotion] Extracting train embeddings...", flush=True)
+    print("  [Emotion] Extracting train embeddings...", flush=True)
     x_tr, y_tr, _, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg, log_name="Emotion train")
-    print(f"  [Emotion] Extracting dev embeddings...", flush=True)
+    print("  [Emotion] Extracting dev embeddings...", flush=True)
     x_de, y_de, _, _ = _load_embs(lm, args.dev_manifest, args.label_key, args.batch_size, seg, log_name="Emotion dev")
 
     # Free frozen encoder

@@ -1,0 +1,4240 @@
+[
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 31,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Tuple",
+          "end_location": {
+            "column": 41,
+            "row": 5
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 27,
+      "row": 5
+    },
+    "message": "`typing.List` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 41,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Tuple",
+          "end_location": {
+            "column": 41,
+            "row": 5
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 33,
+      "row": 5
+    },
+    "message": "`typing.Optional` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 12,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 7
+          },
+          "location": {
+            "column": 1,
+            "row": 6
+          }
+        }
+      ],
+      "message": "Remove unused import: `math`"
+    },
+    "location": {
+      "column": 8,
+      "row": 6
+    },
+    "message": "`math` imported but unused",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "RUF046",
+    "end_location": {
+      "column": 62,
+      "row": 168
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "round(num_frames * cfg.target_ratio)",
+          "end_location": {
+            "column": 62,
+            "row": 168
+          },
+          "location": {
+            "column": 21,
+            "row": 168
+          }
+        }
+      ],
+      "message": "Remove unnecessary `int` call"
+    },
+    "location": {
+      "column": 21,
+      "row": 168
+    },
+    "message": "Value being cast to `int` is already an integer",
+    "noqa_row": 168,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-cast-to-int"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 6,
+      "row": 202
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_B",
+          "end_location": {
+            "column": 6,
+            "row": 202
+          },
+          "location": {
+            "column": 5,
+            "row": 202
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 5,
+      "row": 202
+    },
+    "message": "Unpacked variable `B` is never used",
+    "noqa_row": 202,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 9,
+      "row": 202
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_C",
+          "end_location": {
+            "column": 9,
+            "row": 202
+          },
+          "location": {
+            "column": 8,
+            "row": 202
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 8,
+      "row": 202
+    },
+    "message": "Unpacked variable `C` is never used",
+    "noqa_row": 202,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 11,
+      "row": 222
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/augment.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 223
+          },
+          "location": {
+            "column": 1,
+            "row": 222
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `device`"
+    },
+    "location": {
+      "column": 5,
+      "row": 222
+    },
+    "message": "Local variable `device` is assigned to but never used",
+    "noqa_row": 222,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF046",
+    "end_location": {
+      "column": 72,
+      "row": 83
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/data/dataset.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "math.ceil(cfg.segment_seconds * cfg.sample_rate)",
+          "end_location": {
+            "column": 72,
+            "row": 83
+          },
+          "location": {
+            "column": 19,
+            "row": 83
+          }
+        }
+      ],
+      "message": "Remove unnecessary `int` call"
+    },
+    "location": {
+      "column": 19,
+      "row": 83
+    },
+    "message": "Value being cast to `int` is already an integer",
+    "noqa_row": 83,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-cast-to-int"
+  },
+  {
+    "cell": null,
+    "code": "ARG001",
+    "end_location": {
+      "column": 37,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/baselines.py",
+    "fix": null,
+    "location": {
+      "column": 29,
+      "row": 6
+    },
+    "message": "Unused function argument: `manifest`",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-function-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG001",
+    "end_location": {
+      "column": 36,
+      "row": 14
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/baselines.py",
+    "fix": null,
+    "location": {
+      "column": 28,
+      "row": 14
+    },
+    "message": "Unused function argument: `manifest`",
+    "noqa_row": 14,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-function-argument"
+  },
+  {
+    "cell": null,
+    "code": "RUF005",
+    "end_location": {
+      "column": 31,
+      "row": 14
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/common.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "[\"<blank>\", *chars]",
+          "end_location": {
+            "column": 31,
+            "row": 14
+          },
+          "location": {
+            "column": 12,
+            "row": 14
+          }
+        }
+      ],
+      "message": "Replace with `[\"<blank>\", *chars]`"
+    },
+    "location": {
+      "column": 12,
+      "row": 14
+    },
+    "message": "Consider `[\"<blank>\", *chars]` instead of concatenation",
+    "noqa_row": 14,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/collection-literal-concatenation"
+  },
+  {
+    "cell": null,
+    "code": "ARG001",
+    "end_location": {
+      "column": 15,
+      "row": 123
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/common.py",
+    "fix": null,
+    "location": {
+      "column": 5,
+      "row": 123
+    },
+    "message": "Unused function argument: `use_latent`",
+    "noqa_row": 123,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-function-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG001",
+    "end_location": {
+      "column": 61,
+      "row": 171
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_asr.py",
+    "fix": null,
+    "location": {
+      "column": 54,
+      "row": 171
+    },
+    "message": "Unused function argument: `targets`",
+    "noqa_row": 171,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-function-argument"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 35,
+      "row": 186
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_asr.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"  [ASR] Evaluating...\"",
+          "end_location": {
+            "column": 35,
+            "row": 186
+          },
+          "location": {
+            "column": 11,
+            "row": 186
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 186
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 186,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 56,
+      "row": 76
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_emotion.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"  [Emotion] Extracting train embeddings...\"",
+          "end_location": {
+            "column": 56,
+            "row": 76
+          },
+          "location": {
+            "column": 11,
+            "row": 76
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 76
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 76,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 54,
+      "row": 78
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_emotion.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"  [Emotion] Extracting dev embeddings...\"",
+          "end_location": {
+            "column": 54,
+            "row": 78
+          },
+          "location": {
+            "column": 11,
+            "row": 78
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 78
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 78,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 55,
+      "row": 64
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_gender.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"  [Gender] Extracting train embeddings...\"",
+          "end_location": {
+            "column": 55,
+            "row": 64
+          },
+          "location": {
+            "column": 11,
+            "row": 64
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 64
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 64,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 53,
+      "row": 66
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_gender.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"  [Gender] Extracting dev embeddings...\"",
+          "end_location": {
+            "column": 53,
+            "row": 66
+          },
+          "location": {
+            "column": 11,
+            "row": 66
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 66
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 66,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 23,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/eval_recon.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Dict",
+          "end_location": {
+            "column": 29,
+            "row": 6
+          },
+          "location": {
+            "column": 1,
+            "row": 6
+          }
+        }
+      ],
+      "message": "Remove unused import: `typing.Any`"
+    },
+    "location": {
+      "column": 20,
+      "row": 6
+    },
+    "message": "`typing.Any` imported but unused",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 17,
+      "row": 35
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/eval/run_probes.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 20,
+            "row": 35
+          },
+          "location": {
+            "column": 13,
+            "row": 35
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `proc`"
+    },
+    "location": {
+      "column": 13,
+      "row": 35
+    },
+    "message": "Local variable `proc` is assigned to but never used",
+    "noqa_row": 35,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "F821",
+    "end_location": {
+      "column": 23,
+      "row": 56
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/losses/multires_stft.py",
+    "fix": null,
+    "location": {
+      "column": 15,
+      "row": 56
+    },
+    "message": "Undefined name `Optional`",
+    "noqa_row": 56,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/undefined-name"
+  },
+  {
+    "cell": null,
+    "code": "F821",
+    "end_location": {
+      "column": 30,
+      "row": 58
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/losses/multires_stft.py",
+    "fix": null,
+    "location": {
+      "column": 22,
+      "row": 58
+    },
+    "message": "Undefined name `Optional`",
+    "noqa_row": 58,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/undefined-name"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 40,
+      "row": 93
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/losses/multires_stft.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 94
+          },
+          "location": {
+            "column": 1,
+            "row": 93
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 17,
+      "row": 93
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 93,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 21,
+      "row": 51
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/decoder_generator.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 52
+          },
+          "location": {
+            "column": 1,
+            "row": 51
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 51
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 51,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 35,
+      "row": 4
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/encoder.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Optional",
+          "end_location": {
+            "column": 41,
+            "row": 4
+          },
+          "location": {
+            "column": 1,
+            "row": 4
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 30,
+      "row": 4
+    },
+    "message": "`typing.Tuple` imported but unused",
+    "noqa_row": 4,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 41,
+      "row": 4
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/encoder.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Optional",
+          "end_location": {
+            "column": 41,
+            "row": 4
+          },
+          "location": {
+            "column": 1,
+            "row": 4
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 37,
+      "row": 4
+    },
+    "message": "`typing.Dict` imported but unused",
+    "noqa_row": 4,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 32,
+      "row": 9
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/mhc.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 10
+          },
+          "location": {
+            "column": 1,
+            "row": 9
+          }
+        }
+      ],
+      "message": "Remove unused import: `torch.nn.functional`"
+    },
+    "location": {
+      "column": 31,
+      "row": 9
+    },
+    "message": "`torch.nn.functional` imported but unused",
+    "noqa_row": 9,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 12,
+      "row": 44
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/mhc.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 44
+    },
+    "message": "Unused method argument: `dim`",
+    "noqa_row": 44,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 25,
+      "row": 41
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/sigreg.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 42
+          },
+          "location": {
+            "column": 1,
+            "row": 41
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 41
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 41,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 20,
+      "row": 70
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/sigreg.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 71
+          },
+          "location": {
+            "column": 1,
+            "row": 70
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 70
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 70,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 44,
+      "row": 103
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/sigreg.py",
+    "fix": null,
+    "location": {
+      "column": 40,
+      "row": 103
+    },
+    "message": "Unused method argument: `step`",
+    "noqa_row": 103,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 23,
+      "row": 105
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 105
+    },
+    "message": "Unused method argument: `warmup_batches`",
+    "noqa_row": 105,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 21,
+      "row": 215
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_num_frames0",
+          "end_location": {
+            "column": 21,
+            "row": 215
+          },
+          "location": {
+            "column": 10,
+            "row": 215
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 10,
+      "row": 215
+    },
+    "message": "Unpacked variable `num_frames0` is never used",
+    "noqa_row": 215,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 34,
+      "row": 238
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 239
+          },
+          "location": {
+            "column": 1,
+            "row": 238
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 238
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 238,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 66,
+      "row": 591
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 592
+          },
+          "location": {
+            "column": 1,
+            "row": 591
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 591
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 591,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 66,
+      "row": 657
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 658
+          },
+          "location": {
+            "column": 1,
+            "row": 657
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 657
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 657,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 16,
+      "row": 748
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 748
+    },
+    "message": "Unused method argument: `dropout`",
+    "noqa_row": 748,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 21,
+      "row": 749
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 749
+    },
+    "message": "Unused method argument: `warmup_begin`",
+    "noqa_row": 749,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 19,
+      "row": 750
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": null,
+    "location": {
+      "column": 9,
+      "row": 750
+    },
+    "message": "Unused method argument: `warmup_end`",
+    "noqa_row": 750,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 23,
+      "row": 979
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": null,
+    "location": {
+      "column": 15,
+      "row": 979
+    },
+    "message": "Unused method argument: `channels`",
+    "noqa_row": 979,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 38,
+      "row": 1020
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1021
+          },
+          "location": {
+            "column": 1,
+            "row": 1020
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 1020
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1020,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 36,
+      "row": 1035
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": null,
+    "location": {
+      "column": 24,
+      "row": 1035
+    },
+    "message": "Unused method argument: `num_channels`",
+    "noqa_row": 1035,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 65,
+      "row": 1131
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1132
+          },
+          "location": {
+            "column": 1,
+            "row": 1131
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 1131
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1131,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 47,
+      "row": 1162
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 52,
+            "row": 1162
+          },
+          "location": {
+            "column": 39,
+            "row": 1162
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 41,
+      "row": 1162
+    },
+    "message": "Unused blanket `noqa` directive",
+    "noqa_row": 1162,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 66,
+      "row": 1452
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1453
+          },
+          "location": {
+            "column": 1,
+            "row": 1452
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 1452
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1452,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 19,
+      "row": 1453
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_num_heads",
+          "end_location": {
+            "column": 19,
+            "row": 1453
+          },
+          "location": {
+            "column": 10,
+            "row": 1453
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 10,
+      "row": 1453
+    },
+    "message": "Unpacked variable `num_heads` is never used",
+    "noqa_row": 1453,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 31,
+      "row": 1453
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_batch_size",
+          "end_location": {
+            "column": 31,
+            "row": 1453
+          },
+          "location": {
+            "column": 21,
+            "row": 1453
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 21,
+      "row": 1453
+    },
+    "message": "Unpacked variable `batch_size` is never used",
+    "noqa_row": 1453,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 49,
+      "row": 1453
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_seq_len",
+          "end_location": {
+            "column": 49,
+            "row": 1453
+          },
+          "location": {
+            "column": 42,
+            "row": 1453
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 42,
+      "row": 1453
+    },
+    "message": "Unpacked variable `seq_len` is never used",
+    "noqa_row": 1453,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 40,
+      "row": 1504
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_embed_dim",
+          "end_location": {
+            "column": 40,
+            "row": 1504
+          },
+          "location": {
+            "column": 31,
+            "row": 1504
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 31,
+      "row": 1504
+    },
+    "message": "Unpacked variable `embed_dim` is never used",
+    "noqa_row": 1504,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 62,
+      "row": 1515
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1516
+          },
+          "location": {
+            "column": 1,
+            "row": 1515
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 1515
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1515,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 40,
+      "row": 1548
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_embed_dim",
+          "end_location": {
+            "column": 40,
+            "row": 1548
+          },
+          "location": {
+            "column": 31,
+            "row": 1548
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 31,
+      "row": 1548
+    },
+    "message": "Unpacked variable `embed_dim` is never used",
+    "noqa_row": 1548,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 62,
+      "row": 1570
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1571
+          },
+          "location": {
+            "column": 1,
+            "row": 1570
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 1570
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1570,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 40,
+      "row": 1647
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_embed_dim",
+          "end_location": {
+            "column": 40,
+            "row": 1647
+          },
+          "location": {
+            "column": 31,
+            "row": 1647
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 31,
+      "row": 1647
+    },
+    "message": "Unpacked variable `embed_dim` is never used",
+    "noqa_row": 1647,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 40,
+      "row": 1690
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_embed_dim",
+          "end_location": {
+            "column": 40,
+            "row": 1690
+          },
+          "location": {
+            "column": 31,
+            "row": 1690
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 31,
+      "row": 1690
+    },
+    "message": "Unpacked variable `embed_dim` is never used",
+    "noqa_row": 1690,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 34,
+      "row": 1854
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1855
+          },
+          "location": {
+            "column": 1,
+            "row": 1854
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 1854
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1854,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 38,
+      "row": 57
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 58
+          },
+          "location": {
+            "column": 1,
+            "row": 57
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 57
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 57,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF010",
+    "end_location": {
+      "column": 87,
+      "row": 214
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "f\"batch_count={self.batch_count}, schedule={self.schedule.pairs[1:-1]!s}\"",
+          "end_location": {
+            "column": 89,
+            "row": 214
+          },
+          "location": {
+            "column": 13,
+            "row": 214
+          }
+        }
+      ],
+      "message": "Replace with conversion flag"
+    },
+    "location": {
+      "column": 57,
+      "row": 214
+    },
+    "message": "Use explicit conversion flag",
+    "noqa_row": 214,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/explicit-f-string-type-conversion"
+  },
+  {
+    "cell": null,
+    "code": "ARG004",
+    "end_location": {
+      "column": 36,
+      "row": 355
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": null,
+    "location": {
+      "column": 32,
+      "row": 355
+    },
+    "message": "Unused static method argument: `args`",
+    "noqa_row": 355,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-static-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 87,
+      "row": 382
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 383
+          },
+          "location": {
+            "column": 1,
+            "row": 382
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 382
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 382,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 26,
+      "row": 383
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 384
+          },
+          "location": {
+            "column": 1,
+            "row": 383
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 383
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 383,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 55,
+      "row": 662
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 663
+          },
+          "location": {
+            "column": 1,
+            "row": 662
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 662
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 662,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 46,
+      "row": 910
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 911
+          },
+          "location": {
+            "column": 1,
+            "row": 910
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 21,
+      "row": 910
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 910,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF013",
+    "end_location": {
+      "column": 55,
+      "row": 940
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 55,
+            "row": 940
+          },
+          "location": {
+            "column": 52,
+            "row": 940
+          }
+        }
+      ],
+      "message": "Convert to `T | None`"
+    },
+    "location": {
+      "column": 52,
+      "row": 940
+    },
+    "message": "PEP 484 prohibits implicit `Optional`",
+    "noqa_row": 940,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/implicit-optional"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 68,
+      "row": 1006
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 1007
+          },
+          "location": {
+            "column": 1,
+            "row": 1006
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 1006
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 1006,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 6,
+      "row": 1762
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 9,
+            "row": 1762
+          },
+          "location": {
+            "column": 5,
+            "row": 1762
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `y`"
+    },
+    "location": {
+      "column": 5,
+      "row": 1762
+    },
+    "message": "Local variable `y` is assigned to but never used",
+    "noqa_row": 1762,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 6,
+      "row": 1776
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 9,
+            "row": 1776
+          },
+          "location": {
+            "column": 5,
+            "row": 1776
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `y`"
+    },
+    "location": {
+      "column": 5,
+      "row": 1776
+    },
+    "message": "Local variable `y` is assigned to but never used",
+    "noqa_row": 1776,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 6,
+      "row": 1790
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/models/zipformer_scaling.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 9,
+            "row": 1790
+          },
+          "location": {
+            "column": 5,
+            "row": 1790
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `y`"
+    },
+    "location": {
+      "column": 5,
+      "row": 1790
+    },
+    "message": "Local variable `y` is assigned to but never used",
+    "noqa_row": 1790,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 19,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/audit_datasets.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 6
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import: `numpy`"
+    },
+    "location": {
+      "column": 17,
+      "row": 5
+    },
+    "message": "`numpy` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 13,
+      "row": 1
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/check_gan_params.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 2
+          },
+          "location": {
+            "column": 1,
+            "row": 1
+          }
+        }
+      ],
+      "message": "Remove unused import: `torch`"
+    },
+    "location": {
+      "column": 8,
+      "row": 1
+    },
+    "message": "`torch` imported but unused",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 19,
+      "row": 13
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/check_rank.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 13
+          }
+        }
+      ],
+      "message": "Remove unused import: `numpy`"
+    },
+    "location": {
+      "column": 17,
+      "row": 13
+    },
+    "message": "`numpy` imported but unused",
+    "noqa_row": 13,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 35,
+      "row": 80
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/check_rank.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"\\n--- Basic Stats ---\"",
+          "end_location": {
+            "column": 35,
+            "row": 80
+          },
+          "location": {
+            "column": 11,
+            "row": 80
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 80
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 80,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 37,
+      "row": 94
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/check_rank.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"\\n--- Rank Analysis ---\"",
+          "end_location": {
+            "column": 37,
+            "row": 94
+          },
+          "location": {
+            "column": 11,
+            "row": 94
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 94
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 94,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 13,
+      "row": 1
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/count_params.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 2
+          },
+          "location": {
+            "column": 1,
+            "row": 1
+          }
+        }
+      ],
+      "message": "Remove unused import: `torch`"
+    },
+    "location": {
+      "column": 8,
+      "row": 1
+    },
+    "message": "`torch` imported but unused",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 33,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/count_params.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 7
+          },
+          "location": {
+            "column": 1,
+            "row": 6
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 27,
+      "row": 6
+    },
+    "message": "`models.sigreg.SIGReg` imported but unused",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 47,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/count_params.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 7
+          },
+          "location": {
+            "column": 1,
+            "row": 6
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 35,
+      "row": 6
+    },
+    "message": "`models.sigreg.SIGRegConfig` imported but unused",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 15,
+      "row": 32
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/count_params.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"-\"",
+          "end_location": {
+            "column": 15,
+            "row": 32
+          },
+          "location": {
+            "column": 11,
+            "row": 32
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 32
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 32,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 15,
+      "row": 34
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/count_params.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"-\"",
+          "end_location": {
+            "column": 15,
+            "row": 34
+          },
+          "location": {
+            "column": 11,
+            "row": 34
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 34
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 34,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 14,
+      "row": 11
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/create_bengaliai_manifests.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 17,
+            "row": 11
+          },
+          "location": {
+            "column": 5,
+            "row": 11
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `audio_dir`"
+    },
+    "location": {
+      "column": 5,
+      "row": 11
+    },
+    "message": "Local variable `audio_dir` is assigned to but never used",
+    "noqa_row": 11,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 33,
+      "row": 47
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/create_bengaliai_manifests.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 48
+          },
+          "location": {
+            "column": 1,
+            "row": 47
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 47
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 47,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 15,
+      "row": 3
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/create_clean_manifest.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 4
+          },
+          "location": {
+            "column": 1,
+            "row": 3
+          }
+        }
+      ],
+      "message": "Remove unused import: `pathlib`"
+    },
+    "location": {
+      "column": 8,
+      "row": 3
+    },
+    "message": "`pathlib` imported but unused",
+    "noqa_row": 3,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 36,
+      "row": 4
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/create_clean_manifest.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 5
+          },
+          "location": {
+            "column": 1,
+            "row": 4
+          }
+        }
+      ],
+      "message": "Remove unused import: `collections.defaultdict`"
+    },
+    "location": {
+      "column": 25,
+      "row": 4
+    },
+    "message": "`collections.defaultdict` imported but unused",
+    "noqa_row": 4,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "ARG001",
+    "end_location": {
+      "column": 53,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/create_clean_manifest.py",
+    "fix": null,
+    "location": {
+      "column": 40,
+      "row": 6
+    },
+    "message": "Unused function argument: `manifest_path`",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-function-argument"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 19,
+      "row": 37
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/create_clean_manifest.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"Done.\"",
+          "end_location": {
+            "column": 19,
+            "row": 37
+          },
+          "location": {
+            "column": 11,
+            "row": 37
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 37
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 37,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 14,
+      "row": 2
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 3
+          },
+          "location": {
+            "column": 1,
+            "row": 2
+          }
+        }
+      ],
+      "message": "Remove unused import: `shutil`"
+    },
+    "location": {
+      "column": 8,
+      "row": 2
+    },
+    "message": "`shutil` imported but unused",
+    "noqa_row": 2,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 64,
+      "row": 47
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"\\n------------------------------------------------\"",
+          "end_location": {
+            "column": 64,
+            "row": 47
+          },
+          "location": {
+            "column": 11,
+            "row": 47
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 47
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 47,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "F541",
+    "end_location": {
+      "column": 64,
+      "row": 87
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"\\n------------------------------------------------\"",
+          "end_location": {
+            "column": 64,
+            "row": 87
+          },
+          "location": {
+            "column": 11,
+            "row": 87
+          }
+        }
+      ],
+      "message": "Remove extraneous `f` prefix"
+    },
+    "location": {
+      "column": 11,
+      "row": 87
+    },
+    "message": "f-string without any placeholders",
+    "noqa_row": 87,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/f-string-missing-placeholders"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 87,
+      "row": 135
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 136
+          },
+          "location": {
+            "column": 1,
+            "row": 135
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 135
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 135,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 66,
+      "row": 138
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 139
+          },
+          "location": {
+            "column": 1,
+            "row": 138
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 138
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 138,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 110,
+      "row": 144
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 145
+          },
+          "location": {
+            "column": 1,
+            "row": 144
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 144
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 144,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 85,
+      "row": 148
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 149
+          },
+          "location": {
+            "column": 1,
+            "row": 148
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 148
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 148,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 98,
+      "row": 151
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 152
+          },
+          "location": {
+            "column": 1,
+            "row": 151
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 151
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 151,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 66,
+      "row": 154
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 155
+          },
+          "location": {
+            "column": 1,
+            "row": 154
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 154
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 154,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 47,
+      "row": 155
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 156
+          },
+          "location": {
+            "column": 1,
+            "row": 155
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 155
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 155,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 58,
+      "row": 156
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 157
+          },
+          "location": {
+            "column": 1,
+            "row": 156
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 156
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 156,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 35,
+      "row": 158
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/datasets_download.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 159
+          },
+          "location": {
+            "column": 1,
+            "row": 158
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 158
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 158,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 13,
+      "row": 1
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/get_param_count.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 2
+          },
+          "location": {
+            "column": 1,
+            "row": 1
+          }
+        }
+      ],
+      "message": "Remove unused import: `torch`"
+    },
+    "location": {
+      "column": 8,
+      "row": 1
+    },
+    "message": "`torch` imported but unused",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 13,
+      "row": 1
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/memory_test.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 2
+          },
+          "location": {
+            "column": 1,
+            "row": 1
+          }
+        }
+      ],
+      "message": "Remove unused import: `torch`"
+    },
+    "location": {
+      "column": 8,
+      "row": 1
+    },
+    "message": "`torch` imported but unused",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 12,
+      "row": 2
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/memory_test.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 3
+          },
+          "location": {
+            "column": 1,
+            "row": 2
+          }
+        }
+      ],
+      "message": "Remove unused import: `yaml`"
+    },
+    "location": {
+      "column": 8,
+      "row": 2
+    },
+    "message": "`yaml` imported but unused",
+    "noqa_row": 2,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 54,
+      "row": 3
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/memory_test.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from utils.config import load_config",
+          "end_location": {
+            "column": 54,
+            "row": 3
+          },
+          "location": {
+            "column": 1,
+            "row": 3
+          }
+        }
+      ],
+      "message": "Remove unused import: `utils.config.apply_overrides`"
+    },
+    "location": {
+      "column": 39,
+      "row": 3
+    },
+    "message": "`utils.config.apply_overrides` imported but unused",
+    "noqa_row": 3,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 8,
+      "row": 7
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/memory_test.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 11,
+            "row": 7
+          },
+          "location": {
+            "column": 5,
+            "row": 7
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `cfg`"
+    },
+    "location": {
+      "column": 5,
+      "row": 7
+    },
+    "message": "Local variable `cfg` is assigned to but never used",
+    "noqa_row": 7,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 16,
+      "row": 11
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/memory_test.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 12
+          },
+          "location": {
+            "column": 1,
+            "row": 11
+          }
+        }
+      ],
+      "message": "Remove unused import: `time`"
+    },
+    "location": {
+      "column": 12,
+      "row": 11
+    },
+    "message": "`time` imported but unused",
+    "noqa_row": 11,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 11,
+      "row": 3
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_asr_manifest.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 4
+          },
+          "location": {
+            "column": 1,
+            "row": 3
+          }
+        }
+      ],
+      "message": "Remove unused import: `csv`"
+    },
+    "location": {
+      "column": 8,
+      "row": 3
+    },
+    "message": "`csv` imported but unused",
+    "noqa_row": 3,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 24,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_asr_manifest.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 7
+          },
+          "location": {
+            "column": 1,
+            "row": 6
+          }
+        }
+      ],
+      "message": "Remove unused import: `typing.List`"
+    },
+    "location": {
+      "column": 20,
+      "row": 6
+    },
+    "message": "`typing.List` imported but unused",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 24,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_bengaliai.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 6
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 20,
+      "row": 5
+    },
+    "message": "`typing.List` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 30,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_bengaliai.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 6
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 26,
+      "row": 5
+    },
+    "message": "`typing.Dict` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 35,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_bengaliai.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 6
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import"
+    },
+    "location": {
+      "column": 32,
+      "row": 5
+    },
+    "message": "`typing.Any` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 33,
+      "row": 12
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_hf_parquet.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 13
+          },
+          "location": {
+            "column": 1,
+            "row": 12
+          }
+        }
+      ],
+      "message": "Remove unused import: `pyarrow.compute`"
+    },
+    "location": {
+      "column": 31,
+      "row": 12
+    },
+    "message": "`pyarrow.compute` imported but unused",
+    "noqa_row": 12,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 27,
+      "row": 13
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_hf_parquet.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 13
+          }
+        }
+      ],
+      "message": "Remove unused import: `soundfile`"
+    },
+    "location": {
+      "column": 25,
+      "row": 13
+    },
+    "message": "`soundfile` imported but unused",
+    "noqa_row": 13,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 14,
+      "row": 14
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_hf_parquet.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 15
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        }
+      ],
+      "message": "Remove unused import: `io`"
+    },
+    "location": {
+      "column": 12,
+      "row": 14
+    },
+    "message": "`io` imported but unused",
+    "noqa_row": 14,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 15,
+      "row": 3
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/prepare_remaining_datasets.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 4
+          },
+          "location": {
+            "column": 1,
+            "row": 3
+          }
+        }
+      ],
+      "message": "Remove unused import: `pathlib`"
+    },
+    "location": {
+      "column": 8,
+      "row": 3
+    },
+    "message": "`pathlib` imported but unused",
+    "noqa_row": 3,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 28,
+      "row": 19
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/smoke_gan_step.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_fmap_fake_mpd",
+          "end_location": {
+            "column": 28,
+            "row": 19
+          },
+          "location": {
+            "column": 15,
+            "row": 19
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 15,
+      "row": 19
+    },
+    "message": "Unpacked variable `fmap_fake_mpd` is never used",
+    "noqa_row": 19,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 28,
+      "row": 21
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/smoke_gan_step.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_fmap_fake_msd",
+          "end_location": {
+            "column": 28,
+            "row": 21
+          },
+          "location": {
+            "column": 15,
+            "row": 21
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 15,
+      "row": 21
+    },
+    "message": "Unpacked variable `fmap_fake_msd` is never used",
+    "noqa_row": 21,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 11,
+      "row": 22
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/smoke_gan_step.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 14,
+            "row": 22
+          },
+          "location": {
+            "column": 5,
+            "row": 22
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `d_loss`"
+    },
+    "location": {
+      "column": 5,
+      "row": 22
+    },
+    "message": "Local variable `d_loss` is assigned to but never used",
+    "noqa_row": 22,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 33,
+      "row": 10
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/test_mhc.py",
+    "fix": null,
+    "location": {
+      "column": 26,
+      "row": 10
+    },
+    "message": "Unused method argument: `pos_emb`",
+    "noqa_row": 10,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 45,
+      "row": 10
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/test_mhc.py",
+    "fix": null,
+    "location": {
+      "column": 35,
+      "row": 10
+    },
+    "message": "Unused method argument: `chunk_size`",
+    "noqa_row": 10,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 56,
+      "row": 10
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/test_mhc.py",
+    "fix": null,
+    "location": {
+      "column": 47,
+      "row": 10
+    },
+    "message": "Unused method argument: `attn_mask`",
+    "noqa_row": 10,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG002",
+    "end_location": {
+      "column": 78,
+      "row": 10
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/test_mhc.py",
+    "fix": null,
+    "location": {
+      "column": 58,
+      "row": 10
+    },
+    "message": "Unused method argument: `src_key_padding_mask`",
+    "noqa_row": 10,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-method-argument"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 21,
+      "row": 51
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/verify_experiment.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 24,
+            "row": 51
+          },
+          "location": {
+            "column": 9,
+            "row": 51
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `total_stride`"
+    },
+    "location": {
+      "column": 9,
+      "row": 51
+    },
+    "message": "Local variable `total_stride` is assigned to but never used",
+    "noqa_row": 51,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 12,
+      "row": 93
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/verify_experiment.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_sr",
+          "end_location": {
+            "column": 12,
+            "row": 93
+          },
+          "location": {
+            "column": 10,
+            "row": 93
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 10,
+      "row": 93
+    },
+    "message": "Unpacked variable `sr` is never used",
+    "noqa_row": 93,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 15,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/visualize_latents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 6
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import: `pathlib`"
+    },
+    "location": {
+      "column": 8,
+      "row": 5
+    },
+    "message": "`pathlib` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 12,
+      "row": 6
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/visualize_latents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 7
+          },
+          "location": {
+            "column": 1,
+            "row": 6
+          }
+        }
+      ],
+      "message": "Remove unused import: `json`"
+    },
+    "location": {
+      "column": 8,
+      "row": 6
+    },
+    "message": "`json` imported but unused",
+    "noqa_row": 6,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 22,
+      "row": 81
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/visualize_latents.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 82
+          },
+          "location": {
+            "column": 1,
+            "row": 81
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 5,
+      "row": 81
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 81,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 12,
+      "row": 101
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/scripts/visualize_latents.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_fig",
+          "end_location": {
+            "column": 12,
+            "row": 101
+          },
+          "location": {
+            "column": 9,
+            "row": 101
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 9,
+      "row": 101
+    },
+    "message": "Unpacked variable `fig` is never used",
+    "noqa_row": 101,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 13,
+      "row": 92
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_T",
+          "end_location": {
+            "column": 13,
+            "row": 92
+          },
+          "location": {
+            "column": 12,
+            "row": 92
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 12,
+      "row": 92
+    },
+    "message": "Unpacked variable `T` is never used",
+    "noqa_row": 92,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "ERA001",
+    "end_location": {
+      "column": 61,
+      "row": 150
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "displayonly",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 151
+          },
+          "location": {
+            "column": 1,
+            "row": 150
+          }
+        }
+      ],
+      "message": "Remove commented-out code"
+    },
+    "location": {
+      "column": 9,
+      "row": 150
+    },
+    "message": "Found commented-out code",
+    "noqa_row": 150,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/commented-out-code"
+  },
+  {
+    "cell": null,
+    "code": "RUF046",
+    "end_location": {
+      "column": 91,
+      "row": 478
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "round(float(dcfg[\"segment_seconds\"]) * float(dcfg[\"sample_rate\"]))",
+          "end_location": {
+            "column": 91,
+            "row": 478
+          },
+          "location": {
+            "column": 20,
+            "row": 478
+          }
+        }
+      ],
+      "message": "Remove unnecessary `int` call"
+    },
+    "location": {
+      "column": 20,
+      "row": 478
+    },
+    "message": "Value being cast to `int` is already an integer",
+    "noqa_row": 478,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-cast-to-int"
+  },
+  {
+    "cell": null,
+    "code": "ARG005",
+    "end_location": {
+      "column": 43,
+      "row": 550
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": null,
+    "location": {
+      "column": 39,
+      "row": 550
+    },
+    "message": "Unused lambda argument: `step`",
+    "noqa_row": 550,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-lambda-argument"
+  },
+  {
+    "cell": null,
+    "code": "ARG005",
+    "end_location": {
+      "column": 44,
+      "row": 551
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": null,
+    "location": {
+      "column": 39,
+      "row": 551
+    },
+    "message": "Unused lambda argument: `epoch`",
+    "noqa_row": 551,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-lambda-argument"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 17,
+      "row": 622
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 20,
+            "row": 622
+          },
+          "location": {
+            "column": 5,
+            "row": 622
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `primary_temp`"
+    },
+    "location": {
+      "column": 5,
+      "row": 622
+    },
+    "message": "Local variable `primary_temp` is assigned to but never used",
+    "noqa_row": 622,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 23,
+      "row": 674
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_hE",
+          "end_location": {
+            "column": 23,
+            "row": 674
+          },
+          "location": {
+            "column": 21,
+            "row": 674
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 21,
+      "row": 674
+    },
+    "message": "Unpacked variable `hE` is never used",
+    "noqa_row": 674,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 33,
+      "row": 674
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_stats",
+          "end_location": {
+            "column": 33,
+            "row": 674
+          },
+          "location": {
+            "column": 28,
+            "row": 674
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 28,
+      "row": 674
+    },
+    "message": "Unpacked variable `stats` is never used",
+    "noqa_row": 674,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "RUF059",
+    "end_location": {
+      "column": 26,
+      "row": 675
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "_mask",
+          "end_location": {
+            "column": 26,
+            "row": 675
+          },
+          "location": {
+            "column": 22,
+            "row": 675
+          }
+        }
+      ],
+      "message": "Prefix it with an underscore or any other dummy variable pattern"
+    },
+    "location": {
+      "column": 22,
+      "row": 675
+    },
+    "message": "Unpacked variable `mask` is never used",
+    "noqa_row": 675,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-unpacked-variable"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 36,
+      "row": 784
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/train.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "pass",
+          "end_location": {
+            "column": 43,
+            "row": 784
+          },
+          "location": {
+            "column": 29,
+            "row": 784
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `has_mix`"
+    },
+    "location": {
+      "column": 29,
+      "row": 784
+    },
+    "message": "Local variable `has_mix` is assigned to but never used",
+    "noqa_row": 784,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 42,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/utils/config.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Any, Dict, List",
+          "end_location": {
+            "column": 42,
+            "row": 5
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import: `typing.Tuple`"
+    },
+    "location": {
+      "column": 37,
+      "row": 5
+    },
+    "message": "`typing.Tuple` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 39,
+      "row": 5
+    },
+    "filename": "/Users/aryanrahman/Projects/research/continuous-latent-autoencoder/utils/logging.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Any, Dict",
+          "end_location": {
+            "column": 39,
+            "row": 5
+          },
+          "location": {
+            "column": 1,
+            "row": 5
+          }
+        }
+      ],
+      "message": "Remove unused import: `typing.Optional`"
+    },
+    "location": {
+      "column": 31,
+      "row": 5
+    },
+    "message": "`typing.Optional` imported but unused",
+    "noqa_row": 5,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  }
+]
