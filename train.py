@@ -426,6 +426,31 @@ def main() -> None:
             warmup_start=float(scfg.get("warmup_start", 0.5)),
             verbose=bool(scfg.get("verbose", False)),
         )
+    elif scfg.get("kind") == "cosine":
+        warmup_steps = int(scfg.get("warmup_steps", 2000))
+        total_steps = int(scfg.get("total_steps", 200000))
+        min_lr_ratio = float(scfg.get("min_lr_ratio", 0.0))
+        base_lr = float(ocfg["lr"])
+        _cosine_inner = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, total_steps - warmup_steps),
+            eta_min=base_lr * min_lr_ratio,
+        )
+        _warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1.0 / max(1, warmup_steps),
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[_warmup, _cosine_inner],
+            milestones=[warmup_steps],
+        )
+        scheduler.step_batch = lambda step=None: scheduler.step()
+        scheduler.step_epoch = lambda epoch=None: None
+        scheduler.state_dict = scheduler.state_dict
+        scheduler.load_state_dict = scheduler.load_state_dict
 
     use_amp = bool(cfg["run"].get("amp", True)) and device.type == "cuda"
     g_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -721,7 +746,6 @@ def main() -> None:
                         "z_var_max": sig_stats_last["z_var_max"],
                     }
 
-                    # Bind names used downstream (diagnostics, decoding).
                     z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + rank diag)
                     z_mask = z_cat[B : 2 * B]     # view-1 encoder embeddings (rank diag only)
                     p_a = p_cat[:B]               # view-0 projected (JEPA-space diagnostics)

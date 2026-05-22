@@ -111,8 +111,7 @@ loss:
     mix_view_weight: 1.0        # legacy; unused with multi-view LeJEPA
     context_weight: 1.0         # V-JEPA 2.1: relative weight of L_context vs L_predict in dense loss
   sigreg:
-    weight: 0.001                 # LeWM/LeJEPA paper range (was 2.0; combined with utt-pool SIGReg
-                                # this was ~100x the paper's effective ratio and crushed the latent)
+    weight: 0.05                  # LeJEPA paper recommendation (robust across experiments)
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
@@ -158,25 +157,17 @@ latent_noise:
   sigma_max: 0.02
 
 optim:
-  kind: scaled_adam             # scaled_adam | adamw
-  lr: 1.0e-3
-  betas: [0.9, 0.98]
-  eps: 3.0e-5
-  weight_decay: 1.0e-3
-  clipping_scale: 3.0
-  scalar_lr_scale: 0.1
-  param_min_rms: 1.0e-5
-  param_max_rms: 3.0
-  scalar_max: 10.0
-  size_update_period: 4
-  clipping_update_period: 100
+  kind: adamw
+  lr: 5.0e-4                    # LeJEPA paper range: 5e-4 to 5e-3
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-2          # LeJEPA paper range: 1e-1 / 1e-2 / 1e-5
   scheduler:
-    kind: eden
-    lr_batches: 20000
-    lr_epochs: 4
-    warmup_batches: 10000
-    warmup_start: 0.5
-  grad_clip: 0.5
+    kind: cosine
+    warmup_steps: 2000
+    total_steps: 30000          # match train.max_steps
+    min_lr_ratio: 0.0
+  grad_clip: 1.0
 
 train:
   batch_size: 50

@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from data.dataset import WebDatasetConfig, collate_fixed, get_audio_wds
+from eval.common import BLANK_IDX, build_charset, greedy_decode_ctc
 
 
 class InlineProbe:
@@ -72,13 +73,12 @@ class InlineProbe:
         self.vocab: Dict[str, int] = {c: i for i, c in enumerate(self.charset)}
         self.head = nn.Linear(int(encoder_dim), len(self.charset)).to(device)
         self.opt = torch.optim.AdamW(self.head.parameters(), lr=float(cfg_probe.get("lr", 1.0e-3)))
-        self.ctc = nn.CTCLoss(blank=0, zero_infinity=True)
-        self._buf: Dict[str, Any] = {
-            "loss_sum": 0.0,
-            "n": 0,
-            "last_logp": None,
-            "last_texts": None,
-        }
+        self.ctc = nn.CTCLoss(blank=BLANK_IDX, zero_infinity=True)
+        self._buf: Dict[str, Any] = self._empty_buf()
+
+    @staticmethod
+    def _empty_buf() -> Dict[str, Any]:
+        return {"loss_sum": 0.0, "n": 0, "last_logp": None, "last_texts": None}
 
     def _next_batch(self) -> Optional[Dict[str, Any]]:
         try:
@@ -104,8 +104,7 @@ class InlineProbe:
                 t = t.strip()
                 if t:
                     texts.append(t)
-        chars = sorted({c for t in texts for c in t.lower() if c != "\n"})
-        return ["<blank>"] + chars
+        return build_charset(texts)
 
     def step(self, model: nn.ModuleDict, step_idx: int, use_amp: bool) -> Optional[float]:
         if not self.enabled or step_idx % self.step_interval != 0:
@@ -154,22 +153,6 @@ class InlineProbe:
         self._buf["last_texts"] = texts
         return float(loss.item())
 
-    def _greedy_decode(self, log_probs: torch.Tensor) -> List[str]:
-        pred = log_probs.argmax(dim=-1).cpu().tolist()  # (B, T)
-        outs: List[str] = []
-        for seq in pred:
-            last = None
-            chars: List[str] = []
-            for i in seq:
-                if i == 0:
-                    last = i
-                    continue
-                if last != i:
-                    chars.append(self.charset[i])
-                last = i
-            outs.append("".join(chars))
-        return outs
-
     def maybe_emit(self, step_idx: int, wb: Any) -> None:
         if not self.enabled or step_idx == 0 or step_idx % self.log_interval != 0:
             return
@@ -178,7 +161,7 @@ class InlineProbe:
         avg_loss = self._buf["loss_sum"] / self._buf["n"]
         wer_val = float("nan")
         if self._buf["last_logp"] is not None and self._buf["last_texts"] is not None:
-            hyps = self._greedy_decode(self._buf["last_logp"])
+            hyps = greedy_decode_ctc(self._buf["last_logp"], self.charset)
             try:
                 from jiwer import wer as _wer
                 wer_val = float(_wer(self._buf["last_texts"], hyps))
@@ -191,7 +174,7 @@ class InlineProbe:
         }
         if wb is not None:
             wb.log(row, step=step_idx)
-        self._buf = {"loss_sum": 0.0, "n": 0, "last_logp": None, "last_texts": None}
+        self._buf = self._empty_buf()
 
     def state_dict(self) -> Dict[str, Any]:
         if not self.enabled:

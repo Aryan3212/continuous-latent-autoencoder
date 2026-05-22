@@ -9,7 +9,6 @@ import torch.nn as nn
 
 from models.mhc import MHCConfig, MHCWrapper
 from models.zipformer import CompactRelPositionalEncoding, Zipformer2EncoderLayer
-from models.zipformer_scaling import ScheduledFloat
 
 
 @dataclass
@@ -59,18 +58,6 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(cfg.n_layers)])
         self.pos_enc = CompactRelPositionalEncoding(cfg.pos_dim, dropout_rate=0.15, length_factor=1.0)
 
-        warmup_begin = cfg.warmup_batches * 0.5
-        warmup_end = cfg.warmup_batches
-        delta = (1.0 / cfg.n_layers) * (warmup_end - warmup_begin)
-        cur_begin = warmup_begin
-        for i in range(cfg.n_layers):
-            cur_end = cur_begin + delta
-            self.layers[i].bypass.skip_rate = ScheduledFloat(
-                (cur_begin, 0.5),
-                (cur_end, 0.05),
-                default=0.0,
-            )
-            cur_begin = cur_end
 
         self.mhc_cfg = cfg.mhc
         self._use_mhc = bool(cfg.mhc.enabled and cfg.mhc.num_streams > 1)

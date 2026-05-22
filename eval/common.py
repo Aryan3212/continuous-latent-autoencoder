@@ -6,6 +6,30 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 
+BLANK_IDX = 0
+
+
+def build_charset(texts: List[str]) -> List[str]:
+    chars = sorted({c for t in texts for c in t.lower() if c != "\n"})
+    return ["<blank>"] + chars
+
+
+def greedy_decode_ctc(log_probs: torch.Tensor, id2ch: List[str]) -> List[str]:
+    pred = log_probs.argmax(dim=-1).cpu().tolist()  # (B, T)
+    outs: List[str] = []
+    for seq in pred:
+        last = None
+        chars: List[str] = []
+        for i in seq:
+            if i == BLANK_IDX:
+                last = i
+                continue
+            if last != i:
+                chars.append(id2ch[i])
+            last = i
+        outs.append("".join(chars))
+    return outs
+
 from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig

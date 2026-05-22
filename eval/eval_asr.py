@@ -11,37 +11,11 @@ import torch.nn as nn
 
 from jiwer import wer
 
-from eval.common import iter_frame_features, load_frozen_encoder
-
-
-def _build_charset(texts: List[str]) -> List[str]:
-    chars = set()
-    for t in texts:
-        chars.update(list(t.lower()))
-    chars.discard("\n")
-    chars = sorted(chars)
-    return ["<blank>"] + chars
+from eval.common import build_charset, greedy_decode_ctc, iter_frame_features, load_frozen_encoder
 
 
 def _encode(text: str, vocab: Dict[str, int]) -> List[int]:
     return [vocab[c] for c in text.lower() if c in vocab]
-
-
-def _greedy_decode(log_probs: torch.Tensor, id2ch: List[str]) -> List[str]:
-    pred = log_probs.argmax(dim=-1)  # (B,T)
-    outs = []
-    for seq in pred.tolist():
-        last = None
-        chars = []
-        for i in seq:
-            if i == 0:
-                last = i
-                continue
-            if last != i:
-                chars.append(id2ch[i])
-            last = i
-        outs.append("".join(chars))
-    return outs
 
 
 def _load_feats_and_text(
@@ -151,7 +125,7 @@ def main() -> None:
 
     print(f"  [ASR] Train: {feats_tr.shape}, Dev: {feats_de.shape}", flush=True)
 
-    charset = _build_charset(text_tr)
+    charset = build_charset(text_tr)
     vocab = {c: i for i, c in enumerate(charset)}
     id2ch = charset
 
@@ -202,7 +176,7 @@ def main() -> None:
             for start in range(0, feats.size(0), eval_batch):
                 chunk = feats[start : start + eval_batch].to(device)
                 lp = head(chunk).log_softmax(dim=-1)
-                all_hyp.extend(_greedy_decode(lp, id2ch))
+                all_hyp.extend(greedy_decode_ctc(lp, id2ch))
         w = wer(texts, all_hyp)
         examples = []
         for i in range(min(5, len(texts))):
