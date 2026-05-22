@@ -30,27 +30,21 @@ def _load_raw(path: str) -> Dict[str, Any]:
     return _deep_update(base_cfg, cfg2)
 
 
-def load_config(path: str) -> Dict[str, Any]:
-    """Load a YAML config, validate it against the pydantic schema, and
-    return a type-coerced dict so existing call sites continue to work.
-
-    Validation runs once at startup — schema errors are raised here with
-    clear messages, instead of `KeyError`/`TypeError` mid-training.
+def load_config(path: str) -> Config:
+    """Load a YAML config, validate against the pydantic schema, and return a
+    Config object. Validation runs once at startup so schema errors surface
+    with clear messages rather than mid-training KeyError/TypeError.
     """
     raw = _load_raw(path)
-    model = Config.model_validate(raw)
-    # Return a plain dict (recursive) so train.py's existing cfg["..."] access
-    # keeps working. The dict has been coerced to the schema types.
-    return model.model_dump()
+    return Config.model_validate(raw)
 
 
-def apply_overrides(cfg: Dict[str, Any], overrides: List[str]) -> Dict[str, Any]:
+def apply_overrides(cfg: Config, overrides: List[str]) -> Config:
+    """Apply dot-separated KEY=VALUE overrides to a Config and re-validate.
+
+    Overrides format: ``key1.key2=value`` where value is parsed as YAML scalar.
     """
-    Overrides format: key1.key2=value, where value is parsed as YAML scalar.
-    Re-validates the resulting dict against the schema so type errors in
-    overrides also fail fast.
-    """
-    out = copy.deepcopy(cfg)
+    out = cfg.model_dump()
     for ov in overrides:
         if "=" not in ov:
             raise ValueError(f"Override must be KEY=VALUE, got: {ov}")
@@ -63,5 +57,4 @@ def apply_overrides(cfg: Dict[str, Any], overrides: List[str]) -> Dict[str, Any]
                 cur[p] = {}
             cur = cur[p]
         cur[parts[-1]] = val_parsed
-    # Re-validate after applying overrides so bad CLI args fail fast.
-    return Config.model_validate(out).model_dump()
+    return Config.model_validate(out)

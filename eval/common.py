@@ -34,11 +34,12 @@ from data.dataset import AudioDataset, DatasetConfig, collate_fixed
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from utils.config import apply_overrides, load_config
+from utils.schema import Config
 
 
 @dataclass
 class LoadedModel:
-    cfg: Dict[str, Any]
+    cfg: Config
     device: torch.device
     frontend: ConvFrontend
     encoder: Encoder
@@ -48,9 +49,8 @@ def load_frozen_encoder(config_path: str, ckpt_path: str, overrides: List[str]) 
     cfg = apply_overrides(load_config(config_path), overrides)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
+    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
     model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder}).to(device)
 
     state = torch.load(ckpt_path, map_location="cpu")

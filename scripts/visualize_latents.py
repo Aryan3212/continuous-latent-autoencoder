@@ -22,11 +22,10 @@ def main():
 
     # Load Config & Model
     cfg = load_config(args.config)
-    mcfg = cfg["model"]
     device = torch.device(args.device)
 
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"])).to(device)
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"])).to(device)
+    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump())).to(device)
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump())).to(device)
 
     # Load Checkpoint
     print(f"Loading checkpoint: {args.ckpt}")

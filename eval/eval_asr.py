@@ -35,7 +35,7 @@ def _load_feats_and_text(
     for feats, meta in iter_frame_features(
         lm,
         manifest,
-        sample_rate=int(lm.cfg["data"]["sample_rate"]),
+        sample_rate=lm.cfg.data.sample_rate,
         segment_seconds=segment_seconds,
         batch_size=batch_size,
         use_latent=use_latent,
@@ -72,13 +72,13 @@ def main() -> None:
     args = ap.parse_args()
 
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
-    seg = float(args.segment_seconds if args.segment_seconds is not None else lm.cfg["data"]["segment_seconds"])
+    seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.data.segment_seconds
 
     if args.dry_run:
         feats_iter = iter_frame_features(
             lm,
             args.train_manifest,
-            sample_rate=int(lm.cfg["data"]["sample_rate"]),
+            sample_rate=lm.cfg.data.sample_rate,
             segment_seconds=seg,
             batch_size=args.batch_size,
             use_latent=bool(args.use_latent),
@@ -125,12 +125,20 @@ def main() -> None:
 
     print(f"  [ASR] Train: {feats_tr.shape}, Dev: {feats_de.shape}", flush=True)
 
-    charset = build_charset(text_tr)
+    # Charset is a function of the training manifest's text — cache next to the
+    # manifest so probe-CTC training across runs reuses the same vocab.
+    charset_path = pathlib.Path(args.train_manifest + ".charset.json")
+    if charset_path.exists():
+        charset = json.loads(charset_path.read_text(encoding="utf-8"))
+        print(f"  [ASR] Loaded cached charset ({len(charset)} symbols) from {charset_path}", flush=True)
+    else:
+        charset = build_charset(text_tr)
+        charset_path.write_text(json.dumps(charset, ensure_ascii=False), encoding="utf-8")
+        print(f"  [ASR] Built and cached charset ({len(charset)} symbols) at {charset_path}", flush=True)
     vocab = {c: i for i, c in enumerate(charset)}
     id2ch = charset
 
     targets_tr = [torch.tensor(_encode(t, vocab), dtype=torch.long) for t in text_tr]
-    targets_de = [torch.tensor(_encode(t, vocab), dtype=torch.long) for t in text_de]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Keep features on CPU — only move mini-batches to GPU during training
@@ -168,7 +176,7 @@ def main() -> None:
             print(f"  [ASR] step {step_i+1}/{args.steps}  loss={loss.item():.4f}  "
                   f"({rate:.0f} steps/s, ETA {eta:.0f}s)", flush=True)
 
-    def _eval(feats: torch.Tensor, texts: List[str], targets: List[torch.Tensor], eval_batch: int = 256) -> Dict[str, Any]:
+    def _eval(feats: torch.Tensor, texts: List[str], eval_batch: int = 256) -> Dict[str, Any]:
         head.eval()
         all_hyp: List[str] = []
         with torch.no_grad():
@@ -185,8 +193,8 @@ def main() -> None:
 
     print("  [ASR] Evaluating...", flush=True)
     out = {
-        "train": _eval(feats_tr, text_tr, targets_tr),
-        "dev": _eval(feats_de, text_de, targets_de),
+        "train": _eval(feats_tr, text_tr),
+        "dev": _eval(feats_de, text_de),
         "vocab_size": len(charset),
         "use_latent": bool(args.use_latent),
     }

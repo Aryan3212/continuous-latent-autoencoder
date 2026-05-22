@@ -9,13 +9,11 @@ def count_parameters(model):
 
 def main():
     cfg = load_config("configs/exp0.yaml")
-    mcfg = cfg["model"]
-    
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    
-    latent_dim = int(mcfg["encoder"]["d_model"])
-    decoder = WaveformDecoder(latent_dim, DecoderConfig(**mcfg["decoder"]))
+
+    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    latent_dim = cfg.model.encoder.d_model
+    decoder = WaveformDecoder(latent_dim, DecoderConfig(**cfg.model.decoder.model_dump()))
     
     f_params = count_parameters(frontend)
     e_params = count_parameters(encoder)

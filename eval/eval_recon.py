@@ -29,15 +29,12 @@ def main() -> None:
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    seg = float(args.segment_seconds if args.segment_seconds is not None else cfg["data"]["segment_seconds"])
+    seg = args.segment_seconds if args.segment_seconds is not None else cfg.data.segment_seconds
 
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    
-    latent_dim = int(mcfg["encoder"]["d_model"])
-
-    decoder_cfg = DecoderConfig(**mcfg["decoder"])
+    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    latent_dim = cfg.model.encoder.d_model
+    decoder_cfg = DecoderConfig(**cfg.model.decoder.model_dump())
     decoder = WaveformDecoder(latent_dim, decoder_cfg)
 
     model = torch.nn.ModuleDict(
@@ -48,13 +45,13 @@ def main() -> None:
     model.load_state_dict(state["model"], strict=False)
     model.eval()
 
-    loss_cfg = MultiResSTFTConfig(**cfg["loss"]["stft"])
+    loss_cfg = MultiResSTFTConfig(**cfg.loss.stft.model_dump())
     stft = MultiResSTFTLoss(loss_cfg).to(device)
 
     ds = AudioDataset(
         DatasetConfig(
             manifest=args.manifest,
-            sample_rate=int(cfg["data"]["sample_rate"]),
+            sample_rate=cfg.data.sample_rate,
             segment_seconds=seg,
             random_crop=False,
         )

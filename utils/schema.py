@@ -23,7 +23,6 @@ class RunCfg(_Base):
     device: str = "auto"
     amp: bool = True
     wandb: WandbCfg = Field(default_factory=WandbCfg)
-    track_emissions: bool = True
 
 
 class DataCfg(_Base):
@@ -140,25 +139,12 @@ class SIGRegCfg(_Base):
     n_points: int = 17
 
 
-class InlineProbeCfg(_Base):
-    enabled: bool = False
-    manifest: Optional[str] = None
-    batch_size: int = 8
-    segment_seconds: float = 15.0
-    num_workers: int = 1
-    step_interval: int = 1
-    log_interval: int = 500
-    vocab_bootstrap_samples: int = 1000
-    lr: float = 1.0e-3
-
-
 class LossCfg(_Base):
     stft_weight: float = 0.005
     stft: STFTCfg = Field(default_factory=STFTCfg)
     wav_l1_weight: float = 0.0
     jepa: JEPACfg = Field(default_factory=JEPACfg)
     sigreg: SIGRegCfg = Field(default_factory=SIGRegCfg)
-    inline_probe: InlineProbeCfg = Field(default_factory=InlineProbeCfg)
 
 
 class SchedulerCfg(_Base):
@@ -184,7 +170,6 @@ class TrainCfg(_Base):
     eval_interval_steps: int = 5000
     save_interval_steps: int = 10000
     val_batches: Optional[int] = None
-    run_eval_on_save: bool = False
 
 
 class EmotionCfg(_Base):
@@ -214,23 +199,10 @@ class EvalCfg(_Base):
     asr: AsrCfg = Field(default_factory=AsrCfg)
 
 
-class GANCfg(_Base):
-    enabled: bool = False
-    start_step: int = 15000
-    warmup_steps: int = 5000
-    periods: List[int] = Field(default_factory=lambda: [2, 3, 5, 7, 11])
-    msd_scales: int = 3
-    mpd_channels: int = 32
-    msd_channels: int = 16
-    d_lr: float = 5.0e-5
-    d_betas: List[float] = Field(default_factory=lambda: [0.8, 0.99])
-    d_weight_decay: float = 0.0
-
-
 class Config(_Base):
-    # Allow extras at the top level — load_config injects `_resolved_config_path`.
     model_config = ConfigDict(extra="allow")
 
+    resolved_config_path: Optional[str] = None
     run: RunCfg = Field(default_factory=RunCfg)
     data: DataCfg = Field(default_factory=DataCfg)
     aug: AugCfg = Field(default_factory=AugCfg)
@@ -239,4 +211,3 @@ class Config(_Base):
     optim: OptimCfg = Field(default_factory=OptimCfg)
     train: TrainCfg = Field(default_factory=TrainCfg)
     eval: EvalCfg = Field(default_factory=EvalCfg)
-    gan: GANCfg = Field(default_factory=GANCfg)

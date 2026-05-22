@@ -23,9 +23,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load Model
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
+    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
     
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     # Handle both full state dict and partial
@@ -42,18 +41,15 @@ def main():
     encoder.to(device).eval()
 
     # Data
-    dcfg = cfg["data"]
-    # Fallback for manifests if path is relative
-    manifest = dcfg["val_manifest"]
-    
+    dcfg = cfg.data
     ds = AudioDataset(DatasetConfig(
-        manifest=manifest,
-        sample_rate=int(dcfg["sample_rate"]),
-        segment_seconds=float(dcfg["segment_seconds"]),
+        manifest=dcfg.val_manifest,
+        sample_rate=dcfg.sample_rate,
+        segment_seconds=dcfg.segment_seconds,
         random_crop=False,
     ))
     dl = torch.utils.data.DataLoader(
-        ds, batch_size=int(cfg["train"]["batch_size"]),
+        ds, batch_size=cfg.train.batch_size,
         collate_fn=collate_fixed, drop_last=False,
     )
 

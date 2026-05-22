@@ -42,7 +42,7 @@ def _load_embs(
     for emb, meta in iter_embeddings(
         lm,
         manifest,
-        sample_rate=int(lm.cfg["data"]["sample_rate"]),
+        sample_rate=lm.cfg.data.sample_rate,
         segment_seconds=segment_seconds,
         batch_size=batch_size,
         log_name=log_name,
@@ -71,7 +71,7 @@ def main() -> None:
     args = ap.parse_args()
 
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
-    seg = float(args.segment_seconds if args.segment_seconds is not None else lm.cfg["data"]["segment_seconds"])
+    seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.data.segment_seconds
 
     print("  [Emotion] Extracting train embeddings...", flush=True)
     x_tr, y_tr, _, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg, log_name="Emotion train")

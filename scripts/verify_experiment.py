@@ -70,15 +70,11 @@ def main():
 
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Load model (simplified from train.py)
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    
-    latent_dim = int(mcfg["encoder"]["d_model"])
-    
-    decoder = WaveformDecoder(latent_dim, DecoderConfig(**mcfg["decoder"]))
+
+    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    latent_dim = cfg.model.encoder.d_model
+    decoder = WaveformDecoder(latent_dim, DecoderConfig(**cfg.model.decoder.model_dump()))
     
     model = torch.nn.ModuleDict({
         "frontend": frontend,
