@@ -12,6 +12,9 @@ bengaliai-speech.zip
 .env
 uv.lock
 
+# Hardcoded credentials (ship _creds.example.py as template instead).
+clae_data/_creds.py
+
 # Editor
 .vscode/
 .idea/
