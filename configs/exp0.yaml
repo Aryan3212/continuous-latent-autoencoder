@@ -14,8 +14,8 @@ data:
   # (or fetched from HF Hub via `make fetch-data`).
   sample_rate: 16000
   segment_seconds: 3.0
-  train_manifest: "data/manifests/train.jsonl"
-  val_manifest: "data/manifests/val.jsonl"
+  train_manifest: "data/manifests/combined_train.jsonl"
+  val_manifest: "data/manifests/combined_val.jsonl"
   num_workers: 8
   pin_memory: true
   persistent_workers: true
@@ -45,15 +45,15 @@ aug:
 
 model:
   frontend:
-    channels: [64, 128, 192, 256, 256]
+    channels: [64, 128, 160, 192, 192]
     kernels:  [10, 8, 8, 4, 4]
     strides:  [5, 4, 4, 4, 4]    # product=1280 -> 12.5Hz at 16k
     groups: 8
   encoder:
-    d_model: 256
+    d_model: 192
     n_layers: 4
     num_heads: 4
-    feedforward_dim: 768        # 3x d_model
+    feedforward_dim: 576        # 3x d_model
     dropout: 0.1
     cnn_module_kernel: 31
     mhc:
@@ -67,18 +67,18 @@ model:
       identity_mix: true
       alpha_init: 0.01
   decoder:
-    channels: 512
+    channels: 320
     up_strides: [4, 4, 4, 4, 5]
     up_kernels: [8, 8, 8, 8, 10]
     res_blocks_per_up: 2
     res_dilations: [1, 3, 9]
-    film_hidden: 128
+    film_hidden: 64
   projector:
     # LeJEPA / LeWM projector: encoder out -> JEPA + SIGReg loss space.
     # Decoder and downstream probes still read raw encoder output (hE).
     # BatchNorm is load-bearing — it's what lets SIGReg actually reshape
     # to N(0, I) (LayerNorm-style encoder outputs resist Gaussianisation).
-    hidden_dim: 2048
+    hidden_dim: 896
     output_dim: 64              # LeJEPA paper range: 16-128; 64 sized for per-frame phonetic capacity
     n_hidden_layers: 2
 

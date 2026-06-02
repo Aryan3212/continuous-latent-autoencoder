@@ -13,6 +13,16 @@ Date format: `YYYY-MM-DD`
 - Created `COMMANDS.md` as a quick reference for training, evaluation, and data preparation commands.
 - Updated `CODEBASE.md` to include `COMMANDS.md` in core documentation.
 
+## 2026-06-02
+
+- **Param redistribution in `configs/exp0.yaml`** (Exp0 shrunk from ~14.6M → ~6.0M trainable). Targets encoder > decoder > projector > frontend, all four blocks within ~5% of (3M, 1.5M, 1M, 0.5M):
+  - Frontend channels `[64,128,192,256,256]` → `[64,128,160,192,192]` (~724K → ~503K). Frontend output still 192, so encoder d_model matches.
+  - Encoder `d_model` 256 → 192, `feedforward_dim` 768 → 576 (keeps 3× ratio). mHC config unchanged. (~5.1M → ~2.88M)
+  - Decoder `channels` 512 → 320, `film_hidden` 128 → 64. Ups/ResBlock/dilation layout unchanged. (~3.95M → ~1.55M)
+  - Projector `hidden_dim` 2048 → 896; `n_hidden_layers` and `output_dim` unchanged. (~4.86M → ~1.04M)
+- **`scripts/get_param_count.py`**: now also counts and prints the projector line, so the full four-block breakdown is visible.
+- No model-code changes — the four `*Config` dataclasses default to the new values only if the config is silent; `configs/exp0.yaml` sets them explicitly. Frontend stride product (1280 → 12.5 Hz) and mHC wiring unaffected.
+
 ## 2026-02-02
 
 - Added `REUSE.md` to document vendored repos and clarify that code is currently referenced (not yet ported) into core modules.

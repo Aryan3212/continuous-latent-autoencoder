@@ -12,7 +12,17 @@
 - Frontend: `models/frontend_conv.py` (strided Conv1D → ~12.5Hz tokens)
 - Encoder: `models/encoder.py` (Conformer + rotary) + mHC (`models/mhc.py`)
 - Decoder: `models/decoder_generator.py` (ConvTranspose stack + optional latent normalization)
+- Projector: `models/projector.py` (LeJEPA MLP head, BatchNorm)
 - Losses: `losses/multires_stft.py` + LeJEPA + SIGReg (`models/sigreg.py`)
+
+## Exp0 sizing (configs/exp0.yaml, ~6.0M total)
+
+Encoder is the largest block, then decoder, projector, frontend. `scripts/get_param_count.py` prints the full four-block breakdown.
+
+- Frontend: channels `[64,128,160,192,192]`, strides product 1280 → 12.5 Hz at 16 kHz
+- Encoder: d_model 192, 4× Conformer (FFN 576, kernel 31, rotary, mHA-4), mHC on layer 2 only
+- Decoder: channels 320, 5× upsample `[4,4,4,4,5]`, 2× FiLM ResBlock per stage (dilations `[1,3,9]`, film_hidden 64)
+- Projector: 192→896→896→64 MLP w/ BatchNorm (2 hidden blocks)
 
 ## Training entrypoints
 
