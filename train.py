@@ -22,16 +22,17 @@ from data.augment import (
     make_frame_chunk_masks,
 )
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from eval.inline_probe import InlineProbe
+# from eval.inline_probe import InlineProbe  # REMOVED in §3.7
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
-from models.discriminators import (
-    MultiPeriodDiscriminator,
-    MultiScaleDiscriminator,
-    discriminator_loss,
-    feature_matching_loss,
-    generator_loss,
-)
+# REMOVED in §3.7: GAN discriminators
+# from models.discriminators import (
+#     MultiPeriodDiscriminator,
+#     MultiScaleDiscriminator,
+#     discriminator_loss,
+#     feature_matching_loss,
+#     generator_loss,
+# )
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from models.mhc import sinkhorn_log
@@ -250,19 +251,21 @@ def main() -> None:
 
     # Model
     mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
+    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"].model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"].model_dump()))
     
     latent_dim = int(mcfg["encoder"]["d_model"])
 
-    decoder_cfg = DecoderConfig(**mcfg["decoder"])
+    decoder_cfg = DecoderConfig(**mcfg["decoder"].model_dump())
     decoder = WaveformDecoder(latent_dim, decoder_cfg)
-    proj_cfg_raw = (mcfg.get("projector") or {}).copy()
+
+    proj_cfg_raw = mcfg.get("projector")
+    proj_cfg_raw = proj_cfg_raw.model_dump() if proj_cfg_raw else {}
     projector_cfg = ProjectorConfig(**{k: v for k, v in proj_cfg_raw.items() if k in {"hidden_dim", "output_dim", "n_hidden_layers"}})
     projector = Projector(latent_dim, projector_cfg)
     proj_dim = projector.output_dim
 
-    sigreg_cfg = cfg["loss"]["sigreg"].copy()
+    sigreg_cfg = cfg["loss"]["sigreg"].model_dump()
     _allowed = {"num_slices", "t_max", "n_points"}
     sigreg_cfg = {k: v for k, v in sigreg_cfg.items() if k in _allowed}
     sigreg = SIGReg(proj_dim, SIGRegConfig(**sigreg_cfg))
@@ -277,32 +280,18 @@ def main() -> None:
         }
     ).to(device)
 
+    # REMOVED in §3.7: GAN discriminators setup
     gan_cfg = cfg.get("gan") or {}
     gan_enabled = bool(gan_cfg.get("enabled", False))
     discriminators = None
     d_optimizer = None
-    if gan_enabled:
-        mpd = MultiPeriodDiscriminator(
-            periods=gan_cfg.get("periods", [2, 3, 5, 7, 11]),
-            channels=int(gan_cfg.get("mpd_channels", 32)),
-        )
-        msd = MultiScaleDiscriminator(
-            scales=int(gan_cfg.get("msd_scales", 3)),
-            channels=int(gan_cfg.get("msd_channels", 16)),
-        )
-        discriminators = torch.nn.ModuleDict({"mpd": mpd, "msd": msd}).to(device)
-        
-        d_optimizer = torch.optim.AdamW(
-            discriminators.parameters(),
-            lr=float(gan_cfg.get("d_lr", 2.0e-4)),
-            betas=tuple(gan_cfg.get("d_betas", [0.8, 0.99])),
-            weight_decay=float(gan_cfg.get("d_weight_decay", 0.0)),
-        )
 
     # Losses
-    stft = MultiResSTFTLoss(MultiResSTFTConfig(**cfg["loss"]["stft"])).to(device)
-    wave_aug_cfg = WaveAugConfig(**(cfg.get("aug", {}).get("wave_aug", {}) or {}))
-    wave_chunk_mask_cfg = WaveChunkMaskConfig(**(cfg.get("aug", {}).get("wave_chunk_mask", {}) or {}))
+    stft = MultiResSTFTLoss(MultiResSTFTConfig(**cfg["loss"]["stft"].model_dump())).to(device)
+    _aug = cfg.get("aug", {})
+    _aug = _aug.model_dump() if hasattr(_aug, "model_dump") else {}
+    wave_aug_cfg = WaveAugConfig(**_aug.get("wave_aug", {}))
+    wave_chunk_mask_cfg = WaveChunkMaskConfig(**_aug.get("wave_chunk_mask", {}))
 
     # Frontend stride product gives samples-per-output-frame. Used to convert
     # frame-level chunk masks (local-view recipe) into waveform sample masks.
@@ -413,13 +402,14 @@ def main() -> None:
             if k in resume_best:
                 best[k] = float(resume_best[k])
 
-    inline_probe = InlineProbe(
-        cfg_probe=(cfg.get("loss") or {}).get("inline_probe") or {},
-        sample_rate=int(dcfg["sample_rate"]),
-        encoder_dim=latent_dim,
-        device=device,
-        out_root=out_root,
-    )
+    # REMOVED in §3.7: inline probe
+    # inline_probe = InlineProbe(
+    #     cfg_probe=(cfg.get("loss") or {}).get("inline_probe") or {},
+    #     sample_rate=int(dcfg["sample_rate"]),
+    #     encoder_dim=latent_dim,
+    #     device=device,
+    #     out_root=out_root,
+    # )
 
     def _validate_one() -> Dict[str, float]:
         if not dcfg.get("val_manifest"):
@@ -777,12 +767,9 @@ def main() -> None:
         if scheduler is not None:
             scheduler.step()
 
-        # Inline detached CTC probe — diagnoses latent quality without
-        # waiting for the offline ASR eval (eval_interval_steps). Encoder
-        # forward runs under torch.no_grad inside InlineProbe; only the
-        # probe's linear head is trained.
-        inline_probe.step(model, step, use_amp)
-        inline_probe.maybe_emit(step, wb)
+        # REMOVED in §3.7: inline CTC probe
+        # inline_probe.step(model, step, use_amp)
+        # inline_probe.maybe_emit(step, wb)
 
         log_interval = int(cfg["train"]["log_interval_steps"])
         if step % log_interval == 0:
