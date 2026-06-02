@@ -4,7 +4,6 @@ import argparse
 import math
 import os
 import pathlib
-import sys
 import time
 from typing import Any, Dict, Tuple
 
@@ -22,17 +21,8 @@ from data.augment import (
     make_frame_chunk_masks,
 )
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-# from eval.inline_probe import InlineProbe  # REMOVED in §3.7
 from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
 from models.decoder_generator import DecoderConfig, WaveformDecoder
-# REMOVED in §3.7: GAN discriminators
-# from models.discriminators import (
-#     MultiPeriodDiscriminator,
-#     MultiScaleDiscriminator,
-#     discriminator_loss,
-#     feature_matching_loss,
-#     generator_loss,
-# )
 from models.encoder import Encoder, EncoderConfig
 from models.frontend_conv import ConvFrontend, FrontendConfig
 from models.mhc import sinkhorn_log
@@ -41,6 +31,7 @@ from models.sigreg import SIGReg, SIGRegConfig
 from utils.checkpoint import save_checkpoint, save_run_metadata, try_git_hash
 from utils.config import apply_overrides, load_config
 from utils.logging import JsonlLogger, maybe_init_wandb
+from utils.schema import Config
 from utils.seed import seed_all
 
 
@@ -48,16 +39,11 @@ def _now_run_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
-def _select_device(cfg: Dict[str, Any]) -> torch.device:
-    want = (cfg.get("run") or {}).get("device", "auto")
+def _select_device(cfg: Config) -> torch.device:
+    want = cfg.run.device
     if want in ("cpu", "cuda"):
         return torch.device(want)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def _pool_utt(z: torch.Tensor) -> torch.Tensor:
-    # z: (B, D, T) -> (B, D) utterance-level mean pool.
-    return z.mean(dim=-1)
 
 
 def _global_local_jepa_loss(
@@ -139,22 +125,8 @@ def _global_local_jepa_loss(
     return loss, l_global.detach(), l_predict.detach(), l_context.detach()
 
 
-def _pool(z: torch.Tensor) -> torch.Tensor:
-    # z: (B,d,T') -> (B,3d)
-    avg_p = z.mean(dim=-1)
-    std_p = z.std(dim=-1, unbiased=False)
-    max_p = z.max(dim=-1)[0]
-    return torch.cat([avg_p, std_p, max_p], dim=1)
-
-
-def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
-    for p in module.parameters():
-        p.requires_grad = flag
-
-
 def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int) -> torch.Tensor:
     return model["decoder"](z, target_len=target_len)
-
 
 
 def main() -> None:
@@ -165,7 +137,7 @@ def main() -> None:
     # Limit PyTorch to 95% of physical VRAM to prevent WSL2/Windows shared memory slowdowns
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(0.95, device=0)
-    
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--resume", default=None)
@@ -173,7 +145,6 @@ def main() -> None:
     ap.add_argument("--log_interval_steps", type=int, default=None)
     ap.add_argument("--eval_interval_steps", type=int, default=None)
     ap.add_argument("--save_interval_steps", type=int, default=None)
-    ap.add_argument("--run_eval_on_save", action="store_true")
     ap.add_argument("--profile", action="store_true", help="Enable PyTorch Profiler with W&B")
     ap.add_argument("--profile_wait", type=int, default=0, help="Steps to wait before profiling")
     ap.add_argument("--profile_warmup", type=int, default=0, help="Steps to warm up profiler")
@@ -182,7 +153,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
-    cfg["_resolved_config_path"] = args.config
+    cfg.resolved_config_path = args.config
 
     # Resume path layout: <out_dir>/<run_id>/checkpoints/<name>.pt
     # Infer the existing run_id so we reuse its out_dir and wandb run.
@@ -190,14 +161,14 @@ def main() -> None:
         resume_path = pathlib.Path(args.resume)
         if resume_path.parent.name == "checkpoints":
             inferred_run_id = resume_path.parent.parent.name
-            if not cfg["run"].get("run_id"):
-                cfg["run"]["run_id"] = inferred_run_id
+            if not cfg.run.run_id:
+                cfg.run.run_id = inferred_run_id
 
-    seed_all(int(cfg["run"]["seed"]))
+    seed_all(cfg.run.seed)
     device = _select_device(cfg)
 
-    run_id = cfg["run"].get("run_id") or _now_run_id()
-    out_root = pathlib.Path(cfg["run"]["out_dir"]) / run_id
+    run_id = cfg.run.run_id or _now_run_id()
+    out_root = pathlib.Path(cfg.run.out_dir) / run_id
     ckpt_dir = out_root / "checkpoints"
     log_dir = out_root / "logs"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -205,70 +176,50 @@ def main() -> None:
 
     jsonl = JsonlLogger(str(log_dir / "train.jsonl"))
     wb = maybe_init_wandb(cfg, run_id, str(out_root), resume=bool(args.resume))
-    
-    # Initialize CodeCarbon
-    codecarbon_tracker = None
-    if cfg.get("run", {}).get("track_emissions", True):
-        try:
-            from codecarbon import EmissionsTracker
-            codecarbon_tracker = EmissionsTracker(
-                output_dir=str(out_root),
-                output_file="emissions.csv",
-                log_level="error" # reduce spam
-            )
-            codecarbon_tracker.start()
-        except ImportError:
-            pass
 
     # Data
-    dcfg = cfg["data"]
-    if dcfg.get("train_manifest") is None:
-        raise ValueError("Set data.train_manifest to the shard URL pattern (e.g. data/shards/train/train-{0000..0150}.tar)")
+    dcfg = cfg.data
+    if dcfg.train_manifest is None:
+        raise ValueError("Set data.train_manifest to a JSONL manifest path (e.g. data/manifests/train.jsonl)")
     meta_extra = {
         "git_hash": try_git_hash(cwd=str(pathlib.Path(".").resolve())),
-        "train_manifest": str(dcfg["train_manifest"]),
-        "val_manifest": str(dcfg.get("val_manifest") or ""),
+        "train_manifest": str(dcfg.train_manifest),
+        "val_manifest": str(dcfg.val_manifest or ""),
     }
     save_run_metadata(str(out_root), cfg, extra=meta_extra)
     train_ds = AudioDataset(
         DatasetConfig(
-            manifest=dcfg["train_manifest"],
-            sample_rate=int(dcfg["sample_rate"]),
-            segment_seconds=float(dcfg["segment_seconds"]),
+            manifest=dcfg.train_manifest,
+            sample_rate=dcfg.sample_rate,
+            segment_seconds=dcfg.segment_seconds,
             random_crop=True,
         )
     )
     train_dl = torch.utils.data.DataLoader(
         train_ds,
-        batch_size=int(cfg["train"]["batch_size"]),
-        num_workers=int(dcfg.get("num_workers", 4)),
-        pin_memory=bool(dcfg.get("pin_memory", True)),
-        persistent_workers=bool(dcfg.get("persistent_workers", False)) if int(dcfg.get("num_workers", 4)) > 0 else False,
+        batch_size=cfg.train.batch_size,
+        num_workers=dcfg.num_workers,
+        pin_memory=dcfg.pin_memory,
+        persistent_workers=dcfg.persistent_workers if dcfg.num_workers > 0 else False,
         collate_fn=collate_fixed,
         drop_last=True,
         shuffle=True,
     )
 
     # Model
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"].model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"].model_dump()))
-    
-    latent_dim = int(mcfg["encoder"]["d_model"])
+    mcfg = cfg.model
+    frontend = ConvFrontend(FrontendConfig(**mcfg.frontend.model_dump()))
+    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg.encoder.model_dump()))
 
-    decoder_cfg = DecoderConfig(**mcfg["decoder"].model_dump())
-    decoder = WaveformDecoder(latent_dim, decoder_cfg)
+    latent_dim = mcfg.encoder.d_model
 
-    proj_cfg_raw = mcfg.get("projector")
-    proj_cfg_raw = proj_cfg_raw.model_dump() if proj_cfg_raw else {}
-    projector_cfg = ProjectorConfig(**{k: v for k, v in proj_cfg_raw.items() if k in {"hidden_dim", "output_dim", "n_hidden_layers"}})
-    projector = Projector(latent_dim, projector_cfg)
+    decoder = WaveformDecoder(latent_dim, DecoderConfig(**mcfg.decoder.model_dump()))
+
+    projector = Projector(latent_dim, ProjectorConfig(**mcfg.projector.model_dump()))
     proj_dim = projector.output_dim
 
-    sigreg_cfg = cfg["loss"]["sigreg"].model_dump()
-    _allowed = {"num_slices", "t_max", "n_points"}
-    sigreg_cfg = {k: v for k, v in sigreg_cfg.items() if k in _allowed}
-    sigreg = SIGReg(proj_dim, SIGRegConfig(**sigreg_cfg))
+    sreg = cfg.loss.sigreg
+    sigreg = SIGReg(proj_dim, SIGRegConfig(num_slices=sreg.num_slices, t_max=sreg.t_max, n_points=sreg.n_points))
 
     model = torch.nn.ModuleDict(
         {
@@ -280,49 +231,39 @@ def main() -> None:
         }
     ).to(device)
 
-    # REMOVED in §3.7: GAN discriminators setup
-    gan_cfg = cfg.get("gan") or {}
-    gan_enabled = bool(gan_cfg.get("enabled", False))
-    discriminators = None
-    d_optimizer = None
-
     # Losses
-    stft = MultiResSTFTLoss(MultiResSTFTConfig(**cfg["loss"]["stft"].model_dump())).to(device)
-    _aug = cfg.get("aug", {})
-    _aug = _aug.model_dump() if hasattr(_aug, "model_dump") else {}
-    wave_aug_cfg = WaveAugConfig(**_aug.get("wave_aug", {}))
-    wave_chunk_mask_cfg = WaveChunkMaskConfig(**_aug.get("wave_chunk_mask", {}))
+    stft = MultiResSTFTLoss(MultiResSTFTConfig(**cfg.loss.stft.model_dump())).to(device)
+    wave_aug_cfg = WaveAugConfig(**cfg.aug.wave_aug.model_dump())
+    wave_chunk_mask_cfg = WaveChunkMaskConfig(**cfg.aug.wave_chunk_mask.model_dump())
 
     # Frontend stride product gives samples-per-output-frame. Used to convert
     # frame-level chunk masks (local-view recipe) into waveform sample masks.
-    samples_per_frame = int(math.prod(int(s) for s in mcfg["frontend"]["strides"]))
+    samples_per_frame = math.prod(mcfg.frontend.strides)
     # Pre-compute exact output frame count via one dummy frontend forward —
     # this is what we hand to make_frame_chunk_masks so the local-view mask
     # aligns 1:1 with the encoder grid.
-    _seg_samples = int(round(float(dcfg["segment_seconds"]) * float(dcfg["sample_rate"])))
+    _seg_samples = int(round(dcfg.segment_seconds * dcfg.sample_rate))
     with torch.no_grad():
         _dummy = torch.zeros(1, 1, _seg_samples, device=device)
         n_frames_per_segment = int(model["frontend"](_dummy).size(-1))
 
     # Optim
-    ocfg = cfg["optim"]
+    ocfg = cfg.optim
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(ocfg["lr"]),
-        betas=tuple(ocfg["betas"]),
-        eps=float(ocfg["eps"]),
-        weight_decay=float(ocfg["weight_decay"]),
+        lr=ocfg.lr,
+        betas=tuple(ocfg.betas),
+        eps=ocfg.eps,
+        weight_decay=ocfg.weight_decay,
     )
 
-    scfg = ocfg.get("scheduler") or {}
-    warmup_steps = int(scfg.get("warmup_steps", 2000))
-    total_steps = int(scfg.get("total_steps", 200000))
-    min_lr_ratio = float(scfg.get("min_lr_ratio", 0.0))
-    base_lr = float(ocfg["lr"])
+    scfg = ocfg.scheduler
+    warmup_steps = scfg.warmup_steps
+    total_steps = scfg.total_steps
     _cosine_inner = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, total_steps - warmup_steps),
-        eta_min=base_lr * min_lr_ratio,
+        eta_min=ocfg.lr * scfg.min_lr_ratio,
     )
     _warmup = torch.optim.lr_scheduler.LinearLR(
         optimizer,
@@ -336,95 +277,65 @@ def main() -> None:
         milestones=[warmup_steps],
     )
 
-    use_amp = bool(cfg["run"].get("amp", True)) and device.type == "cuda"
-    g_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    d_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_amp = cfg.run.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     step = 0
-    resume_best: Dict[str, float] | None = None
     if args.resume:
         state = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(state["model"], strict=True)
         optimizer.load_state_dict(state["optimizer"])
-        if gan_enabled and (state.get("extra") or {}).get("discriminators"):
-            discriminators.load_state_dict(state["extra"]["discriminators"], strict=True)
-            if d_optimizer and (state.get("extra") or {}).get("d_optimizer"):
-                d_optimizer.load_state_dict(state["extra"]["d_optimizer"])
-        if state.get("scaler") and g_scaler.is_enabled():
-            g_scaler.load_state_dict(state["scaler"])
-        if state.get("d_scaler") and d_scaler.is_enabled():
-            d_scaler.load_state_dict(state["d_scaler"])
+        if state.get("scaler") and scaler.is_enabled():
+            scaler.load_state_dict(state["scaler"])
         if scheduler and (state.get("extra") or {}).get("scheduler"):
             scheduler.load_state_dict(state["extra"]["scheduler"])
         step = int(state.get("step", 0))
-        resume_best = (state.get("extra") or {}).get("best")
 
     # CLI overrides for loop intervals.
     if args.max_steps is not None:
-        cfg["train"]["max_steps"] = int(args.max_steps)
+        cfg.train.max_steps = args.max_steps
     if args.log_interval_steps is not None:
-        cfg["train"]["log_interval_steps"] = int(args.log_interval_steps)
+        cfg.train.log_interval_steps = args.log_interval_steps
     if args.eval_interval_steps is not None:
-        cfg["train"]["eval_interval_steps"] = int(args.eval_interval_steps)
+        cfg.train.eval_interval_steps = args.eval_interval_steps
     if args.save_interval_steps is not None:
-        cfg["train"]["save_interval_steps"] = int(args.save_interval_steps)
-    if args.run_eval_on_save:
-        cfg["train"]["run_eval_on_save"] = True
+        cfg.train.save_interval_steps = args.save_interval_steps
 
     # Training loop
     model.train()
-    max_steps = int(cfg["train"]["max_steps"])
-    grad_accum = int(cfg["train"]["grad_accum_steps"])
-    grad_clip = float(cfg["optim"]["grad_clip"])
-    val_batches = cfg["train"].get("val_batches")
-    if val_batches is not None:
-        val_batches = int(val_batches)
+    max_steps = cfg.train.max_steps
+    grad_accum = cfg.train.grad_accum_steps
+    grad_clip = cfg.optim.grad_clip
+    val_batches = cfg.train.val_batches
 
-    jcfg = cfg["loss"]["jepa"]
-    jepa_w = float(jcfg["weight"])
-    num_globals = int(jcfg.get("num_globals", 0))
-    num_locals = int(jcfg.get("num_locals", 0))
+    jcfg = cfg.loss.jepa
+    jepa_w = jcfg.weight
+    num_globals = jcfg.num_globals
+    num_locals = jcfg.num_locals
     if num_globals < 1 or num_locals < 1:
         raise ValueError(f"loss.jepa.num_globals and num_locals must both be >= 1; got G={num_globals}, L={num_locals}")
-    sig_w = float(cfg["loss"]["sigreg"]["weight"])
-    stft_w = float(cfg["loss"].get("stft_weight", 1.0))
-    wav_l1_w = float(cfg["loss"].get("wav_l1_weight", 0.0))
+    sig_w = cfg.loss.sigreg.weight
+    stft_w = cfg.loss.stft_weight
+    wav_l1_w = cfg.loss.wav_l1_weight
 
     # V-JEPA 2.1 context-loss weight: relative weight of L_context vs L_predict
     # in the Dense Predictive Loss. Paper uses ~1.0 with distance weighting.
-    lam_context_w = float(jcfg.get("context_weight", 1.0))
-    gan_start = int(gan_cfg.get("start_step", 0))
-    gan_warmup_steps = int(gan_cfg.get("warmup_steps", 5000))
-
-    best: Dict[str, float] = {"asr_wer": float("inf"), "composite": -float("inf")}
-    if isinstance(resume_best, dict):
-        for k in ["asr_wer", "composite"]:
-            if k in resume_best:
-                best[k] = float(resume_best[k])
-
-    # REMOVED in §3.7: inline probe
-    # inline_probe = InlineProbe(
-    #     cfg_probe=(cfg.get("loss") or {}).get("inline_probe") or {},
-    #     sample_rate=int(dcfg["sample_rate"]),
-    #     encoder_dim=latent_dim,
-    #     device=device,
-    #     out_root=out_root,
-    # )
+    lam_context_w = jcfg.context_weight
 
     def _validate_one() -> Dict[str, float]:
-        if not dcfg.get("val_manifest"):
+        if not dcfg.val_manifest:
             return {}
         val_ds = AudioDataset(
             DatasetConfig(
-                manifest=dcfg["val_manifest"],
-                sample_rate=int(dcfg["sample_rate"]),
-                segment_seconds=float(dcfg["segment_seconds"]),
+                manifest=dcfg.val_manifest,
+                sample_rate=dcfg.sample_rate,
+                segment_seconds=dcfg.segment_seconds,
                 random_crop=False,
             )
         )
         val_dl = torch.utils.data.DataLoader(
             val_ds,
-            batch_size=int(cfg["train"]["batch_size"]),
+            batch_size=cfg.train.batch_size,
             num_workers=0,
             collate_fn=collate_fixed,
             drop_last=True,
@@ -455,11 +366,7 @@ def main() -> None:
         return {k: (v / max(1, n)).item() for k, v in sums.items()}
 
     def _extra_state(**extra: Any) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"best": dict(best), "scheduler": scheduler.state_dict() if scheduler else None}
-        if gan_enabled and discriminators is not None:
-            payload["discriminators"] = discriminators.state_dict()
-            payload["d_optimizer"] = d_optimizer.state_dict() if d_optimizer else None
-        payload["d_scaler"] = d_scaler.state_dict() if d_scaler.is_enabled() else None
+        payload: Dict[str, Any] = {"scheduler": scheduler.state_dict() if scheduler else None}
         payload.update(extra)
         return payload
 
@@ -486,8 +393,6 @@ def main() -> None:
     train_it = iter(train_dl)
     while step < max_steps:
         optimizer.zero_grad(set_to_none=True)
-        if gan_enabled and d_optimizer is not None:
-            d_optimizer.zero_grad(set_to_none=True)
 
         total_loss = torch.tensor(0.0, device=device)
         mb_stats: Dict[str, Any] = {}
@@ -509,7 +414,7 @@ def main() -> None:
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 B = wav_a.size(0)
-                sr = int(dcfg["sample_rate"])
+                sr = dcfg.sample_rate
 
                 # Globals: light wave aug, no chunk mask.
                 view_wavs = [apply_waveform_augment(wav_a, sr, wave_aug_cfg) for _ in range(num_globals)]
@@ -589,57 +494,6 @@ def main() -> None:
                 l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
                 l_wav = l_wav_ps.mean()
 
-                l_g_adv = torch.tensor(0.0, device=device)
-                l_fm = torch.tensor(0.0, device=device)
-                l_d = torch.tensor(0.0, device=device)
-                gan_w = 0.0
-
-            # GAN: forward passes run in AMP (float16 activations to save VRAM),
-            # but losses are cast to float32 to avoid hinge-loss overflow.
-            if gan_enabled and discriminators is not None and step >= gan_start:
-                gan_progress = min(1.0, (step - gan_start) / max(1, gan_warmup_steps))
-
-                # --- Discriminator step (AMP forward, float32 loss) ---
-                _set_requires_grad(discriminators, True)
-                with torch.amp.autocast("cuda", enabled=use_amp):
-                    d_real_mpd, fmap_real_mpd = discriminators["mpd"](wav_a)
-                    d_fake_mpd, _ = discriminators["mpd"](x_hat.detach())
-                    d_real_msd, fmap_real_msd = discriminators["msd"](wav_a)
-                    d_fake_msd, _ = discriminators["msd"](x_hat.detach())
-                # Loss in float32 (discriminator_loss casts logits via .float())
-                l_d = 0.5 * (
-                    discriminator_loss(d_real_mpd, d_fake_mpd)
-                    + discriminator_loss(d_real_msd, d_fake_msd)
-                )
-                d_scaler.scale(l_d / grad_accum).backward()
-                _set_requires_grad(discriminators, False)
-
-                # --- Generator adversarial step (AMP forward, float32 loss) ---
-                with torch.amp.autocast("cuda", enabled=use_amp):
-                    d_fake_mpd_g, fmap_fake_mpd_g = discriminators["mpd"](x_hat)
-                    d_fake_msd_g, fmap_fake_msd_g = discriminators["msd"](x_hat)
-                fmap_real_mpd_det = [[f.detach() for f in layer] for layer in fmap_real_mpd]
-                fmap_real_msd_det = [[f.detach() for f in layer] for layer in fmap_real_msd]
-                l_g_adv = 0.5 * (
-                    generator_loss(d_fake_mpd_g) + generator_loss(d_fake_msd_g)
-                )
-                l_fm = 0.5 * (
-                    feature_matching_loss(fmap_real_mpd_det, fmap_fake_mpd_g)
-                    + feature_matching_loss(fmap_real_msd_det, fmap_fake_msd_g)
-                )
-
-                # Adaptive GAN weight (VQGAN-style) in float32
-                last_layer = model["decoder"].out_conv.weight
-                rec_grads = torch.autograd.grad(
-                    stft_w * l_stft.float(), last_layer, retain_graph=True
-                )[0].float()
-                gan_grads = torch.autograd.grad(
-                    l_g_adv + l_fm, last_layer, retain_graph=True
-                )[0].float()
-                d_weight = torch.norm(rec_grads) / (torch.norm(gan_grads) + 1e-4)
-                d_weight = torch.clamp(d_weight, 0.0, 10.0).detach()
-                gan_w = d_weight.item() * gan_progress
-
             with torch.amp.autocast("cuda", enabled=use_amp):
                 l_jepa = l_jepa_mask
 
@@ -648,16 +502,15 @@ def main() -> None:
                     + wav_l1_w * l_wav
                     + jepa_w * l_jepa
                     + sig_w * l_sig
-                    + gan_w * (l_g_adv + l_fm)
                 )
                 loss = loss / grad_accum
 
-            g_scaler.scale(loss).backward()
+            scaler.scale(loss).backward()
             total_loss = total_loss + loss.detach()
 
             # Diagnostic metrics for collapse detection.
             # Eigendecompositions are expensive — only compute on log boundaries.
-            log_interval = int(cfg["train"]["log_interval_steps"])
+            log_interval = cfg.train.log_interval_steps
             compute_ranks = (step % log_interval == 0)
             with torch.no_grad():
                 if compute_ranks:
@@ -713,14 +566,6 @@ def main() -> None:
             mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})
             mb_step_stats.update({k: v.detach() for k, v in sig_stats.items()})
 
-            if gan_enabled:
-                mb_step_stats.update({
-                    "l_g_adv": l_g_adv.detach(),
-                    "l_fm": l_fm.detach(),
-                    "l_d": l_d.detach(),
-                    "gan_w": float(gan_w),
-                })
-
             unique_ds = set(dataset_names)
             if len(unique_ds) > 1:
                 for ds_name in unique_ds:
@@ -743,17 +588,10 @@ def main() -> None:
 
         # Optimize
         if grad_clip and grad_clip > 0:
-            g_scaler.unscale_(optimizer)
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        g_scaler.step(optimizer)
-        g_scaler.update()
-        if gan_enabled and d_optimizer is not None and step >= gan_start:
-            if grad_clip and grad_clip > 0:
-                d_scaler.unscale_(d_optimizer)
-                torch.nn.utils.clip_grad_norm_(discriminators.parameters(), grad_clip)
-            d_scaler.step(d_optimizer)
-            d_scaler.update()
-
+        scaler.step(optimizer)
+        scaler.update()
 
         for k, v in stats.items():
             if k not in accum_stats:
@@ -767,11 +605,7 @@ def main() -> None:
         if scheduler is not None:
             scheduler.step()
 
-        # REMOVED in §3.7: inline CTC probe
-        # inline_probe.step(model, step, use_amp)
-        # inline_probe.maybe_emit(step, wb)
-
-        log_interval = int(cfg["train"]["log_interval_steps"])
+        log_interval = cfg.train.log_interval_steps
         if step % log_interval == 0:
             log_stats = {}
             for k, v in accum_stats.items():
@@ -780,8 +614,8 @@ def main() -> None:
             epoch_idx = 0
             row = {"step": step, "epoch": epoch_idx, **log_stats}
 
-            encoder_mod = model.get("encoder") if isinstance(model, dict) else None
-            if encoder_mod is not None and hasattr(encoder_mod, "mhc_wrappers"):
+            encoder_mod = model["encoder"]
+            if hasattr(encoder_mod, "mhc_wrappers"):
                 for wrapper in encoder_mod.mhc_wrappers:
                     if not hasattr(wrapper, "H_res_alpha_logit"):
                         continue
@@ -803,156 +637,24 @@ def main() -> None:
             if wb is not None:
                 wb.log(row, step=step)
 
-        if step % int(cfg["train"]["save_interval_steps"]) == 0:
-            last_path = str(ckpt_dir / "last.pt")
+        if step % cfg.train.save_interval_steps == 0:
             save_checkpoint(
-                last_path,
+                str(ckpt_dir / "last.pt"),
                 step=step,
                 model=model,
                 optimizer=optimizer,
-                scaler=g_scaler if g_scaler.is_enabled() else None,
+                scaler=scaler if scaler.is_enabled() else None,
                 cfg=cfg,
                 extra=_extra_state(),
             )
 
-            # Optionally run probes on the just-saved checkpoint.
-            if bool(cfg.get("eval", {}).get("enabled", False)) and bool(cfg["train"].get("run_eval_on_save", False)):
-                from eval.run_probes import run_all_probes
-
-                print(f"[{time.strftime('%H:%M:%S')}] Starting evaluation block at step {step}...", flush=True)
-                eval_start_t = time.perf_counter()
-                
-                # Move everything to CPU to free GPU memory for subprocesses
-                model.cpu()
-                def optimizer_to(optim, device):
-                    for state in optim.state.values():
-                        for k, v in state.items():
-                            if torch.is_tensor(v):
-                                state[k] = v.to(device)
-                optimizer_to(optimizer, "cpu")
-                if discriminators is not None:
-                    discriminators.cpu()
-                if d_optimizer is not None:
-                    optimizer_to(d_optimizer, "cpu")
-                
-                # Stop profiler to flush its memory and stop recording
-                if prof is not None:
-                    print(f"[{time.strftime('%H:%M:%S')}] Pausing profiler for evaluation...", flush=True)
-                    prof.stop()
-                
-                torch.cuda.empty_cache()
-
-                try:
-                    results = run_all_probes(
-                        run_dir=str(out_root),
-                        step=step,
-                        exp_cfg=cfg,
-                        ckpt_path=last_path,
-                        python_bin=sys.executable,
-                    )
-                finally:
-                    # Restore to GPU regardless of eval success/failure
-                    print(f"[{time.strftime('%H:%M:%S')}] Restoring model to GPU...", flush=True)
-                    model.to(device)
-                    optimizer_to(optimizer, device)
-                    if discriminators is not None:
-                        discriminators.to(device)
-                    if d_optimizer is not None:
-                        optimizer_to(d_optimizer, device)
-                    
-                    torch.cuda.empty_cache()
-                    if prof is not None:
-                        print(f"[{time.strftime('%H:%M:%S')}] Resuming profiler...", flush=True)
-                        prof.start()
-
-                eval_elapsed = time.perf_counter() - eval_start_t
-                print(f"[{time.strftime('%H:%M:%S')}] Evaluation block finished in {eval_elapsed:.2f}s", flush=True)
-
-                row = {"step": step, "probe": results}
-                jsonl.log(row)
-                if wb is not None:
-                    to_log: Dict[str, Any] = {}
-                    asr = results.get("asr") or {}
-                    emo = results.get("emotion") or {}
-                    gen = results.get("gender") or {}
-
-                    if asr.get("train", {}).get("wer") is not None:
-                        to_log["probe/asr_wer_train"] = float(asr["train"]["wer"])
-                    if asr.get("dev", {}).get("wer") is not None:
-                        to_log["probe/asr_wer_dev"] = float(asr["dev"]["wer"])
-                        
-                    if asr.get("dev", {}).get("examples"):
-                        import wandb
-                        cols = ["Ref", "Hyp"]
-                        data = [[ex["ref"], ex["hyp"]] for ex in asr["dev"]["examples"]]
-                        to_log["probe/asr_examples"] = wandb.Table(columns=cols, data=data)
-
-                    if emo.get("accuracy") is not None:
-                        to_log["probe/emotion_accuracy"] = float(emo["accuracy"])
-                    if emo.get("macro_f1") is not None:
-                        to_log["probe/emotion_macro_f1"] = float(emo["macro_f1"])
-
-                    if gen.get("accuracy") is not None:
-                        to_log["probe/gender_accuracy"] = float(gen["accuracy"])
-                    
-                    if "visualization" in results:
-                        import wandb
-                        to_log["probe/latents"] = wandb.Image(results["visualization"], caption=f"Step {step} Latents")
-
-                    # Log probe timing so we can track eval duration on W&B
-                    to_log["probe/total_time_s"] = eval_elapsed
-                    probe_timing = results.get("_timing") or {}
-                    for probe_name, t_sec in probe_timing.items():
-                        safe_name = probe_name.lower().replace(" ", "_")
-                        to_log[f"probe/time_{safe_name}_s"] = abs(t_sec)
-                        if t_sec < 0:
-                            to_log[f"probe/failed_{safe_name}"] = 1
-
-                    if to_log:
-                        wb.log(to_log, step=step)
-
-                # best_asr / best_composite
-                asr_wer = results.get("asr", {}).get("dev", {}).get("wer")
-                if asr_wer is not None and float(asr_wer) < best["asr_wer"]:
-                    best["asr_wer"] = float(asr_wer)
-                    save_checkpoint(
-                        str(ckpt_dir / "best_asr.pt"),
-                        step=step,
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=g_scaler if g_scaler.is_enabled() else None,
-                        cfg=cfg,
-                        extra=_extra_state(probe=results),
-                    )
-
-                composite = 0.0
-                if "asr" in results and "dev" in results["asr"]:
-                    composite += -float(results["asr"]["dev"]["wer"])
-                if "emotion" in results:
-                    composite += float(results["emotion"].get("macro_f1", 0.0))
-                if "gender" in results:
-                    composite += float(results["gender"].get("accuracy", 0.0))
-                if composite > best["composite"]:
-                    best["composite"] = composite
-                    save_checkpoint(
-                        str(ckpt_dir / "best_composite.pt"),
-                        step=step,
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=g_scaler if g_scaler.is_enabled() else None,
-                        cfg=cfg,
-                        extra=_extra_state(probe=results, composite=composite),
-                    )
-
-        if step % int(cfg["train"]["eval_interval_steps"]) == 0:
+        if step % cfg.train.eval_interval_steps == 0:
             v = _validate_one()
             if v:
                 row = {"step": step, **v}
                 jsonl.log(row)
                 if wb is not None:
                     wb.log(row, step=step)
-
-            # Probes are triggered on save (run_eval_on_save), not on eval.
 
         if prof is not None:
             prof.step()
@@ -965,15 +667,10 @@ def main() -> None:
         step=step,
         model=model,
         optimizer=optimizer,
-        scaler=g_scaler if g_scaler.is_enabled() else None,
+        scaler=scaler if scaler.is_enabled() else None,
         cfg=cfg,
         extra=_extra_state(),
     )
-    
-    if codecarbon_tracker is not None:
-        emissions: float = codecarbon_tracker.stop()
-        if wb is not None:
-            wb.log({"emissions_kg_co2": emissions}, step=step)
 
 
 if __name__ == "__main__":

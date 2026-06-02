@@ -57,7 +57,7 @@ def _transcode_one(
             # Fall through to a fresh transcode if the cached file is bad.
             out_path.unlink(missing_ok=True)
         else:
-            new_rec["audio_filepath"] = str(rel_path)
+            new_rec["audio_filepath"] = rel_path.as_posix()
             return new_rec
 
     try:
@@ -83,7 +83,7 @@ def _transcode_one(
         print(f"[pack] transcode failed for {rec.get('audio_filepath')}: {e}")
         return None
 
-    new_rec["audio_filepath"] = str(rel_path)
+    new_rec["audio_filepath"] = rel_path.as_posix()
     new_rec["sample_rate"] = int(target_sr)
     new_rec["duration"] = float(samples.shape[-1] / target_sr)
     return new_rec

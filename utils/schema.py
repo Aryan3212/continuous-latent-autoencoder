@@ -9,15 +9,6 @@ class _Base(BaseModel):
     """Forbid unknown keys so typos get caught at startup."""
     model_config = ConfigDict(extra="forbid")
 
-    def __getitem__(self, key: str):
-        return getattr(self, key)
-
-    def __setitem__(self, key: str, value):
-        object.__setattr__(self, key, value)
-
-    def get(self, key: str, default=None):
-        return getattr(self, key, default)
-
 
 class WandbCfg(_Base):
     enabled: bool = True

@@ -14,8 +14,8 @@ data:
   # (or fetched from HF Hub via `make fetch-data`).
   sample_rate: 16000
   segment_seconds: 3.0
-  train_manifest: "data/manifests/combined_train.jsonl"
-  val_manifest: "data/manifests/combined_val.jsonl"
+  train_manifest: "data/manifests/train.jsonl"
+  val_manifest: "data/manifests/val.jsonl"
   num_workers: 8
   pin_memory: true
   persistent_workers: true
@@ -137,8 +137,8 @@ eval:
     enabled: false
   asr:
     enabled: true
-    train_manifest: "data/manifests/asr_eval_train.jsonl"
-    dev_manifest: "data/manifests/asr_eval_val.jsonl"
+    train_manifest: "data/manifests/asr_probe_train.jsonl"
+    dev_manifest: "data/manifests/asr_probe_val.jsonl"
     text_key: text
     steps: 1000
     batch_size: 16
