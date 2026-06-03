@@ -4,6 +4,8 @@ import argparse
 import math
 import os
 import pathlib
+import signal
+import sys
 import time
 from typing import Any, Dict, Tuple
 
@@ -130,6 +132,18 @@ def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int) -> tor
 
 
 def main() -> None:
+    # Flush stdout immediately so print() output appears over SSH/nohup/pipe.
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+
+    _shutdown = False
+
+    def _sigint_handler(sig: int, frame: object) -> None:
+        nonlocal _shutdown
+        print("\n[train] SIGINT received — stopping after current step.", flush=True)
+        _shutdown = True
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     # Hardware acceleration flags
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
@@ -201,6 +215,9 @@ def main() -> None:
         num_workers=dcfg.num_workers,
         pin_memory=dcfg.pin_memory,
         persistent_workers=dcfg.persistent_workers if dcfg.num_workers > 0 else False,
+        # "spawn" avoids inheriting CUDA's locked mutexes from the parent process.
+        # fork-after-CUDA-init deadlocks worker processes on Linux (the default).
+        multiprocessing_context="spawn" if dcfg.num_workers > 0 else None,
         collate_fn=collate_fixed,
         drop_last=True,
         shuffle=True,
@@ -391,7 +408,7 @@ def main() -> None:
     accum_stats: Dict[str, torch.Tensor] = {}
 
     train_it = iter(train_dl)
-    while step < max_steps:
+    while step < max_steps and not _shutdown:
         optimizer.zero_grad(set_to_none=True)
 
         total_loss = torch.tensor(0.0, device=device)
