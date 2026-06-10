@@ -63,13 +63,52 @@ def run_all_probes(
     if not config_path:
         raise ValueError("exp_cfg must have resolved_config_path set before passing to run_all_probes")
 
-    # Emotion (requires train_manifest/dev_manifest not yet in schema — skip until re-enabled)
-    if exp_cfg.eval.emotion.enabled:
-        print(f"[Eval Step {step}] Emotion probe enabled but manifests not in schema; skipping.", flush=True)
+    # Utterance-level probes (gender / emotion). The pydantic schema currently
+    # only declares `enabled` on EmotionCfg/GenderCfg; the remaining fields are
+    # read via getattr so the probes activate automatically once
+    # train_manifest/dev_manifest (and optionally label_key/steps/batch_size/
+    # segment_seconds) are added to the schema.
+    def _run_utt_probe(name: str, module: str, pcfg: Any, key: str, default_steps: int) -> None:
+        train_manifest = getattr(pcfg, "train_manifest", None)
+        dev_manifest = getattr(pcfg, "dev_manifest", None)
+        if not train_manifest or not dev_manifest:
+            print(f"[Eval Step {step}] {name} probe enabled but eval.{key}.train_manifest/"
+                  f"dev_manifest are not set (missing from utils/schema.py?); skipping.", flush=True)
+            return
+        out = out_dir / f"{key}.json"
+        cmd = [
+            python_bin,
+            "-m",
+            module,
+            "--config",
+            config_path,
+            "--ckpt",
+            ckpt_path,
+            "--train_manifest",
+            str(train_manifest),
+            "--dev_manifest",
+            str(dev_manifest),
+            "--label_key",
+            str(getattr(pcfg, "label_key", key)),
+            "--steps",
+            str(int(getattr(pcfg, "steps", default_steps))),
+            "--batch_size",
+            str(int(getattr(pcfg, "batch_size", 64))),
+            "--out",
+            str(out),
+        ]
+        seg = getattr(pcfg, "segment_seconds", None)
+        if seg is not None:
+            cmd.extend(["--segment_seconds", str(seg)])
+        ok = _run(f"{name} Probe", cmd)
+        if ok and out.exists():
+            results[key] = json.loads(out.read_text())
 
-    # Gender (same caveat as emotion)
+    if exp_cfg.eval.emotion.enabled:
+        _run_utt_probe("Emotion", "eval.eval_emotion", exp_cfg.eval.emotion, "emotion", 2000)
+
     if exp_cfg.eval.gender.enabled:
-        print(f"[Eval Step {step}] Gender probe enabled but manifests not in schema; skipping.", flush=True)
+        _run_utt_probe("Gender", "eval.eval_gender", exp_cfg.eval.gender, "gender", 1500)
 
     # ASR
     if exp_cfg.eval.asr.enabled:
