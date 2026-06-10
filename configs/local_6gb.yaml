@@ -1,0 +1,144 @@
+# Local 6GB-VRAM config (~6M params). Recreated from the wandb-logged config of
+# the collapsed 8.2k-step run, with anti-collapse fixes applied (see comments).
+# CAUTION: this file supersedes the local_6gb.yaml already on the training PC —
+# pulling this branch will make these values canonical.
+
+run:
+  run_id: null                # if null, auto-generate
+  out_dir: runs
+  seed: 0
+  device: auto               # auto | cpu | cuda
+  amp: true
+  wandb:
+    enabled: true
+    project: "continuous-latent-ae"
+    name: null
+
+data:
+  sample_rate: 16000
+  segment_seconds: 2.5        # was 1.5: longer context for the continuous-audio-LM framing; makes JEPA prediction less local
+  train_manifest: "data/manifests/local_train.jsonl"
+  val_manifest: "data/manifests/local_val.jsonl"
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+aug:
+  wave_aug:
+    enabled: true
+    noise_prob: 0.5
+    noise_snr_min: 5.0
+    noise_snr_max: 25.0
+    lowpass_prob: 0.3
+    lowpass_min_freq: 2700.0    # was 2000: don't train invariance to the 2-3kHz+ timbre band gender/emotion probes need
+    lowpass_max_freq: 8000.0
+    gain_prob: 0.5
+    gain_min: 0.7
+    gain_max: 1.3
+    clip_prob: 0.1
+    clip_min: 0.5
+  wave_chunk_mask:
+    enabled: true
+    target_ratio: 0.25          # was 0.15: harder JEPA prediction task — 15% masking made shortcut solutions too easy
+    min_span_frames: 2
+    max_span_frames: 8
+
+model:
+  frontend:
+    channels: [16, 32, 48, 64, 64]
+    kernels:  [10, 8, 8, 4, 4]
+    strides:  [5, 4, 4, 4, 4]    # product=1280 -> 12.5Hz at 16k
+    groups: 8
+  encoder:
+    d_model: 64
+    n_layers: 3
+    num_heads: 2
+    feedforward_dim: 192        # 3x d_model
+    dropout: 0.1
+    cnn_module_kernel: 15
+    mhc:
+      enabled: false
+      num_streams: 2
+      start_layer: 2
+      period: 3
+      sinkhorn_iters: 10
+      tau: 0.05
+      dropout: 0.0
+      identity_mix: true
+      alpha_init: 0.01
+  decoder:
+    channels: 96
+    up_strides: [4, 4, 4, 4, 5]
+    up_kernels: [8, 8, 8, 8, 10]
+    res_blocks_per_up: 1
+    res_dilations: [1, 3, 9]
+    film_hidden: 16
+  projector:
+    # LeJEPA / LeWM projector: encoder out -> JEPA + SIGReg loss space.
+    # Decoder and downstream probes still read raw encoder output (hE).
+    hidden_dim: 256             # was 128: scaled with the wider output below
+    output_dim: 64              # was 32: must be >= d_model (64) — the 32-dim bottleneck hid half of z from every loss, letting those dims collapse
+    n_hidden_layers: 1
+
+loss:
+  stft_weight: 0.005
+  stft:
+    fft_sizes: [256, 512, 1024]
+    hop_ratio: 0.25
+    win_ratio: 1.0
+    center: true
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 1.0
+    mag_weight: 1.0
+    logmag_weight: 1.0
+  wav_l1_weight: 0.0
+  jepa:
+    weight: 3.0
+    num_globals: 2              # lightly-augmented anchor views (no waveform chunk mask)
+    num_locals: 4               # heavily-masked views (waveform chunk mask applied)
+    context_weight: 1.0         # V-JEPA 2.1: relative weight of L_context vs L_predict
+  sigreg:
+    weight: 0.2
+    num_slices: 256
+    t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
+    n_points: 17
+    z_weight: 0.02              # NEW: frame-level SIGReg directly on encoder z — anti-collapse pressure the projector can't filter out
+    utt_weight: 0.05            # NEW: SIGReg on time-pooled projector output — fights utterance-level collapse (pooled embeddings had ~zero variance)
+
+optim:
+  lr: 5.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-5          # was 1e-2: at this 6M-param scale it was deleting encoder dims that no loss constrained
+  scheduler:
+    warmup_steps: 2000
+    total_steps: 30000          # match train.max_steps
+    min_lr_ratio: 0.0
+  grad_clip: 1.0
+
+train:
+  batch_size: 64                # was 96: compensates for 2.5s segments to stay under 6GB (old run: 5.04GB at 96x1.5s; 64x2.5s is ~5.6GB est. — drop to 48 + grad_accum 2 if OOM)
+  grad_accum_steps: 1
+  max_steps: 30000
+  log_interval_steps: 10
+  eval_interval_steps: 5000
+  save_interval_steps: 10000
+  val_batches: null       # Evaluate on the entire validation set
+
+eval:
+  enabled: true
+  emotion:
+    enabled: true               # was false: utterance-level probes are the point — track them so collapse is visible during training
+  gender:
+    enabled: true               # was false: same — cheap probe, catches pooled-embedding collapse early
+  asr:
+    enabled: false
+    train_manifest: "data/manifests/asr_probe/train_asr.jsonl"
+    dev_manifest: "data/manifests/asr_probe/val_asr.jsonl"
+    text_key: text
+    steps: 8000                 # was 1000: probe was nowhere near converged, making ASR numbers uninformative
+    batch_size: 16
+    segment_seconds: 15.0
+    max_samples: 500
+    use_latent: false

@@ -2,6 +2,43 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-06-10
+
+**Anti-collapse change set after the 8,280-step local_6gb run rank-collapsed**
+(z_rank 3.62/64, z_rank_utt 0.54 — see `LAB_NOTEBOOK.md` for the diagnosis and
+`docs/EXPERIMENT_PLAN_2026_06_10.md` for the next-run plan). Root cause:
+SIGReg and JEPA both act on the 32-dim projector output, recon is weighted
+30× below JEPA, and AdamW wd 0.01 deletes the unconstrained encoder dims —
+"the projector absorbs the regularization". Edits land across several files in
+parallel; exact details are authoritative in the code:
+
+- **`train.py` / `utils/schema.py`**: two new SIGReg branches sharing the
+  existing `SIGReg` instance — frame-level on encoder z
+  (`loss.sigreg.z_weight`, logged as `l_sig_z`) and utterance-level on
+  time-pooled projector output (`loss.sigreg.utt_weight`, logged as
+  `l_sig_utt`). Eigenvalue clamp for the three `z_rank*` participation-ratio
+  metrics (near-zero covariance let `eigvalsh` return negative eigenvalues,
+  producing the impossible `z_rank_utt` 0.54).
+- **`configs/local_6gb.yaml` (new) + `configs/exp0.yaml`**: projector
+  `output_dim` raised to ≥ `d_model` (32→64 local, 64→192 exp0) with wider
+  hidden; `weight_decay` 1e-2→1e-5; chunk-mask `target_ratio` 0.15→0.25;
+  local config moves to 2.5 s segments at batch 64 (was 1.5 s × 96);
+  `lowpass_min_freq` raised to 2700 Hz (stop training invariance to the
+  timbre band gender/emotion probes need); gender/emotion probes enabled in
+  `local_6gb.yaml`; ASR probe `steps` 1000→8000.
+- **`eval/eval_asr.py`**: ×4 time-upsampling of 12.5 Hz features before the
+  char-CTC head (12.5 Hz vs ~8–15 Bengali chars/sec made most samples
+  CTC-infeasible; `zero_infinity=True` silently zeroed them — the probe
+  measured its own handicap), duration filtering (start-crop vs
+  full-transcript mismatch), infeasibility accounting, optional BiLSTM head.
+- **`eval/common.py` + gender/emotion probes**: utterance-level probes
+  hardened; pooled-embedding effective-rank gauge added to their output JSON.
+
+Old checkpoints are incompatible (projector shape changed) — restart from
+scratch. Note `docs/LOG_INTERPRETATION.md` healthy ranges were written for
+the d_model-192 setup and the old `l_sig = 0.5×(utt+frm)` definition; they
+are stale relative to this change set.
+
 ## 2026-02-01
 
 - Created this file because repo instructions reference `agents.md` as the issue log, but it did not exist yet.
