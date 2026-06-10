@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import time
 from typing import Any, Dict, List, Tuple
@@ -16,6 +17,74 @@ from eval.common import build_charset, greedy_decode_ctc, iter_frame_features, l
 
 def _encode(text: str, vocab: Dict[str, int]) -> List[int]:
     return [vocab[c] for c in text.lower() if c in vocab]
+
+
+def _min_ctc_frames(target: List[int]) -> int:
+    # CTC needs >= one input frame per label, plus one extra frame per adjacent
+    # repeated label (a blank must separate repeats).
+    return len(target) + sum(1 for a, b in zip(target, target[1:]) if a == b)
+
+
+def _filter_manifest_by_duration(
+    manifest: str, max_seconds: float, out_path: pathlib.Path, log_name: str
+) -> Tuple[str, int, int, int]:
+    """Write a filtered copy of `manifest`, dropping rows with duration > max_seconds.
+
+    Rationale: iter_frame_features start-crops audio to segment_seconds (see
+    _start_crop in data/dataset.py) while the probe keeps the FULL transcript as
+    CTC target, so utterances longer than the segment would train on misaligned
+    audio/text. Drop them before feature extraction.
+
+    Missing-duration policy: rows with a missing, non-numeric, or non-positive
+    `duration` (placeholders) are KEPT — we cannot prove they are too long, and
+    dropping them would empty manifests that simply lack durations — but they
+    are counted and reported so the user can audit them.
+
+    AudioDataset resolves relative audio_filepath against the manifest's parent
+    directory, so paths are absolutized before relocating the manifest next to
+    --out.
+    """
+    root = pathlib.Path(manifest).resolve().parent
+    kept = dropped = unknown = 0
+    out_lines: List[str] = []
+    with open(manifest, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            dur = row.get("duration")
+            if not isinstance(dur, (int, float)) or isinstance(dur, bool) or dur <= 0:
+                unknown += 1
+            elif dur > max_seconds:
+                dropped += 1
+                continue
+            p = row.get("audio_filepath")
+            if isinstance(p, str) and not os.path.isabs(p):
+                row["audio_filepath"] = str(root / p)
+            out_lines.append(json.dumps(row, ensure_ascii=False))
+            kept += 1
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(out_lines) + ("\n" if out_lines else ""), encoding="utf-8")
+    msg = f"  [ASR] {log_name}: kept {kept} rows, dropped {dropped} rows over {max_seconds:.1f}s"
+    if unknown:
+        msg += f" ({unknown} rows with missing/placeholder duration kept, unaudited)"
+    print(msg, flush=True)
+    return str(out_path), kept, dropped, unknown
+
+
+class _BiLSTMHead(nn.Module):
+    """Single bidirectional LSTM -> Linear. Stronger than the linear probe; use
+    only when probe purity is not the point."""
+
+    def __init__(self, dim: int, vocab_size: int, hidden: int = 256):
+        super().__init__()
+        self.lstm = nn.LSTM(dim, hidden, batch_first=True, bidirectional=True)
+        self.proj = nn.Linear(2 * hidden, vocab_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.lstm(x)
+        return self.proj(x)
 
 
 def _load_feats_and_text(
@@ -66,6 +135,12 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=16)
     ap.add_argument("--segment_seconds", type=float, default=None)
     ap.add_argument("--max_samples", type=int, default=0, help="Cap train/dev samples (0=unlimited)")
+    ap.add_argument("--upsample_factor", type=int, default=4,
+                    help="repeat_interleave features along time before the CTC head (1=off)")
+    ap.add_argument("--max_utt_seconds", type=float, default=None,
+                    help="Drop manifest rows longer than this (default: effective segment_seconds)")
+    ap.add_argument("--head", choices=["linear", "bilstm"], default="linear",
+                    help="Probe head: linear (pure probe) or bilstm (1x BiLSTM-256 -> Linear)")
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--out", required=True)
     ap.add_argument("overrides", nargs="*")
@@ -73,11 +148,23 @@ def main() -> None:
 
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
     seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.data.segment_seconds
+    max_utt = args.max_utt_seconds if args.max_utt_seconds is not None else seg
+    upf = max(1, int(args.upsample_factor))
+
+    # Drop utterances longer than max_utt BEFORE extraction: _start_crop would
+    # truncate their audio while the full transcript stays the CTC target.
+    out_path = pathlib.Path(args.out)
+    train_manifest, _, n_filtered_tr, n_unknown_tr = _filter_manifest_by_duration(
+        args.train_manifest, max_utt, out_path.with_suffix(".train_filtered.jsonl"), "Filter train"
+    )
+    dev_manifest, _, n_filtered_de, n_unknown_de = _filter_manifest_by_duration(
+        args.dev_manifest, max_utt, out_path.with_suffix(".dev_filtered.jsonl"), "Filter dev"
+    )
 
     if args.dry_run:
         feats_iter = iter_frame_features(
             lm,
-            args.train_manifest,
+            train_manifest,
             sample_rate=lm.cfg.data.sample_rate,
             segment_seconds=seg,
             batch_size=args.batch_size,
@@ -99,7 +186,7 @@ def main() -> None:
     print(f"  [ASR] Extracting train features{f' (max {max_s})' if max_s else ''}...", flush=True)
     feats_tr, text_tr = _load_feats_and_text(
         lm,
-        args.train_manifest,
+        train_manifest,
         text_key=args.text_key,
         batch_size=args.batch_size,
         segment_seconds=seg,
@@ -110,7 +197,7 @@ def main() -> None:
     print(f"  [ASR] Extracting dev features{f' (max {max_s})' if max_s else ''}...", flush=True)
     feats_de, text_de = _load_feats_and_text(
         lm,
-        args.dev_manifest,
+        dev_manifest,
         text_key=args.text_key,
         batch_size=args.batch_size,
         segment_seconds=seg,
@@ -140,11 +227,34 @@ def main() -> None:
 
     targets_tr = [torch.tensor(_encode(t, vocab), dtype=torch.long) for t in text_tr]
 
+    # Feasibility accounting: zero_infinity=True silently zeroes the loss of any
+    # sample whose (upsampled) input is shorter than its CTC-minimum target
+    # length — the user must SEE how many samples never contribute gradient.
+    def _count_infeasible(input_len: int, encoded: List[List[int]]) -> int:
+        return sum(1 for t in encoded if _min_ctc_frames(t) > input_len)
+
+    enc_tr = [t.tolist() for t in targets_tr]
+    enc_de = [_encode(t, vocab) for t in text_de]
+    n_inf_tr = _count_infeasible(feats_tr.size(1) * upf, enc_tr)
+    n_inf_de = _count_infeasible(feats_de.size(1) * upf, enc_de)
+    pct_inf_tr = 100.0 * n_inf_tr / max(1, len(enc_tr))
+    pct_inf_de = 100.0 * n_inf_de / max(1, len(enc_de))
+    if n_inf_tr or n_inf_de:
+        print(f"  [ASR] WARNING: CTC-infeasible samples at upsample x{upf} "
+              f"(input {feats_tr.size(1) * upf} frames): "
+              f"train {n_inf_tr}/{len(enc_tr)} ({pct_inf_tr:.1f}%), "
+              f"dev {n_inf_de}/{len(enc_de)} ({pct_inf_de:.1f}%). "
+              f"zero_infinity=True silently zeroes their training loss — "
+              f"consider a larger --upsample_factor.", flush=True)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Keep features on CPU — only move mini-batches to GPU during training
     # This is critical: feats_tr can be >1GB and would OOM on a 16GB card
 
-    head = nn.Linear(feats_tr.size(-1), len(charset)).to(device)
+    if args.head == "bilstm":
+        head: nn.Module = _BiLSTMHead(feats_tr.size(-1), len(charset)).to(device)
+    else:
+        head = nn.Linear(feats_tr.size(-1), len(charset)).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
     ctc = nn.CTCLoss(blank=0, zero_infinity=True)
     use_amp = device.type == "cuda"
@@ -157,6 +267,14 @@ def main() -> None:
     for step_i in range(args.steps):
         idx = torch.randint(0, n, (args.batch_size,))
         xb = feats_tr[idx].to(device)  # (B,T,D) — only batch on GPU
+        # Time-upsampling: at ~12.5 Hz frames, Bengali transcripts (~8-15
+        # chars/s) routinely EXCEED the CTC input length, making alignment
+        # infeasible. repeat_interleave adds no information (honest probe);
+        # it only gives CTC enough timesteps to emit every character. Done
+        # per-batch on GPU: x4 quadruples per-batch head memory, fine for a
+        # linear head, while stored features stay compact on CPU.
+        if upf > 1:
+            xb = xb.repeat_interleave(upf, dim=1)
         with torch.amp.autocast("cuda", enabled=use_amp):
             logits = head(xb)
         log_probs = logits.float().log_softmax(dim=-1)  # (B,T,V), CTC in fp32
@@ -179,10 +297,17 @@ def main() -> None:
     def _eval(feats: torch.Tensor, texts: List[str], eval_batch: int = 256) -> Dict[str, Any]:
         head.eval()
         all_hyp: List[str] = []
+        # Upsampling multiplies frames per sample, so shrink the eval batch to
+        # keep the same GPU memory envelope.
+        eval_batch = max(1, eval_batch // upf)
         with torch.no_grad():
             # Batch the eval to avoid OOM on large feature tensors
             for start in range(0, feats.size(0), eval_batch):
                 chunk = feats[start : start + eval_batch].to(device)
+                if upf > 1:
+                    # Same time-upsampling as training — the head was trained
+                    # on upsampled inputs.
+                    chunk = chunk.repeat_interleave(upf, dim=1)
                 lp = head(chunk).log_softmax(dim=-1)
                 all_hyp.extend(greedy_decode_ctc(lp, id2ch))
         w = wer(texts, all_hyp)
@@ -197,6 +322,17 @@ def main() -> None:
         "dev": _eval(feats_de, text_de),
         "vocab_size": len(charset),
         "use_latent": bool(args.use_latent),
+        "upsample_factor": upf,
+        "max_utt_seconds": float(max_utt),
+        "head": args.head,
+        "n_filtered_train": n_filtered_tr,
+        "n_filtered_dev": n_filtered_de,
+        "n_unknown_duration_train": n_unknown_tr,
+        "n_unknown_duration_dev": n_unknown_de,
+        "n_infeasible": n_inf_tr,
+        "pct_infeasible": pct_inf_tr,
+        "n_infeasible_dev": n_inf_de,
+        "pct_infeasible_dev": pct_inf_de,
     }
     print(f"  [ASR] Train WER: {out['train']['wer']:.4f}, Dev WER: {out['dev']['wer']:.4f}", flush=True)
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
