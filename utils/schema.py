@@ -134,6 +134,8 @@ class JEPACfg(_Base):
 
 class SIGRegCfg(_Base):
     weight: float = 0.05
+    z_weight: float = 0.0      # frame-level SIGReg on encoder z (0 = off)
+    utt_weight: float = 0.0    # utterance-level SIGReg on pooled p (0 = off)
     num_slices: int = 1024
     t_max: float = 5.0
     n_points: int = 17
@@ -174,10 +176,22 @@ class TrainCfg(_Base):
 
 class EmotionCfg(_Base):
     enabled: bool = False
+    train_manifest: Optional[str] = None
+    dev_manifest: Optional[str] = None
+    label_key: str = "emotion"
+    steps: int = 2000
+    batch_size: int = 64
+    segment_seconds: Optional[float] = None
 
 
 class GenderCfg(_Base):
     enabled: bool = False
+    train_manifest: Optional[str] = None
+    dev_manifest: Optional[str] = None
+    label_key: str = "gender"
+    steps: int = 1500
+    batch_size: int = 64
+    segment_seconds: Optional[float] = None
 
 
 class AsrCfg(_Base):

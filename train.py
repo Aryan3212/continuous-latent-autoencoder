@@ -332,6 +332,8 @@ def main() -> None:
     if num_globals < 1 or num_locals < 1:
         raise ValueError(f"loss.jepa.num_globals and num_locals must both be >= 1; got G={num_globals}, L={num_locals}")
     sig_w = cfg.loss.sigreg.weight
+    sig_z_w = cfg.loss.sigreg.z_weight
+    sig_utt_w = cfg.loss.sigreg.utt_weight
     stft_w = cfg.loss.stft_weight
     wav_l1_w = cfg.loss.wav_l1_weight
 
@@ -472,19 +474,43 @@ def main() -> None:
                     distance_weight=True,
                 )
 
-                # ---- SIGReg (LeWM-style, frame-level only, on projector out) ---
-                # Reshape p_cat (V*B, P, T') -> (T'*V*B, P) so SIGReg treats each
-                # (frame, view, sample) triple as an independent point. Paper
-                # N-scaling is left to SIGReg itself; no extra /N rescaling here.
+                # ---- SIGReg (LeWM-style, on projector out + encoder z) ---------
+                # Frame-level on p: reshape p_cat (V*B, P, T') -> (T'*V*B, P) so
+                # SIGReg treats each (frame, view, sample) triple as an
+                # independent point. Paper N-scaling is left to SIGReg itself;
+                # no extra /N rescaling here.
                 D_lat = p_cat.size(1)
                 sig_input = p_cat.permute(2, 0, 1)                # (T', V*B, P)
                 l_sig, sig_stats_last = sigreg(
                     sig_input.reshape(-1, D_lat),                 # (T'*V*B, P)
                     step=step,
                 )
+                # Frame-level on z: the projector bottleneck hides encoder dims
+                # from every post-projector loss, so anti-collapse pressure must
+                # also act on z directly. SlicingUnivariateTest sizes its slice
+                # matrix from x.size(-1), so the shared instance handles D != P.
+                if sig_z_w > 0:
+                    z_sig_input = z_cat.permute(2, 0, 1)          # (T', V*B, D)
+                    l_sig_z, _ = sigreg(
+                        z_sig_input.reshape(-1, z_cat.size(1)),   # (T'*V*B, D)
+                        step=step,
+                    )
+                else:
+                    l_sig_z = torch.tensor(0.0, device=device)
+                # Utterance-level on p: mean-pool over T' so pooled embeddings
+                # (gender/emotion/accent probes) can't collapse to a single
+                # point while per-frame stats stay healthy.
+                if sig_utt_w > 0:
+                    l_sig_utt, _ = sigreg(
+                        p_cat.mean(dim=2),                        # (V*B, P)
+                        step=step,
+                    )
+                else:
+                    l_sig_utt = torch.tensor(0.0, device=device)
                 sig_stats = {
                     "sigreg_view": l_sig.detach(),
-                    "l_sig_utt": torch.tensor(0.0, device=device),
+                    "l_sig_utt": l_sig_utt.detach(),
+                    "l_sig_z": l_sig_z.detach(),
                     "l_sig_frm": l_sig.detach(),
                     "l_jepa_predict": l_jepa_pred_dbg,
                     "l_jepa_context": l_jepa_ctx_dbg,
@@ -519,6 +545,8 @@ def main() -> None:
                     + wav_l1_w * l_wav
                     + jepa_w * l_jepa
                     + sig_w * l_sig
+                    + sig_z_w * l_sig_z
+                    + sig_utt_w * l_sig_utt
                 )
                 loss = loss / grad_accum
 
@@ -534,19 +562,22 @@ def main() -> None:
                     z_flat = z_a.permute(0, 2, 1).reshape(-1, z_a.size(1))
                     z_centered = z_flat - z_flat.mean(dim=0)
                     z_cov = (z_centered.T @ z_centered) / (z_flat.size(0) - 1)
-                    z_eigvals = torch.linalg.eigvalsh(z_cov)
+                    # clamp_min(0): eigvalsh can emit tiny negative eigenvalues on
+                    # near-singular covariances, which pushes the participation
+                    # ratio below its true floor of 1.
+                    z_eigvals = torch.linalg.eigvalsh(z_cov).clamp_min(0)
                     z_rank = (z_eigvals.sum()**2) / (z_eigvals.pow(2).sum() + 1e-8)
 
                     z_utt = z_a.mean(dim=2)
                     z_utt_c = z_utt - z_utt.mean(dim=0)
                     z_utt_cov = (z_utt_c.T @ z_utt_c) / max(z_utt.size(0) - 1, 1)
-                    z_utt_eig = torch.linalg.eigvalsh(z_utt_cov)
+                    z_utt_eig = torch.linalg.eigvalsh(z_utt_cov).clamp_min(0)
                     z_rank_utt = (z_utt_eig.sum()**2) / (z_utt_eig.pow(2).sum() + 1e-8)
 
                     z_res = z_a - z_a.mean(dim=2, keepdim=True)
                     z_res_flat = z_res.permute(0, 2, 1).reshape(-1, z_a.size(1))
                     z_res_cov = (z_res_flat.T @ z_res_flat) / max(z_res_flat.size(0) - 1, 1)
-                    z_res_eig = torch.linalg.eigvalsh(z_res_cov)
+                    z_res_eig = torch.linalg.eigvalsh(z_res_cov).clamp_min(0)
                     z_rank_res = (z_res_eig.sum()**2) / (z_res_eig.pow(2).sum() + 1e-8)
                 else:
                     z_rank = torch.tensor(0.0, device=z_a.device)
