@@ -2,6 +2,52 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-06-11
+
+**Simplification pass: dead-code removal, config unification, doc consolidation**
+(`simplification` branch). No model/loss math changed — external module
+interfaces are unchanged.
+
+- **Config unification**: deleted all mirror `@dataclass` configs (Frontend,
+  Encoder, MHC, Decoder, Projector, SIGReg, MultiResSTFT, WaveAug,
+  WaveChunkMask); modules now take the pydantic `*Cfg` classes from
+  `utils/schema.py` directly — single source of truth. `DatasetConfig` in
+  `data/dataset.py` kept (runtime object, not YAML-mirrored).
+- **Encoder stack**: removed dead `key_padding_mask` plumbing and the
+  Zipformer-era compat args (`pos_emb`/`chunk_size`/`attn_mask`); internal
+  layout standardized to `(B, T, D)` (mHC residuals `(S, B, T, D)`). mHC kept
+  for an upcoming on/off ablation.
+- **`models/sigreg.py`**: removed DDP helpers (single-GPU project);
+  `SIGReg.forward` now returns a bare scalar (the stats dict was always
+  discarded).
+- **`losses/multires_stft.py`**: removed unused `mask` / `target_mags` params.
+- **`train.py`**: validation computes `val_stft` only (`val_sig` removed —
+  not train-comparable, redundant with training-side gauges); val
+  dataset/dataloader built once at startup; one-line guard noting
+  `l_global ≡ 0` when `num_globals == 1`.
+- **Removed the dead `use_latent` thread** end-to-end (`eval_asr`,
+  `eval/common`, `run_probes`, `AsrCfg`, both configs).
+- **`eval/run_probes.py`**: stale getattr-defensive block replaced with
+  direct schema attribute access.
+- **Deleted dead code**: `optim/` (empty package), `clae_data/wandb_setup.py`,
+  `validate_record` in `clae_data/schema.py`, `sweep.yaml` + `sweep_fast.yaml`,
+  `scripts/{memory_test,reconstruct_sample,count_params}.py`,
+  `eval/extract_embeddings.py` + `iter_embeddings` in `eval/common.py`, the
+  tracked `wandb/` dir and generated `.static-analysis` reports (configs kept).
+  `.gitignore` additions: `wandb/`, `.cache_ggshield`, `.ruff_cache/`.
+- **`reference-implementations/` slimmed**: full vendored repos (`vjepa2`,
+  `RAE-main`, `le-wm`) moved out of the repo to
+  `../reference-implementations-archive`; single-file refs +
+  `*-REIMPLEMENTATION_NOTES` + a new README remain in-tree.
+- **Doc consolidation**: deleted `COMMANDS.md` (folded into README's "Running
+  things"), `SIMPLIFICATION_PLAN.md` (open decisions → `LAB_NOTEBOOK.md`),
+  `DATASET_PIPELINE_PLAN.md` (key-purge procedure inlined into README's
+  credentials notice; how-to already in README), and `HISTORICAL_CHANGES.md` +
+  `RESEARCH_SUMMARY_2026_04_21.md` (superseded history, kept in git). Rewrote
+  `CODEBASE.md` to match the current tree; surgical README fixes (folder guide,
+  removed `calm_like_exp0.yaml` refs, corrected the "Notes" claim that removed
+  experimental paths were still config toggles).
+
 ## 2026-06-10
 
 **Anti-collapse change set after the 8,280-step local_6gb run rank-collapsed**

@@ -15,20 +15,18 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 
 from data.augment import (
-    WaveAugConfig,
-    WaveChunkMaskConfig,
     apply_waveform_augment,
     apply_waveform_chunk_mask,
     make_frame_chunk_masks,
 )
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
-from models.decoder_generator import DecoderConfig, WaveformDecoder
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
+from losses.multires_stft import MultiResSTFTLoss
+from models.decoder_generator import WaveformDecoder
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
 from models.mhc import sinkhorn_log
-from models.projector import Projector, ProjectorConfig
-from models.sigreg import SIGReg, SIGRegConfig
+from models.projector import Projector
+from models.sigreg import SIGReg
 from utils.checkpoint import save_checkpoint, save_run_metadata, try_git_hash
 from utils.config import apply_overrides, load_config
 from utils.logging import JsonlLogger, maybe_init_wandb
@@ -76,6 +74,7 @@ def _global_local_jepa_loss(
 
     # Cross-global consistency: pull each global to the anchor on every frame.
     err_g = (p_g - center).pow(2).mean(dim=2)       # (G, B, T)
+    # Identically zero when num_globals == 1: the center IS the single global.
     l_global = err_g.mean()
 
     # Locals: predict + context against the globals-only center.
@@ -211,20 +210,37 @@ def main() -> None:
         shuffle=True,
     )
 
+    val_dl = None
+    if dcfg.val_manifest:
+        val_ds = AudioDataset(
+            DatasetConfig(
+                manifest=dcfg.val_manifest,
+                sample_rate=dcfg.sample_rate,
+                segment_seconds=dcfg.segment_seconds,
+                random_crop=False,
+            )
+        )
+        val_dl = torch.utils.data.DataLoader(
+            val_ds,
+            batch_size=cfg.train.batch_size,
+            num_workers=0,
+            collate_fn=collate_fixed,
+            drop_last=True,
+        )
+
     # Model
     mcfg = cfg.model
-    frontend = ConvFrontend(FrontendConfig(**mcfg.frontend.model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg.encoder.model_dump()))
+    frontend = ConvFrontend(mcfg.frontend)
+    encoder = Encoder(frontend.out_channels, mcfg.encoder)
 
     latent_dim = mcfg.encoder.d_model
 
-    decoder = WaveformDecoder(latent_dim, DecoderConfig(**mcfg.decoder.model_dump()))
+    decoder = WaveformDecoder(latent_dim, mcfg.decoder)
 
-    projector = Projector(latent_dim, ProjectorConfig(**mcfg.projector.model_dump()))
+    projector = Projector(latent_dim, mcfg.projector)
     proj_dim = projector.output_dim
 
-    sreg = cfg.loss.sigreg
-    sigreg = SIGReg(proj_dim, SIGRegConfig(num_slices=sreg.num_slices, t_max=sreg.t_max, n_points=sreg.n_points))
+    sigreg = SIGReg(proj_dim, cfg.loss.sigreg)
 
     model = torch.nn.ModuleDict(
         {
@@ -237,9 +253,9 @@ def main() -> None:
     ).to(device)
 
     # Losses
-    stft = MultiResSTFTLoss(MultiResSTFTConfig(**cfg.loss.stft.model_dump())).to(device)
-    wave_aug_cfg = WaveAugConfig(**cfg.aug.wave_aug.model_dump())
-    wave_chunk_mask_cfg = WaveChunkMaskConfig(**cfg.aug.wave_chunk_mask.model_dump())
+    stft = MultiResSTFTLoss(cfg.loss.stft).to(device)
+    wave_aug_cfg = cfg.aug.wave_aug
+    wave_chunk_mask_cfg = cfg.aug.wave_chunk_mask
 
     # Frontend stride product gives samples-per-output-frame. Used to convert
     # frame-level chunk masks (local-view recipe) into waveform sample masks.
@@ -322,44 +338,18 @@ def main() -> None:
     lam_context_w = jcfg.context_weight
 
     def _validate_one() -> Dict[str, float]:
-        if not dcfg.val_manifest:
+        if val_dl is None:
             return {}
-        val_ds = AudioDataset(
-            DatasetConfig(
-                manifest=dcfg.val_manifest,
-                sample_rate=dcfg.sample_rate,
-                segment_seconds=dcfg.segment_seconds,
-                random_crop=False,
-            )
-        )
-        val_dl = torch.utils.data.DataLoader(
-            val_ds,
-            batch_size=cfg.train.batch_size,
-            num_workers=0,
-            collate_fn=collate_fixed,
-            drop_last=True,
-        )
         model.eval()
-        sums = {
-            "val_stft": torch.tensor(0.0, device=device),
-            "val_sig": torch.tensor(0.0, device=device),
-        }
+        sums = {"val_stft": torch.tensor(0.0, device=device)}
         n = 0
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for vb in val_dl:
                 vw = vb["wav"].to(device)
                 z = model["encoder"](model["frontend"](vw))
-                p_clean = model["projector"](z)
-                def _flatten(t: torch.Tensor) -> torch.Tensor:
-                    return t.permute(0, 2, 1).reshape(-1, t.size(1))
-                fp = _flatten(p_clean)
-                # NB: no /N here — the Epps-Pulley statistic is already
-                # N-scaled (O(1) under the null), so this is train-comparable.
-                v_sig_f, _ = sigreg(fp, step=step)
                 xh = _decode(model, z, target_len=vw.size(-1))
                 v_stft, _ = stft(xh, vw)
                 sums["val_stft"] += v_stft.detach()
-                sums["val_sig"] += v_sig_f.detach()
                 n += 1
                 if val_batches is not None and n >= val_batches:
                     break
@@ -455,7 +445,7 @@ def main() -> None:
                 # no extra /N rescaling here.
                 D_lat = p_cat.size(1)
                 sig_input = p_cat.permute(2, 0, 1)                # (T', V*B, P)
-                l_sig, _ = sigreg(
+                l_sig = sigreg(
                     sig_input.reshape(-1, D_lat),                 # (T'*V*B, P)
                     step=step,
                 )

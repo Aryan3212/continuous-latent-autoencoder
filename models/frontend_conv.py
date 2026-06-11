@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import List
 
 import torch
 import torch.nn as nn
 
-
-@dataclass
-class FrontendConfig:
-    channels: List[int]
-    kernels: List[int]
-    strides: List[int]
-    groups: int = 8
+from utils.schema import FrontendCfg
 
 
 class ConvFrontend(nn.Module):
@@ -21,7 +14,7 @@ class ConvFrontend(nn.Module):
       x: (B, 1, T) -> h0: (B, C, T')
     """
 
-    def __init__(self, cfg: FrontendConfig):
+    def __init__(self, cfg: FrontendCfg):
         super().__init__()
         assert len(cfg.channels) == len(cfg.kernels) == len(cfg.strides)
         layers: List[nn.Module] = []

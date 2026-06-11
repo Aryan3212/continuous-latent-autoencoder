@@ -1,29 +1,13 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from models.conformer import ConformerLayer
-from models.mhc import MHCConfig, MHCWrapper
-
-
-@dataclass
-class EncoderConfig:
-    d_model: int = 256
-    n_layers: int = 6
-    num_heads: int = 4
-    feedforward_dim: int = 512
-    dropout: float = 0.1
-    cnn_module_kernel: int = 31
-    mhc: MHCConfig = field(default_factory=MHCConfig)
-
-    def __post_init__(self) -> None:
-        if isinstance(self.mhc, dict):
-            self.mhc = MHCConfig(**self.mhc)
+from models.mhc import MHCWrapper
+from utils.schema import EncoderCfg
 
 
 class Encoder(nn.Module):
@@ -32,7 +16,7 @@ class Encoder(nn.Module):
     Input:  h0 (B, C, T')  -> Output: hE (B, D, T').
     """
 
-    def __init__(self, in_channels: int, cfg: EncoderConfig):
+    def __init__(self, in_channels: int, cfg: EncoderCfg):
         super().__init__()
         self.cfg = cfg
         self.in_proj = nn.Conv1d(in_channels, cfg.d_model, kernel_size=1)
@@ -74,15 +58,12 @@ class Encoder(nn.Module):
             else:
                 self.mhc_wrappers.append(nn.Identity())
 
-    def forward(self, h0: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, h0: torch.Tensor) -> torch.Tensor:
         if h0.dim() != 3:
             raise ValueError(f"Expected h0 as (B,C,T'), got {tuple(h0.shape)}")
         x = self.in_proj(h0).transpose(1, 2)                 # (B, T', D)
-        x = x.transpose(0, 1)                                 # (T', B, D)
 
         residuals: torch.Tensor = x
-        if key_padding_mask is not None and key_padding_mask.dim() != 2:
-            raise ValueError(f"Expected key_padding_mask as (B,T'), got {tuple(key_padding_mask.shape)}")
 
         mhc_active = self._use_mhc
         streams = int(self.mhc_cfg.num_streams)
@@ -92,52 +73,20 @@ class Encoder(nn.Module):
             if use_mhc:
                 if residuals.dim() == 3:
                     residuals = residuals.unsqueeze(0).expand(streams, -1, -1, -1)
-                residuals = self.mhc_wrappers[i](
-                    residuals,
-                    pos_emb=None,
-                    chunk_size=-1,
-                    attn_mask=None,
-                    src_key_padding_mask=key_padding_mask,
-                )
+                residuals = self.mhc_wrappers[i](residuals)
             else:
                 if mhc_active and residuals.dim() == 4:
-                    residuals = self._apply_per_stream(
-                        residuals, layer, key_padding_mask=key_padding_mask
-                    )
+                    residuals = self._apply_per_stream(residuals, layer)
                 else:
-                    residuals = layer(
-                        residuals,
-                        pos_emb=None,
-                        chunk_size=-1,
-                        attn_mask=None,
-                        src_key_padding_mask=key_padding_mask,
-                    )
+                    residuals = layer(residuals)
 
         if residuals.dim() == 4:
             residuals = residuals.sum(dim=0)
 
-        x = residuals.transpose(0, 1).transpose(1, 2)         # (B, D, T')
+        x = residuals.transpose(1, 2)                         # (B, D, T')
         return x
 
-    def _apply_per_stream(
-        self,
-        residuals: torch.Tensor,
-        layer: nn.Module,
-        *,
-        key_padding_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        streams, seq_len, batch, dim = residuals.shape
-        flat = residuals.permute(1, 2, 0, 3).reshape(seq_len, batch * streams, dim)
-        if key_padding_mask is not None:
-            flat_mask = key_padding_mask.repeat_interleave(streams, dim=0)
-        else:
-            flat_mask = None
-        out = layer(
-            flat,
-            pos_emb=None,
-            chunk_size=-1,
-            attn_mask=None,
-            src_key_padding_mask=flat_mask,
-        )
-        out = out.reshape(seq_len, batch, streams, dim).permute(2, 0, 1, 3)
-        return out
+    def _apply_per_stream(self, residuals: torch.Tensor, layer: nn.Module) -> torch.Tensor:
+        streams, batch, seq_len, dim = residuals.shape
+        out = layer(residuals.reshape(streams * batch, seq_len, dim))
+        return out.reshape(streams, batch, seq_len, dim)

@@ -1,27 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Tuple
-
 import torch
 import torch.nn as nn
-from torch import distributed as dist
 
-
-def _all_reduce_avg(x: torch.Tensor) -> torch.Tensor:
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(x, op=dist.ReduceOp.AVG)
-    return x
-
-
-def _world_size() -> int:
-    if dist.is_available() and dist.is_initialized():
-        return dist.get_world_size()
-    return 1
+from utils.schema import SIGRegCfg
 
 
 class EppsPulley(nn.Module):
-    """Algorithm 1 univariate test, paper-faithful (symmetric grid, DDP-aware N)."""
+    """Algorithm 1 univariate test, paper-faithful (symmetric grid)."""
 
     def __init__(self, t_max: float = 5.0, n_points: int = 17):
         super().__init__()
@@ -39,18 +25,17 @@ class EppsPulley(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (..., N, M)
-        n_local = x.size(-2)
-        n_global = n_local * _world_size()
+        n_global = x.size(-2)
         x_t = x.unsqueeze(-1) * self.t
-        cos_mean = _all_reduce_avg(torch.cos(x_t).mean(-3))
-        sin_mean = _all_reduce_avg(torch.sin(x_t).mean(-3))
+        cos_mean = torch.cos(x_t).mean(-3)
+        sin_mean = torch.sin(x_t).mean(-3)
         err = (cos_mean - self.phi).square() + sin_mean.square()
         return (err @ self.weights) * n_global
 
 
 class SlicingUnivariateTest(nn.Module):
-    """Algorithm 1 slicing wrapper. Seeded by the training step for DDP sync
-    and resume-reproducibility (no hidden internal counter)."""
+    """Algorithm 1 slicing wrapper. Seeded by the training step for
+    resume-reproducibility (no hidden internal counter)."""
 
     def __init__(self, univariate_test: nn.Module, num_slices: int = 256):
         super().__init__()
@@ -78,17 +63,10 @@ class SlicingUnivariateTest(nn.Module):
         return stats.mean()
 
 
-@dataclass
-class SIGRegConfig:
-    num_slices: int = 256
-    t_max: float = 5.0
-    n_points: int = 17
-
-
 class SIGReg(nn.Module):
-    """Paper-faithful SIGReg (Algorithm 1). Input: (N, D). Output: scalar + stats."""
+    """Paper-faithful SIGReg (Algorithm 1). Input: (N, D). Output: scalar."""
 
-    def __init__(self, dim: int, cfg: SIGRegConfig):
+    def __init__(self, dim: int, cfg: SIGRegCfg):
         super().__init__()
         self.dim = dim
         self.cfg = cfg
@@ -98,18 +76,8 @@ class SIGReg(nn.Module):
             num_slices=cfg.num_slices,
         )
 
-    def forward(self, z: torch.Tensor, step: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def forward(self, z: torch.Tensor, step: int) -> torch.Tensor:
         if z.dim() != 2:
             raise ValueError(f"Expected z as (N, D), got {tuple(z.shape)}")
 
-        loss = self.test(z, step=step)
-
-        with torch.no_grad():
-            var = z.var(dim=0, unbiased=False)  # (D,)
-            stats = {
-                "sigreg_loss": loss.detach(),
-                "z_var_min": var.min(),
-                "z_var_med": var.median(),
-                "z_var_max": var.max(),
-            }
-        return loss, stats
+        return self.test(z, step=step)

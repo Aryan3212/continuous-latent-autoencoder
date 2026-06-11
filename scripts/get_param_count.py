@@ -1,8 +1,8 @@
 import torch
-from models.frontend_conv import ConvFrontend, FrontendConfig
-from models.encoder import Encoder, EncoderConfig
-from models.decoder_generator import WaveformDecoder, DecoderConfig
-from models.projector import Projector, ProjectorConfig
+from models.frontend_conv import ConvFrontend
+from models.encoder import Encoder
+from models.decoder_generator import WaveformDecoder
+from models.projector import Projector
 from utils.config import load_config
 
 def count_parameters(model):
@@ -11,11 +11,11 @@ def count_parameters(model):
 def main():
     cfg = load_config("configs/exp0.yaml")
 
-    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     latent_dim = cfg.model.encoder.d_model
-    decoder = WaveformDecoder(latent_dim, DecoderConfig(**cfg.model.decoder.model_dump()))
-    projector = Projector(latent_dim, ProjectorConfig(**cfg.model.projector.model_dump()))
+    decoder = WaveformDecoder(latent_dim, cfg.model.decoder)
+    projector = Projector(latent_dim, cfg.model.projector)
 
     f_params = count_parameters(frontend)
     e_params = count_parameters(encoder)

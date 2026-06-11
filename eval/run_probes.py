@@ -63,17 +63,11 @@ def run_all_probes(
     if not config_path:
         raise ValueError("exp_cfg must have resolved_config_path set before passing to run_all_probes")
 
-    # Utterance-level probes (gender / emotion). The pydantic schema currently
-    # only declares `enabled` on EmotionCfg/GenderCfg; the remaining fields are
-    # read via getattr so the probes activate automatically once
-    # train_manifest/dev_manifest (and optionally label_key/steps/batch_size/
-    # segment_seconds) are added to the schema.
-    def _run_utt_probe(name: str, module: str, pcfg: Any, key: str, default_steps: int) -> None:
-        train_manifest = getattr(pcfg, "train_manifest", None)
-        dev_manifest = getattr(pcfg, "dev_manifest", None)
-        if not train_manifest or not dev_manifest:
+    # Utterance-level probes (gender / emotion).
+    def _run_utt_probe(name: str, module: str, pcfg: Any, key: str) -> None:
+        if not pcfg.train_manifest or not pcfg.dev_manifest:
             print(f"[Eval Step {step}] {name} probe enabled but eval.{key}.train_manifest/"
-                  f"dev_manifest are not set (missing from utils/schema.py?); skipping.", flush=True)
+                  f"dev_manifest are not set; skipping.", flush=True)
             return
         out = out_dir / f"{key}.json"
         cmd = [
@@ -85,19 +79,19 @@ def run_all_probes(
             "--ckpt",
             ckpt_path,
             "--train_manifest",
-            str(train_manifest),
+            str(pcfg.train_manifest),
             "--dev_manifest",
-            str(dev_manifest),
+            str(pcfg.dev_manifest),
             "--label_key",
-            str(getattr(pcfg, "label_key", key)),
+            str(pcfg.label_key),
             "--steps",
-            str(int(getattr(pcfg, "steps", default_steps))),
+            str(int(pcfg.steps)),
             "--batch_size",
-            str(int(getattr(pcfg, "batch_size", 64))),
+            str(int(pcfg.batch_size)),
             "--out",
             str(out),
         ]
-        seg = getattr(pcfg, "segment_seconds", None)
+        seg = pcfg.segment_seconds
         if seg is not None:
             cmd.extend(["--segment_seconds", str(seg)])
         ok = _run(f"{name} Probe", cmd)
@@ -105,10 +99,10 @@ def run_all_probes(
             results[key] = json.loads(out.read_text())
 
     if exp_cfg.eval.emotion.enabled:
-        _run_utt_probe("Emotion", "eval.eval_emotion", exp_cfg.eval.emotion, "emotion", 2000)
+        _run_utt_probe("Emotion", "eval.eval_emotion", exp_cfg.eval.emotion, "emotion")
 
     if exp_cfg.eval.gender.enabled:
-        _run_utt_probe("Gender", "eval.eval_gender", exp_cfg.eval.gender, "gender", 1500)
+        _run_utt_probe("Gender", "eval.eval_gender", exp_cfg.eval.gender, "gender")
 
     # ASR
     if exp_cfg.eval.asr.enabled:
@@ -139,8 +133,6 @@ def run_all_probes(
         ]
         if asr.max_samples:
             cmd.extend(["--max_samples", str(asr.max_samples)])
-        if asr.use_latent:
-            cmd.append("--use_latent")
         ok = _run("ASR Probe", cmd)
         if ok and out.exists():
             results["asr"] = json.loads(out.read_text())

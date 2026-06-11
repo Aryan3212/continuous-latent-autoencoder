@@ -1,10 +1,11 @@
 import torch
 
-from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
+from losses.multires_stft import MultiResSTFTLoss
+from utils.schema import STFTCfg
 
 
 def test_multires_stft_zero_on_identical():
-    cfg = MultiResSTFTConfig(fft_sizes=[64, 128], hop_ratio=0.25, win_ratio=1.0)
+    cfg = STFTCfg(fft_sizes=[64, 128], hop_ratio=0.25, win_ratio=1.0)
     loss_fn = MultiResSTFTLoss(cfg)
     x = torch.randn(2, 1, 256)
     loss, _ = loss_fn(x, x)
@@ -12,7 +13,7 @@ def test_multires_stft_zero_on_identical():
 
 
 def test_multires_stft_nonzero_on_perturb():
-    cfg = MultiResSTFTConfig(fft_sizes=[64], hop_ratio=0.25, win_ratio=1.0)
+    cfg = STFTCfg(fft_sizes=[64], hop_ratio=0.25, win_ratio=1.0)
     loss_fn = MultiResSTFTLoss(cfg)
     x = torch.randn(1, 1, 256)
     x_hat = x + 0.01 * torch.randn_like(x)

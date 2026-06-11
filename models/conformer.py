@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -67,7 +65,7 @@ class MultiHeadSelfAttentionRotary(nn.Module):
         self.dropout_p = dropout
         self.rotary = RotaryEmbedding(self.head_dim)
 
-    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, T, D)
         B, T, D = x.shape
         qkv = self.qkv_proj(x)                                   # (B, T, 3D)
@@ -80,16 +78,9 @@ class MultiHeadSelfAttentionRotary(nn.Module):
         cos, sin = self.rotary(T, x.device, x.dtype)
         q, k = apply_rotary(q, k, cos, sin)
 
-        attn_mask = None
-        if key_padding_mask is not None:
-            # (B, T) -> (B, 1, 1, T) of additive -inf at padded positions for SDPA
-            mask = key_padding_mask.to(torch.bool)
-            attn_mask = torch.zeros(B, 1, 1, T, device=x.device, dtype=x.dtype)
-            attn_mask = attn_mask.masked_fill(mask[:, None, None, :], float("-inf"))
-
         out = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask,
+            attn_mask=None,
             dropout_p=self.dropout_p if self.training else 0.0,
             is_causal=False,
         )                                                          # (B, H, T, head_dim)
@@ -140,11 +131,7 @@ class ConvModule(nn.Module):
 
 
 class ConformerLayer(nn.Module):
-    """Pre-norm macaron Conformer block.
-
-    Compatible call signature with the prior Zipformer layer so MHCWrapper plugs in
-    unchanged. `pos_emb`, `chunk_size`, `attn_mask` arguments are accepted and ignored.
-    """
+    """Pre-norm macaron Conformer block. Input and output are (B, T, D)."""
 
     def __init__(
         self,
@@ -165,22 +152,12 @@ class ConformerLayer(nn.Module):
         self.ff2 = FeedForward(d_model, feedforward_dim, dropout)
         self.norm_final = nn.LayerNorm(d_model)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        pos_emb: Optional[torch.Tensor] = None,
-        chunk_size: int = -1,
-        attn_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        # x: (T, B, D) — convert to (B, T, D) internally for ops, return (T, B, D).
-        del pos_emb, chunk_size, attn_mask  # accepted for signature compat; ignored
-        x = x.transpose(0, 1)                            # (B, T, D)
-
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, D)
         # Macaron FFN #1
         x = x + 0.5 * self.ff1(self.norm_ff1(x))
         # MHSA
-        x = x + self.attn_dropout(self.attn(self.norm_attn(x), key_padding_mask=src_key_padding_mask))
+        x = x + self.attn_dropout(self.attn(self.norm_attn(x)))
         # Convolution module
         x = x + self.conv(x)
         # Macaron FFN #2
@@ -188,4 +165,4 @@ class ConformerLayer(nn.Module):
         # Final norm
         x = self.norm_final(x)
 
-        return x.transpose(0, 1)                         # (T, B, D)
+        return x

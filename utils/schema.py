@@ -201,7 +201,6 @@ class AsrCfg(_Base):
     batch_size: int = 16
     segment_seconds: float = 15.0
     max_samples: int = 500
-    use_latent: bool = False
 
 
 class EvalCfg(_Base):

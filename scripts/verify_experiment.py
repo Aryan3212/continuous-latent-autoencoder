@@ -1,9 +1,9 @@
 import argparse
 import torch
 import soundfile as sf
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
-from models.decoder_generator import WaveformDecoder, DecoderConfig
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
+from models.decoder_generator import WaveformDecoder
 from utils.config import load_config
 import matplotlib.pyplot as plt
 import numpy as np
@@ -71,10 +71,10 @@ def main():
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     latent_dim = cfg.model.encoder.d_model
-    decoder = WaveformDecoder(latent_dim, DecoderConfig(**cfg.model.decoder.model_dump()))
+    decoder = WaveformDecoder(latent_dim, cfg.model.decoder)
     
     model = torch.nn.ModuleDict({
         "frontend": frontend,

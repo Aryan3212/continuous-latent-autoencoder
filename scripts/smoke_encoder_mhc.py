@@ -1,18 +1,19 @@
 import torch
 
-from models.encoder import Encoder, EncoderConfig
-from models.mhc import MHCConfig, MHCWrapper, sinkhorn_log
+from models.encoder import Encoder
+from models.mhc import MHCWrapper, sinkhorn_log
+from utils.schema import EncoderCfg, MHCCfg
 
 
 def main() -> None:
-    cfg = EncoderConfig(
+    cfg = EncoderCfg(
         d_model=32,
         n_layers=4,
         num_heads=4,
         feedforward_dim=64,
         dropout=0.1,
         cnn_module_kernel=7,
-        mhc=MHCConfig(
+        mhc=MHCCfg(
             enabled=True,
             num_streams=2,
             start_layer=2,
@@ -25,10 +26,8 @@ def main() -> None:
 
     encoder = Encoder(in_channels=16, cfg=cfg)
     h0 = torch.randn(2, 16, 20)
-    key_padding_mask = torch.zeros(2, 20, dtype=torch.bool)
-    key_padding_mask[0, -2:] = True
 
-    out = encoder(h0, key_padding_mask=key_padding_mask)
+    out = encoder(h0)
     assert out.shape == (2, 32, 20), out.shape
 
     for mod in encoder.mhc_wrappers:

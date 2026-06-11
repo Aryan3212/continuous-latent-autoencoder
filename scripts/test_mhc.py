@@ -7,7 +7,7 @@ class MockBranch(nn.Module):
         super().__init__()
         self.layer = nn.Linear(dim, dim)
     
-    def forward(self, x, pos_emb, chunk_size, attn_mask, src_key_padding_mask):
+    def forward(self, x):
         return self.layer(x)
 
 def test_mhc_smoke():
@@ -28,25 +28,20 @@ def test_mhc_smoke():
         alpha_init=0.01
     )
     
-    residuals = torch.randn(num_streams, seq_len, batch_size, dim)
-    
-    out = mhc(
-        residuals,
-        pos_emb=None,
-        chunk_size=-1,
-        attn_mask=None,
-        src_key_padding_mask=None
-    )
-    
+    residuals = torch.randn(num_streams, batch_size, seq_len, dim)
+
+    out = mhc(residuals)
+
     print("Output shape:", out.shape)
     assert out.shape == residuals.shape
     print("MHC smoke test passed!")
 
-from models.encoder import Encoder, EncoderConfig
+from models.encoder import Encoder
+from utils.schema import EncoderCfg
 
 def test_encoder_integration():
     print("Testing Encoder integration...")
-    cfg = EncoderConfig(
+    cfg = EncoderCfg(
         d_model=64,
         n_layers=2,
         mhc={

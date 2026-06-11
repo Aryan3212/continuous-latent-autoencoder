@@ -29,7 +29,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data*", "eval*", "losses*", "models*", "optim*", "utils*"]
+include = ["data*", "eval*", "losses*", "models*", "utils*"]
 exclude = ["icefall*", "RAE*", "lejepa*", "mHC-*", "configs*", "papers*", "paper-summaries*", "scripts*", "runs*"]
 
 [[tool.uv.index]]

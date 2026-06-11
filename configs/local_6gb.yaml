@@ -142,4 +142,3 @@ eval:
     batch_size: 16
     segment_seconds: 15.0
     max_samples: 500
-    use_latent: false

@@ -6,8 +6,8 @@ import os
 # Add current directory to path so we can import models
 sys.path.append(os.getcwd())
 
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
 from utils.config import load_config
 import numpy as np
@@ -23,8 +23,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load Model
-    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     # Handle both full state dict and partial

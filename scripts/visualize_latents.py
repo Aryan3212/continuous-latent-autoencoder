@@ -6,8 +6,8 @@ import pathlib
 import json
 from sklearn.decomposition import PCA
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
 from utils.config import load_config
 
 def main():
@@ -24,8 +24,8 @@ def main():
     cfg = load_config(args.config)
     device = torch.device(args.device)
 
-    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump())).to(device)
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump())).to(device)
+    frontend = ConvFrontend(cfg.model.frontend).to(device)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder).to(device)
 
     # Load Checkpoint
     print(f"Loading checkpoint: {args.ckpt}")

@@ -147,4 +147,3 @@ eval:
     batch_size: 16
     segment_seconds: 15.0 # Longer segments for CTC: 15s → ~187 frames
     max_samples: 500
-    use_latent: false

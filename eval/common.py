@@ -32,8 +32,8 @@ def greedy_decode_ctc(log_probs: torch.Tensor, id2ch: List[str]) -> List[str]:
     return outs
 
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
 from utils.config import apply_overrides, load_config
 from utils.schema import Config
 
@@ -50,8 +50,8 @@ def load_frozen_encoder(config_path: str, ckpt_path: str, overrides: List[str]) 
     cfg = apply_overrides(load_config(config_path), overrides)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder}).to(device)
 
     state = torch.load(ckpt_path, map_location="cpu")
@@ -72,47 +72,6 @@ def _log_progress(name: str, n_samples: int, start_time: float) -> None:
 
 
 @torch.no_grad()
-def iter_embeddings(
-    lm: LoadedModel,
-    manifest_path: str,
-    *,
-    sample_rate: int,
-    segment_seconds: float,
-    batch_size: int,
-    num_workers: int = 0,
-    log_name: str = "",
-) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = AudioDataset(
-        DatasetConfig(
-            manifest=manifest_path,
-            sample_rate=sample_rate,
-            segment_seconds=segment_seconds,
-            random_crop=False,
-        )
-    )
-    dl = torch.utils.data.DataLoader(
-        ds, batch_size=batch_size, num_workers=num_workers,
-        collate_fn=collate_fixed, drop_last=False,
-    )
-    use_amp = lm.device.type == "cuda"
-    start_t = time.perf_counter()
-    n_samples = 0
-    for i, batch in enumerate(dl):
-        wav = batch["wav"].to(lm.device)
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            h0 = lm.frontend(wav)
-            hE = lm.encoder(h0)
-        z = hE.float()  # (B,d,T')
-        e = torch.cat([z.mean(dim=-1), z.std(dim=-1, unbiased=False)], dim=1)  # (B,2d)
-        n_samples += e.size(0)
-        if log_name and (i + 1) % 50 == 0:
-            _log_progress(log_name, n_samples, start_t)
-        yield e.cpu(), batch["meta"]
-    if log_name:
-        _log_progress(log_name, n_samples, start_t)
-
-
-@torch.no_grad()
 def iter_frame_features(
     lm: LoadedModel,
     manifest_path: str,
@@ -121,7 +80,6 @@ def iter_frame_features(
     segment_seconds: float,
     batch_size: int,
     num_workers: int = 0,
-    use_latent: bool = False, # deprecated
     log_name: str = "",
 ) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
     ds = AudioDataset(
@@ -164,14 +122,14 @@ def iter_embeddings_masked(
     num_workers: int = 0,
     log_name: str = "",
 ) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    """Like iter_embeddings, but excludes zero-padding frames from pooling.
+    """Pooled mean+std utterance embeddings, excluding zero-padding frames from pooling.
 
     Utterances shorter than segment_seconds are right-padded with zeros by the
     dataset; mean+std pooling over those frames dilutes the utterance
     statistics. When a manifest row carries a 'duration' field (seconds), only
     the frames covered by real audio enter the pooled mean/std. Rows without
-    'duration' fall back to full-segment pooling. Yields the same shapes as
-    iter_embeddings: (B, 2d) embeddings plus the batch metadata list.
+    'duration' fall back to full-segment pooling. Yields (B, 2d) embeddings
+    plus the batch metadata list.
     """
     ds = AudioDataset(
         DatasetConfig(

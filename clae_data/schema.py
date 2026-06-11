@@ -19,21 +19,3 @@ class Record(TypedDict, total=False):
     id: Optional[str]
     speaker_id: Optional[str]
     language: Optional[str]
-
-
-_REQUIRED: tuple[str, ...] = ("audio_filepath", "dataset")
-
-
-def validate_record(r: Mapping[str, Any]) -> None:
-    """Raise ValueError if ``r`` is missing a required field or has a bad type."""
-    for k in _REQUIRED:
-        if k not in r or r[k] in (None, ""):
-            raise ValueError(f"Record missing required field {k!r}: {dict(r)!r}")
-    if not isinstance(r["audio_filepath"], str):
-        raise ValueError(
-            f"Record.audio_filepath must be str, got {type(r['audio_filepath']).__name__}"
-        )
-    if not isinstance(r["dataset"], str):
-        raise ValueError(
-            f"Record.dataset must be str, got {type(r['dataset']).__name__}"
-        )

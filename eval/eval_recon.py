@@ -8,10 +8,10 @@ from typing import Dict
 import torch
 
 from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
-from models.decoder_generator import DecoderConfig, WaveformDecoder
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
+from losses.multires_stft import MultiResSTFTLoss
+from models.decoder_generator import WaveformDecoder
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
 from utils.config import apply_overrides, load_config
 
 
@@ -31,11 +31,10 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seg = args.segment_seconds if args.segment_seconds is not None else cfg.data.segment_seconds
 
-    frontend = ConvFrontend(FrontendConfig(**cfg.model.frontend.model_dump()))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**cfg.model.encoder.model_dump()))
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     latent_dim = cfg.model.encoder.d_model
-    decoder_cfg = DecoderConfig(**cfg.model.decoder.model_dump())
-    decoder = WaveformDecoder(latent_dim, decoder_cfg)
+    decoder = WaveformDecoder(latent_dim, cfg.model.decoder)
 
     model = torch.nn.ModuleDict(
         {"frontend": frontend, "encoder": encoder, "decoder": decoder}
@@ -45,8 +44,7 @@ def main() -> None:
     model.load_state_dict(state["model"], strict=False)
     model.eval()
 
-    loss_cfg = MultiResSTFTConfig(**cfg.loss.stft.model_dump())
-    stft = MultiResSTFTLoss(loss_cfg).to(device)
+    stft = MultiResSTFTLoss(cfg.loss.stft).to(device)
 
     ds = AudioDataset(
         DatasetConfig(

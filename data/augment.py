@@ -1,57 +1,16 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-
-# --- New Waveform Augmentations (Exp3) ---
-
-@dataclass
-class WaveAugConfig:
-    enabled: bool = False
-
-    # Noise
-    noise_prob: float = 0.0
-    noise_snr_min: float = 3.0
-    noise_snr_max: float = 20.0
-
-    # Low Pass
-    lowpass_prob: float = 0.0
-    lowpass_min_freq: float = 2000.0
-    lowpass_max_freq: float = 8000.0
-
-    # Volume
-    gain_prob: float = 0.0
-    gain_min: float = 0.5
-    gain_max: float = 1.5
-
-    # Clipping
-    clip_prob: float = 0.0
-    clip_min: float = 0.5 # Threshold relative to peak
-
-
-@dataclass
-class WaveChunkMaskConfig:
-    """Local-view waveform chunk masking (V-JEPA / MAE-style tube masking for 1-D audio).
-
-    Picks random contiguous frame-spans and zeroes the corresponding waveform
-    samples *before* the frontend, so the encoder genuinely sees missing audio.
-    Spans are sampled in frame units (post-frontend stride) so the frame-level
-    mask we hand to the JEPA loss aligns exactly with the encoder output grid.
-    """
-
-    enabled: bool = True
-    target_ratio: float = 0.25
-    min_span_frames: int = 2
-    max_span_frames: int = 8
+from utils.schema import WaveAugCfg, WaveChunkMaskCfg
 
 
 def make_frame_chunk_masks(
     batch_size: int,
     num_frames: int,
-    cfg: WaveChunkMaskConfig,
+    cfg: WaveChunkMaskCfg,
 ) -> torch.Tensor:
     """Returns (B, num_frames), 1 where masked. CPU tensor (float32).
 
@@ -107,7 +66,7 @@ def apply_waveform_chunk_mask(
     return wav * (1.0 - sample_mask.unsqueeze(1))
 
 
-def apply_waveform_augment(wav: torch.Tensor, sample_rate: int, cfg: WaveAugConfig) -> torch.Tensor:
+def apply_waveform_augment(wav: torch.Tensor, sample_rate: int, cfg: WaveAugCfg) -> torch.Tensor:
     """
     Apply augmentations to a batch of waveforms (B, 1, T). Fully vectorised.
     Each sample gets independent per-augmentation random decisions.

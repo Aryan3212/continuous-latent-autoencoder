@@ -8,10 +8,12 @@
 > 1. Rotate the HF token at https://huggingface.co/settings/tokens
 > 2. Rotate the Kaggle key at https://www.kaggle.com/settings
 > 3. Rotate the WandB key at https://wandb.ai/settings
-> 4. Purge the old keys from git history with `git filter-repo
->    --replace-text` (see `DATASET_PIPELINE_PLAN.md` §0). The HF/Kaggle
->    keys remain in git history from `scripts/datasets_download.py` even
->    after deletion from `HEAD`.
+> 4. Purge the old keys from git history (they remain in history from the
+>    deleted `scripts/datasets_download.py` even after removal from `HEAD`):
+>    write a `replacements.txt` with one `OLD_SECRET==>REDACTED` line per key,
+>    then run `git filter-repo --replace-text replacements.txt`, force-push,
+>    and have any collaborators re-clone. (`pip install git-filter-repo`; run
+>    on a fresh clone — it rewrites all commit hashes.)
 
 Deterministic continuous-latent speech foundation autoencoder:
 
@@ -52,7 +54,7 @@ Any variable can be overridden on the command line:
 ```bash
 RUN_NAME=ablation-no-mhc make train
 DATASETS=openslr53 make pack-and-push
-CONFIG=configs/calm_like_exp0.yaml make train
+CONFIG=configs/local_6gb.yaml make train
 ```
 
 `make help` lists every target and the current value of every variable. The
@@ -91,8 +93,8 @@ credentials needed there.
 
 The packed format is "raw files + JSONL", not parquet shards, because that
 makes incremental growth trivial: adding a new source is just another
-`upload_folder` call plus a versioned `manifests/train_v2.jsonl`. See
-`DATASET_PIPELINE_PLAN.md` for the full rationale.
+`upload_folder` call plus a versioned `manifests/train_v2.jsonl` — no schema
+migration or download-concatenate-republish cycle.
 
 ## Adding a new dataset source
 
@@ -151,25 +153,25 @@ Artifacts:
 ## Notes
 
 - This repo intentionally starts with a stable, low-compute Exp0 (no GAN, no mixture).
-- Exp1+ (mixture, primary classification, latent-noise decoding, GAN) are implemented as config toggles but should be enabled only after Exp0 is stable.
+- Earlier experimental paths (mixture, primary classification, latent-noise decoding, GAN) have been **removed** from the code; they live in git history and can be reintroduced if needed. The current objective is reconstruction + JEPA + SIGReg only.
 
 ## Folder guide
 
-- `configs/`: experiment configs (Exp0, CALM-like preset, etc.)
-- `data/`: dataset and manifest utilities
-- `eval/`: probes + evaluation entrypoints (`eval_asr.py`, `eval_recon.py`, `run_all.py`)
-- `losses/`: loss functions (multi-res STFT, etc.)
-- `models/`: core model components (frontend, encoder, decoder, sigreg, discriminators)
-- `optim/`: optimizers + LR schedulers (ScaledAdam, Eden/Eden2)
+- `configs/`: experiment configs (`exp0.yaml` cloud ~6M, `local_6gb.yaml` local PC)
+- `clae_data/`: dataset prep package (adapters → pack → push/fetch)
+- `data/`: dataset loading + augmentation
+- `eval/`: probes + evaluation entrypoints (`eval_asr.py`, `eval_emotion.py`, `eval_gender.py`, `eval_recon.py`, `run_all.py`)
+- `losses/`: loss functions (multi-res STFT)
+- `models/`: core model components (frontend, encoder, mHC, projector, decoder, sigreg)
 - `scripts/`: one-off utilities + smoke scripts
-- `utils/`: misc helpers (config, logging, checkpointing)
-- `paper-summaries/`, `papers/`: references
-- `RAE/`, `lejepa/`, `mHC-manifold-constrained-hyper-connections/`, `icefall/`: vendored references (not installed)
+- `utils/`: misc helpers (config/schema, logging, checkpointing)
+- `reference-implementations/`: slim in-tree references (single-file impls + notes); full vendored repos live at `../reference-implementations-archive`
+- `docs/`: live research notes
 - `runs/`: training outputs (checkpoints/logs)
 
 ## Running things
 
-Train (Exp0):
+Train (use `configs/local_6gb.yaml` instead of `exp0.yaml` on the local PC):
 
 ```bash
 uv run python train.py --config configs/exp0.yaml \
@@ -177,25 +179,49 @@ uv run python train.py --config configs/exp0.yaml \
     data.val_manifest=$HOME/data/clae/manifests/val.jsonl
 ```
 
-CALM-like preset:
+Run all eval (reconstruction + all enabled probes in one go):
 
 ```bash
-uv run python train.py --config configs/calm_like_exp0.yaml data.train_manifest=/path/train.jsonl
+uv run python -m eval.run_all --config configs/exp0.yaml --ckpt /path/to/ckpt.pt \
+    --manifest /path/to/val.jsonl --out_dir runs/eval
 ```
 
-Recon evaluation:
+Reconstruction-only eval:
 
 ```bash
-uv run python -m eval.eval_recon --config configs/exp0.yaml --ckpt /path/to/ckpt.pt --manifest /path/to/manifest.jsonl --out runs/recon.json
+uv run python -m eval.eval_recon --config configs/exp0.yaml --ckpt /path/to/ckpt.pt \
+    --manifest /path/to/val.jsonl --out runs/recon.json
 ```
 
-Run all eval (recon + probes + baselines if available):
+Frozen-encoder ASR probe (CTC head → WER):
 
 ```bash
-uv run python -m eval.run_all --config configs/exp0.yaml --ckpt /path/to/ckpt.pt --manifest /path/to/manifest.jsonl --out_dir runs/eval
+uv run python -m eval.eval_asr --config configs/exp0.yaml --ckpt /path/to/ckpt.pt \
+    --train_manifest /path/to/asr_probe_train.jsonl \
+    --dev_manifest /path/to/asr_probe_val.jsonl --out runs/asr_probe.json
 ```
 
-Smoke tests:
+Emotion / gender probes (pooled-embedding MLP; same arg shape as the ASR probe):
+
+```bash
+uv run python -m eval.eval_emotion --config configs/exp0.yaml --ckpt /path/to/ckpt.pt ...
+uv run python -m eval.eval_gender  --config configs/exp0.yaml --ckpt /path/to/ckpt.pt ...
+```
+
+Visualize the latent space (PCA/UMAP):
+
+```bash
+uv run python scripts/visualize_latents.py --config configs/exp0.yaml --ckpt /path/to/ckpt.pt \
+    --manifest /path/to/val.jsonl --out runs/latents.png --limit 500
+```
+
+Unit tests:
+
+```bash
+uv run pytest tests/
+```
+
+Smoke tests (model components, no data needed):
 
 ```bash
 PYTHONPATH=. uv run --no-project python scripts/smoke_encoder_mhc.py
@@ -213,13 +239,13 @@ mkdir -p .static-analysis
 # 1. ruff — fast linter (Rust). Finds unused imports/vars, dead branches,
 #    undefined names (real bugs), commented-out code.
 uvx ruff check --select F,ARG,ERA,RUF --output-format=concise \
-    train.py models/ data/ losses/ optim/ eval/ utils/ tests/ \
+    train.py models/ data/ losses/ eval/ utils/ tests/ \
     > .static-analysis/ruff.txt
 
 # 2. vulture — flags unused functions/classes/methods/attrs across modules.
 #    The allowlist suppresses framework magic (torch.nn.Module.forward, etc.)
 uvx vulture --min-confidence 60 \
-    train.py models/ data/ losses/ optim/ eval/ utils/ tests/ \
+    train.py models/ data/ losses/ eval/ utils/ tests/ \
     .static-analysis/vulture-allowlist.py \
     > .static-analysis/vulture.txt
 

@@ -7,6 +7,9 @@ __pycache__/
 .venv/
 *.egg-info/
 bengaliai-speech.zip
+wandb/
+.cache_ggshield
+.ruff_cache/
 
 # Environment
 .env

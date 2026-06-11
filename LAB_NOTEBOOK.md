@@ -30,3 +30,39 @@ We ran the local_6gb config (d_model 64, 3 Conformer layers, projector 64→128�
 - Secondary: chunk-mask target_ratio 0.15→0.25 (harder prediction task), segments 1.5 s→2.5 s with batch 96→64, lowpass_min_freq raised to 2700 Hz so we stop training away the timbre band the gender/emotion probes need, gender/emotion probes enabled in-config, ASR probe steps 1000→8000, and ASR probe feasibility fixes (12.5 Hz frames vs ~8–15 Bengali chars/sec made many CTC samples infeasible and `zero_infinity=True` silently zeroed them — the probe was measuring its own handicap).
 
 **Lesson for us:** never judge a self-supervised run by metrics computed in the same space the regularizer acts on. The backbone rank metrics (z_rank, z_rank_utt) are the ones the probes actually feel, and they are now the primary gauges — see `docs/EXPERIMENT_PLAN_2026_06_10.md` for what "healthy" must look like before we commit to a full 30k run.
+
+### 2026-06-11 — open decisions carried over from the simplification pass
+
+The simplification pass (see `CHANGELOG.md`) deleted a lot of dead code and
+folded the old planning/history docs into git. These are the only items from
+those docs that are still *open* and actionable:
+
+**mHC ablation (decision deferred).** mHC machinery (`models/mhc.py`, the
+wrapper plumbing in `models/encoder.py`, the `model.encoder.mhc` config block)
+is kept on this branch but its value is unproven. Plan: run two training jobs
+side by side, same seed/data — mHC on (`model.encoder.mhc.enabled=true`) vs off
+(`enabled=false` / `num_streams=1`). Compare ASR-probe WER, JEPA loss curves,
+and the z_rank gauges. If no clear win: delete `models/mhc.py` and strip the
+wrapper/`MHCCfg`/config blocks. If it wins: document what it wins on so the
+keeper rationale is in the repo. No code changes until the experiment runs.
+
+**Bring-back-later (removed, recoverable from git history):**
+- *Inline / offline CTC probe.* The old inline probe was deleted (it wasn't
+  torch.compile/DDP-safe). If brought back, pick one shape: a clean
+  nn.Module head that participates in the main forward (don't toggle
+  requires_grad mid-step), OR a separate launcher that finds the latest
+  `last.pt` and runs `eval/eval_asr.py` out-of-process on a cadence.
+- *Best-checkpoint tracking.* Only `last.pt` is saved now (`best_asr.pt` /
+  `best_composite.pt` are gone — the gating metric came from the deleted
+  eval-on-save block). Re-add best-tracking only when there's an actual metric
+  driving it and you'll use those checkpoints downstream.
+- *CodeCarbon emissions tracking.* Removed (~10 lines). Re-add if ever wanted.
+
+**On the old history docs (HISTORICAL_CHANGES / RESEARCH_SUMMARY_2026_04_21,
+now deleted).** They documented the superseded Zipformer + GAN + InfoNCE +
+RAE-noise era. None of it is still actionable for the current
+reconstruction + JEPA + SIGReg pipeline — those design choices were all reverted
+or replaced. The few durable findings already live where they matter: the STFT
+spectral-convergence silence fix is in `CHANGELOG.md` and the loss code; the
+"high-dimensional latents help reconstruction" RAE rationale is in the Human log
+above. Full commit-by-commit detail is in git history if ever needed.

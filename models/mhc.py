@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -21,19 +19,6 @@ def sinkhorn_log(logits: torch.Tensor, num_iters: int = 10, tau: float = 0.05) -
         v = log_marginal - torch.logsumexp(z + u.unsqueeze(-1), dim=-2)
 
     return torch.exp(z + u.unsqueeze(-1) + v.unsqueeze(-2))
-
-
-@dataclass
-class MHCConfig:
-    enabled: bool = True
-    num_streams: int = 2
-    start_layer: int = 2
-    period: int = 3
-    sinkhorn_iters: int = 10
-    tau: float = 0.05
-    dropout: float = 0.0
-    identity_mix: bool = True
-    alpha_init: float = 0.01
 
 
 class MHCWrapper(nn.Module):
@@ -83,17 +68,9 @@ class MHCWrapper(nn.Module):
             logit_alpha = math.log(alpha_init / (1 - alpha_init))
             self.H_res_alpha_logit = nn.Parameter(torch.tensor(logit_alpha))
 
-    def forward(
-        self,
-        residuals: torch.Tensor,
-        *,
-        pos_emb: torch.Tensor,
-        chunk_size: int,
-        attn_mask: Optional[torch.Tensor],
-        src_key_padding_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    def forward(self, residuals: torch.Tensor) -> torch.Tensor:
         if residuals.dim() != 4:
-            raise ValueError(f"Expected residuals as (S,T,B,D), got {tuple(residuals.shape)}")
+            raise ValueError(f"Expected residuals as (S,B,T,D), got {tuple(residuals.shape)}")
 
         # 1. Project to Doubly Stochastic Matrix
         S = sinkhorn_log(self.H_res_logits, num_iters=self.mhc_num_iters, tau=self.mhc_tau)
@@ -107,25 +84,19 @@ class MHCWrapper(nn.Module):
             h_res = S
 
         # 3. Residual Mixing
-        residuals_out = torch.einsum("sr, s t b d -> r t b d", h_res, residuals)
+        residuals_out = torch.einsum("sr, s b t d -> r b t d", h_res, residuals)
 
         # 4. Branch Logic
         h_pre = self.H_pre_logits.softmax(dim=-1)
-        branch_input = torch.einsum("vs, s t b d -> v t b d", h_pre, residuals).squeeze(0)
-        branch_out = self.branch(
-            branch_input,
-            pos_emb,
-            chunk_size=chunk_size,
-            attn_mask=attn_mask,
-            src_key_padding_mask=src_key_padding_mask,
-        )
+        branch_input = torch.einsum("vs, s b t d -> v b t d", h_pre, residuals).squeeze(0)
+        branch_out = self.branch(branch_input)
         branch_out = self.dropout(branch_out)
 
         if self.add_branch_out_to_residual:
             h_post = self.H_post_logits.softmax(dim=-1)
             # Apply learned scale (tanh to keep it bounded)
             branch_out_scaled = branch_out * torch.tanh(self.branch_scale)
-            branch_to_residuals = torch.einsum("vs, t b d -> s t b d", h_post, branch_out_scaled)
+            branch_to_residuals = torch.einsum("vs, b t d -> s b t d", h_post, branch_out_scaled)
             residuals_out = residuals_out + branch_to_residuals
 
         return residuals_out

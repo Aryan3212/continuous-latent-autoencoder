@@ -94,7 +94,6 @@ def _load_feats_and_text(
     text_key: str,
     batch_size: int,
     segment_seconds: float,
-    use_latent: bool,
     log_name: str = "",
     max_samples: int = 0,
 ) -> Tuple[torch.Tensor, List[str]]:
@@ -107,7 +106,6 @@ def _load_feats_and_text(
         sample_rate=lm.cfg.data.sample_rate,
         segment_seconds=segment_seconds,
         batch_size=batch_size,
-        use_latent=use_latent,
         log_name=log_name,
     ):
         feats_list.append(feats)  # already on CPU from iter_frame_features
@@ -129,7 +127,6 @@ def main() -> None:
     ap.add_argument("--train_manifest", required=True)
     ap.add_argument("--dev_manifest", required=True)
     ap.add_argument("--text_key", default="text")
-    ap.add_argument("--use_latent", action="store_true")
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--batch_size", type=int, default=16)
@@ -168,14 +165,12 @@ def main() -> None:
             sample_rate=lm.cfg.data.sample_rate,
             segment_seconds=seg,
             batch_size=args.batch_size,
-            use_latent=bool(args.use_latent),
         )
         feats, meta = next(feats_iter)
         out = {
             "dry_run": True,
             "feats_shape": list(feats.shape),
             "num_samples": len(meta),
-            "use_latent": bool(args.use_latent),
         }
         pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
@@ -190,7 +185,6 @@ def main() -> None:
         text_key=args.text_key,
         batch_size=args.batch_size,
         segment_seconds=seg,
-        use_latent=bool(args.use_latent),
         log_name="ASR train",
         max_samples=max_s,
     )
@@ -201,7 +195,6 @@ def main() -> None:
         text_key=args.text_key,
         batch_size=args.batch_size,
         segment_seconds=seg,
-        use_latent=bool(args.use_latent),
         log_name="ASR dev",
         max_samples=max_s,
     )
@@ -321,7 +314,6 @@ def main() -> None:
         "train": _eval(feats_tr, text_tr),
         "dev": _eval(feats_de, text_de),
         "vocab_size": len(charset),
-        "use_latent": bool(args.use_latent),
         "upsample_factor": upf,
         "max_utt_seconds": float(max_utt),
         "head": args.head,

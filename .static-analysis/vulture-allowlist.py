@@ -18,5 +18,3 @@ class _Module:
 
 # argparse override sink — `overrides` collects positional KEY=VALUE pairs
 overrides = None
-# nested dataclass __post_init__ used by EncoderConfig
-__post_init__ = None
