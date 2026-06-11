@@ -144,8 +144,12 @@ def main() -> None:
     args = ap.parse_args()
 
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
-    seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.data.segment_seconds
+    # eval.asr.segment_seconds, NOT data.segment_seconds: pretraining crops to
+    # short segments (e.g. 2.5s), but the probe needs the full utterance or the
+    # transcript no longer matches the start-cropped audio.
+    seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.eval.asr.segment_seconds
     max_utt = args.max_utt_seconds if args.max_utt_seconds is not None else seg
+    print(f"  [ASR] segment_seconds={seg:g}, max_utt_seconds={max_utt:g}", flush=True)
     upf = max(1, int(args.upsample_factor))
 
     # Drop utterances longer than max_utt BEFORE extraction: _start_crop would
@@ -173,7 +177,7 @@ def main() -> None:
             "num_samples": len(meta),
         }
         pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
+        pathlib.Path(args.out).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
         return
 
     # Free the frozen encoder before loading features — we don't need it after extraction
@@ -328,7 +332,7 @@ def main() -> None:
     }
     print(f"  [ASR] Train WER: {out['train']['wer']:.4f}, Dev WER: {out['dev']['wer']:.4f}", flush=True)
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
+    pathlib.Path(args.out).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == "__main__":
