@@ -20,7 +20,7 @@ def _deep_update(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _load_raw(path: str) -> Dict[str, Any]:
-    cfg = yaml.safe_load(pathlib.Path(str(path)).read_text())
+    cfg = yaml.safe_load(pathlib.Path(str(path)).read_text(encoding="utf-8"))
     base = cfg.get("_base_")
     if base is None:
         return cfg

@@ -64,7 +64,7 @@ def run_all_probes(
         raise ValueError("exp_cfg must have resolved_config_path set before passing to run_all_probes")
 
     # Utterance-level probes (gender / emotion).
-    def _run_utt_probe(name: str, module: str, pcfg: Any, key: str) -> None:
+    def _run_utt_probe(name: str, pcfg: Any, key: str, hidden: int) -> None:
         if not pcfg.train_manifest or not pcfg.dev_manifest:
             print(f"[Eval Step {step}] {name} probe enabled but eval.{key}.train_manifest/"
                   f"dev_manifest are not set; skipping.", flush=True)
@@ -73,7 +73,7 @@ def run_all_probes(
         cmd = [
             python_bin,
             "-m",
-            module,
+            "eval.eval_cls_probe",
             "--config",
             config_path,
             "--ckpt",
@@ -86,6 +86,8 @@ def run_all_probes(
             str(pcfg.label_key),
             "--steps",
             str(int(pcfg.steps)),
+            "--hidden",
+            str(hidden),
             "--batch_size",
             str(int(pcfg.batch_size)),
             "--out",
@@ -99,10 +101,10 @@ def run_all_probes(
             results[key] = json.loads(out.read_text())
 
     if exp_cfg.eval.emotion.enabled:
-        _run_utt_probe("Emotion", "eval.eval_emotion", exp_cfg.eval.emotion, "emotion")
+        _run_utt_probe("Emotion", exp_cfg.eval.emotion, "emotion", 256)
 
     if exp_cfg.eval.gender.enabled:
-        _run_utt_probe("Gender", "eval.eval_gender", exp_cfg.eval.gender, "gender")
+        _run_utt_probe("Gender", exp_cfg.eval.gender, "gender", 128)
 
     # ASR
     if exp_cfg.eval.asr.enabled:

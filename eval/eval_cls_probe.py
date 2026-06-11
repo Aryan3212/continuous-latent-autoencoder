@@ -69,8 +69,9 @@ def main() -> None:
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--train_manifest", required=True)
     ap.add_argument("--dev_manifest", required=True)
-    ap.add_argument("--label_key", default="emotion")
+    ap.add_argument("--label_key", required=True)
     ap.add_argument("--steps", type=int, default=2000)
+    ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--segment_seconds", type=float, default=None)
@@ -78,13 +79,14 @@ def main() -> None:
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
 
+    label_key = args.label_key
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
     seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.data.segment_seconds
 
-    print("  [Emotion] Extracting train embeddings...", flush=True)
-    x_tr, y_tr, _, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg, log_name="Emotion train")
-    print("  [Emotion] Extracting dev embeddings...", flush=True)
-    x_de, y_de, _, _ = _load_embs(lm, args.dev_manifest, args.label_key, args.batch_size, seg, log_name="Emotion dev", label_map=label_map)
+    print(f"  [{label_key}] Extracting train embeddings...", flush=True)
+    x_tr, y_tr, _, label_map = _load_embs(lm, args.train_manifest, label_key, args.batch_size, seg, log_name=f"{label_key} train")
+    print(f"  [{label_key}] Extracting dev embeddings...", flush=True)
+    x_de, y_de, _, _ = _load_embs(lm, args.dev_manifest, label_key, args.batch_size, seg, log_name=f"{label_key} dev", label_map=label_map)
 
     # Free frozen encoder
     del lm
@@ -92,15 +94,15 @@ def main() -> None:
 
     # Collapse gauge: participation-ratio effective rank of train embeddings
     emb_stats = embedding_stats(x_tr)
-    print(f"  [Emotion] Embedding effective rank: {emb_stats['embed_effective_rank']:.2f} / {emb_stats['embed_dim']}", flush=True)
+    print(f"  [{label_key}] Embedding effective rank: {emb_stats['embed_effective_rank']:.2f} / {emb_stats['embed_dim']}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     x_tr, y_tr = x_tr.to(device), y_tr.to(device)
     x_de, y_de = x_de.to(device), y_de.to(device)
 
     num_classes = len(label_map)
-    print(f"  [Emotion] Train: {x_tr.shape[0]}, Dev: {x_de.shape[0]}, Classes: {num_classes}", flush=True)
-    head = nn.Sequential(nn.Linear(x_tr.size(1), 256), nn.GELU(), nn.Dropout(0.1), nn.Linear(256, num_classes)).to(device)
+    print(f"  [{label_key}] Train: {x_tr.shape[0]}, Dev: {x_de.shape[0]}, Classes: {num_classes}", flush=True)
+    head = nn.Sequential(nn.Linear(x_tr.size(1), args.hidden), nn.GELU(), nn.Dropout(0.1), nn.Linear(args.hidden, num_classes)).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
     loss_fn = nn.CrossEntropyLoss()
 
@@ -117,7 +119,7 @@ def main() -> None:
         opt.step()
         if (step_i + 1) % log_interval == 0:
             elapsed = time.perf_counter() - t0
-            print(f"  [Emotion] step {step_i+1}/{args.steps}  loss={loss.item():.4f}  ({elapsed:.1f}s)", flush=True)
+            print(f"  [{label_key}] step {step_i+1}/{args.steps}  loss={loss.item():.4f}  ({elapsed:.1f}s)", flush=True)
 
     head.eval()
     with torch.no_grad():
@@ -125,7 +127,7 @@ def main() -> None:
         acc = (pred == y_de).float().mean().item()
         mf1 = _macro_f1(y_de, pred, num_classes)
 
-    print(f"  [Emotion] Accuracy: {acc:.4f}, Macro-F1: {mf1:.4f}", flush=True)
+    print(f"  [{label_key}] Accuracy: {acc:.4f}, Macro-F1: {mf1:.4f}", flush=True)
     out = {
         "accuracy": float(acc),
         "macro_f1": float(mf1),

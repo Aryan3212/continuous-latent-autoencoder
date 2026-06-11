@@ -47,6 +47,6 @@ def try_git_hash(cwd: str | None = None) -> str:
 def save_run_metadata(run_dir: str, cfg: "Config", *, extra: Optional[Dict[str, Any]] = None) -> None:
     p = pathlib.Path(run_dir)
     p.mkdir(parents=True, exist_ok=True)
-    (p / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(), sort_keys=False))
+    (p / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(), sort_keys=False), encoding="utf-8")
     if extra:
-        (p / "run_meta.yaml").write_text(yaml.safe_dump(extra, sort_keys=False))
+        (p / "run_meta.yaml").write_text(yaml.safe_dump(extra, sort_keys=False), encoding="utf-8")

@@ -31,12 +31,9 @@ def main():
     print(f"Loading checkpoint: {args.ckpt}")
     ckpt = torch.load(args.ckpt, map_location="cpu")
     
-    # Handle state dict prefixes if necessary
     def load_part(model, key):
-        part_dict = {k.replace(f"{key}.", ""): v for k, v in ckpt["model"].items() if k.startswith(f"{key}.")}
-        if not part_dict: # maybe it's not prefixed
-             part_dict = {k: v for k, v in ckpt["model"].items() if k in model.state_dict()}
-        model.load_state_dict(part_dict, strict=False)
+        part_dict = {k[len(key) + 1:]: v for k, v in ckpt["model"].items() if k.startswith(f"{key}.")}
+        model.load_state_dict(part_dict, strict=True)
 
     load_part(frontend, "frontend")
     load_part(encoder, "encoder")

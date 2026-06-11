@@ -25,7 +25,7 @@ def _read_manifest(paths: str | List[str]) -> List[Dict[str, Any]]:
         paths = [paths]
     items: List[Dict[str, Any]] = []
     for p in paths:
-        with open(p, "r") as f:
+        with open(p, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

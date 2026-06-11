@@ -160,7 +160,7 @@ Artifacts:
 - `configs/`: experiment configs (`exp0.yaml` cloud ~6M, `local_6gb.yaml` local PC)
 - `clae_data/`: dataset prep package (adapters → pack → push/fetch)
 - `data/`: dataset loading + augmentation
-- `eval/`: probes + evaluation entrypoints (`eval_asr.py`, `eval_emotion.py`, `eval_gender.py`, `eval_recon.py`, `run_all.py`)
+- `eval/`: probes + evaluation entrypoints (`eval_asr.py`, `eval_cls_probe.py`, `eval_recon.py`, `run_all.py`)
 - `losses/`: loss functions (multi-res STFT)
 - `models/`: core model components (frontend, encoder, mHC, projector, decoder, sigreg)
 - `scripts/`: one-off utilities + smoke scripts
@@ -201,11 +201,11 @@ uv run python -m eval.eval_asr --config configs/exp0.yaml --ckpt /path/to/ckpt.p
     --dev_manifest /path/to/asr_probe_val.jsonl --out runs/asr_probe.json
 ```
 
-Emotion / gender probes (pooled-embedding MLP; same arg shape as the ASR probe):
+Emotion / gender probes (pooled-embedding MLP; same arg shape as the ASR probe; `--label_key` picks the task):
 
 ```bash
-uv run python -m eval.eval_emotion --config configs/exp0.yaml --ckpt /path/to/ckpt.pt ...
-uv run python -m eval.eval_gender  --config configs/exp0.yaml --ckpt /path/to/ckpt.pt ...
+uv run python -m eval.eval_cls_probe --config configs/exp0.yaml --ckpt /path/to/ckpt.pt --label_key emotion ...
+uv run python -m eval.eval_cls_probe --config configs/exp0.yaml --ckpt /path/to/ckpt.pt --label_key gender  ...
 ```
 
 Visualize the latent space (PCA/UMAP):

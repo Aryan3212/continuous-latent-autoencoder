@@ -27,16 +27,12 @@ def main():
     encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     
     ckpt = torch.load(args.checkpoint, map_location="cpu")
-    # Handle both full state dict and partial
-    sd = ckpt["model"] if "model" in ckpt else ckpt
-    
-    # Strip prefixes if they exist
-    frontend_sd = {k.replace("frontend.", ""): v for k, v in sd.items() if k.startswith("frontend.")}
-    encoder_sd = {k.replace("encoder.", ""): v for k, v in sd.items() if k.startswith("encoder.")}
-    
-    frontend.load_state_dict(frontend_sd if frontend_sd else {k: v for k, v in sd.items() if "frontend" in k})
-    encoder.load_state_dict(encoder_sd if encoder_sd else {k: v for k, v in sd.items() if "encoder" in k})
-    
+    sd = ckpt["model"]
+    frontend_sd = {k[len("frontend."):]: v for k, v in sd.items() if k.startswith("frontend.")}
+    encoder_sd = {k[len("encoder."):]: v for k, v in sd.items() if k.startswith("encoder.")}
+    frontend.load_state_dict(frontend_sd, strict=True)
+    encoder.load_state_dict(encoder_sd, strict=True)
+
     frontend.to(device).eval()
     encoder.to(device).eval()
 

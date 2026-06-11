@@ -55,7 +55,7 @@ in `data/dataset.py` is a runtime object, intentionally not YAML-mirrored.
 Frozen-encoder probes + reconstruction metrics.
 
 - `eval/eval_asr.py` — CTC ASR probe (small head over frame features), WER.
-- `eval/eval_emotion.py`, `eval/eval_gender.py` — pooled-embedding MLP probes.
+- `eval/eval_cls_probe.py` — pooled-embedding MLP probe (`--label_key` selects emotion/gender).
 - `eval/eval_recon.py` — waveform reconstruction metrics (STFT etc.).
 - `eval/common.py` — shared frame-feature extraction.
 - `eval/run_probes.py` — orchestrates the three probes (direct schema access).

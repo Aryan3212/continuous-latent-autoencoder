@@ -23,7 +23,7 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("sin_cache", torch.zeros(0), persistent=False)
 
     def _maybe_build(self, T: int, device: torch.device, dtype: torch.dtype) -> None:
-        if T <= self._cached_T and self.cos_cache.device == device:
+        if T <= self._cached_T and self.cos_cache.device == device and self.cos_cache.dtype == dtype:
             return
         t = torch.arange(T, device=device, dtype=torch.float32)
         freqs = torch.einsum("t,f->tf", t, self.inv_freq.to(device))   # (T, head_dim/2)

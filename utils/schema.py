@@ -211,8 +211,6 @@ class EvalCfg(_Base):
 
 
 class Config(_Base):
-    model_config = ConfigDict(extra="allow")
-
     resolved_config_path: Optional[str] = None
     run: RunCfg = Field(default_factory=RunCfg)
     data: DataCfg = Field(default_factory=DataCfg)

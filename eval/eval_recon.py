@@ -41,7 +41,8 @@ def main() -> None:
     ).to(device)
 
     state = torch.load(args.ckpt, map_location="cpu")
-    model.load_state_dict(state["model"], strict=False)
+    filtered = {k: v for k, v in state["model"].items() if k.split(".", 1)[0] in {"frontend", "encoder", "decoder"}}
+    model.load_state_dict(filtered, strict=True)
     model.eval()
 
     stft = MultiResSTFTLoss(cfg.loss.stft).to(device)

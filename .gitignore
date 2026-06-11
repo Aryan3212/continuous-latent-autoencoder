@@ -1,5 +1,5 @@
 # Data and Artifacts
-data/
+data/manifests/
 runs/
 __pycache__/
 *.pyc

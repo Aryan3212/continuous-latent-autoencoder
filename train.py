@@ -379,14 +379,14 @@ def main() -> None:
         )
         prof.start()
 
-    accum_stats: Dict[str, torch.Tensor] = {}
+    accum_sums: Dict[str, torch.Tensor] = {}
+    accum_counts: Dict[str, int] = {}
 
     train_it = iter(train_dl)
     while step < max_steps and not _shutdown:
         optimizer.zero_grad(set_to_none=True)
 
         total_loss = torch.tensor(0.0, device=device)
-        mb_stats: Dict[str, Any] = {}
 
         microbatches = []
         for _ in range(grad_accum):
@@ -513,11 +513,11 @@ def main() -> None:
                     mb_step_stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
 
             for k, v in mb_step_stats.items():
-                mb_stats[k] = mb_stats[k] + v if k in mb_stats else v
+                accum_sums[k] = accum_sums.get(k, torch.zeros((), device=device)) + v.detach()
+                accum_counts[k] = accum_counts.get(k, 0) + 1
 
-        n_mb = len(microbatches)
-        stats = {k: v / n_mb for k, v in mb_stats.items()}
-        stats["loss"] = total_loss
+        accum_sums["loss"] = accum_sums.get("loss", torch.zeros((), device=device)) + total_loss.detach()
+        accum_counts["loss"] = accum_counts.get("loss", 0) + 1
 
         # Optimize
         if grad_clip and grad_clip > 0:
@@ -525,9 +525,6 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         scaler.update()
-
-        for k, v in stats.items():
-            accum_stats[k] = accum_stats.get(k, torch.zeros((), device=device)) + v.detach()
 
         step += 1
         scheduler.step()
@@ -567,12 +564,13 @@ def main() -> None:
 
         log_interval = cfg.train.log_interval_steps
         if step % log_interval == 0:
-            log_stats = {k: v.item() / log_interval for k, v in accum_stats.items()}
-            accum_stats.clear()
+            log_stats = {k: (v / accum_counts[k]).item() for k, v in accum_sums.items()}
+            accum_sums.clear()
+            accum_counts.clear()
             # Rank gauges: eigendecompositions are expensive, so compute them
             # once per log boundary from the last microbatch's view-0
             # embeddings and log the raw value — these must NOT pass through
-            # accum_stats, whose /log_interval average diluted them 10x.
+            # accum_sums, whose per-key averaging diluted them 10x.
             with torch.no_grad():
                 z32 = z_a.detach().float()
                 z_frames = z32.permute(0, 2, 1).reshape(-1, z32.size(1))

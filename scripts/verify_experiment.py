@@ -83,7 +83,8 @@ def main():
     }).to(device)
     
     ckpt = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(ckpt["model"], strict=False)
+    filtered = {k: v for k, v in ckpt["model"].items() if k.split(".", 1)[0] in {"frontend", "encoder", "decoder"}}
+    model.load_state_dict(filtered, strict=True)
     model.eval()
     
     wav, sr = sf.read(args.input_wav)

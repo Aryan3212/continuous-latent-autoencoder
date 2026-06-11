@@ -55,8 +55,8 @@ def load_frozen_encoder(config_path: str, ckpt_path: str, overrides: List[str]) 
     model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder}).to(device)
 
     state = torch.load(ckpt_path, map_location="cpu")
-    # Using strict=False because older checkpoints might have 'bottleneck' in state_dict.
-    model.load_state_dict(state["model"], strict=False)
+    filtered = {k: v for k, v in state["model"].items() if k.split(".", 1)[0] in {"frontend", "encoder"}}
+    model.load_state_dict(filtered, strict=True)
     model.eval()
 
     for p in model.parameters():

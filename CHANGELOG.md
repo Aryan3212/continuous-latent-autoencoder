@@ -47,6 +47,29 @@ interfaces are unchanged.
   `CODEBASE.md` to match the current tree; surgical README fixes (folder guide,
   removed `calm_like_exp0.yaml` refs, corrected the "Notes" claim that removed
   experimental paths were still config toggles).
+- **Probe / eval / logging cleanups**: merged the ~95%-identical
+  `eval/eval_emotion.py` + `eval/eval_gender.py` into one
+  `eval/eval_cls_probe.py` (required `--label_key`, `--hidden` arg, always
+  reports accuracy + macro-F1; `run_probes.py` passes `--hidden 256/128` to
+  preserve per-probe capacity). Root `Config` drops `extra="allow"` so
+  root-level typos fail loudly (inherits `extra="forbid"`). Eval checkpoint
+  loading is now filter-then-`strict=True` (`eval/common.py`,
+  `eval/eval_recon.py`, `scripts/check_rank.py`, `scripts/visualize_latents.py`)
+  — train checkpoints hold the full ModuleDict, so keys are filtered to the
+  built submodules before a strict load. `.gitignore` `data/` narrowed to
+  `data/manifests/` (the broad pattern was shadowing tracked `data/*.py`).
+  `RotaryEmbedding._maybe_build` cache check now includes `dtype` (an
+  autocast-fp16 cache was being served to later fp32 calls). `train.py`
+  per-dataset log averaging switched to sum+count pairs so intermittent
+  `loss_stft/<ds>`/`loss_wav/<ds>` keys report a true mean instead of being
+  divided by the full microbatch/log-interval denominator.
+- **UTF-8 pinned on text I/O**: `data/dataset.py` manifest reads,
+  `utils/config.py` YAML loads, and `utils/checkpoint.py` run-metadata writes
+  now pass `encoding="utf-8"` explicitly. Under a C/POSIX locale (WSL2/SSH)
+  Python's default open() encoding is ASCII, which crashed a run at its first
+  eval when the val manifest's Bengali text hit `_read_manifest`
+  (UnicodeDecodeError on byte 0xe0). The configs' non-ASCII comment characters
+  would have tripped the same way on config load.
 
 ## 2026-06-10
 
