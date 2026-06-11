@@ -106,6 +106,7 @@ def _load_feats_and_text(
     batch_size: int,
     segment_seconds: float,
     chunk_seconds: float | None,
+    source: str,
     log_name: str = "",
     max_samples: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
@@ -120,6 +121,7 @@ def _load_feats_and_text(
         segment_seconds=segment_seconds,
         batch_size=batch_size,
         chunk_seconds=chunk_seconds,
+        source=source,
         log_name=log_name,
     ):
         feats_list.append(feats)  # already on CPU from iter_frame_features
@@ -160,6 +162,11 @@ def main() -> None:
                          "segment-length inputs, so longer single passes are OOD.")
     ap.add_argument("--head", choices=["linear", "bilstm"], default="linear",
                     help="Probe head: linear (pure probe) or bilstm (1x BiLSTM-256 -> Linear)")
+    ap.add_argument("--features", choices=["encoder", "frontend", "mel"], default="encoder",
+                    help="encoder: the model under test; frontend: conv frontend only "
+                         "(does phonetic info exist before the conformer?); mel: log-mel "
+                         "fbank control bypassing the model — verifies the probe harness "
+                         "and gives a ceiling (50 Hz frames: use --upsample_factor 1)")
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--out", required=True)
     ap.add_argument("overrides", nargs="*")
@@ -175,7 +182,8 @@ def main() -> None:
     if chunk <= 0:
         chunk = None
     print(f"  [ASR] segment_seconds={seg:g}, max_utt_seconds={max_utt:g}, "
-          f"chunk_seconds={'off' if chunk is None else f'{chunk:g}'}", flush=True)
+          f"chunk_seconds={'off' if chunk is None else f'{chunk:g}'}, "
+          f"features={args.features}", flush=True)
     upf = max(1, int(args.upsample_factor))
 
     # Drop utterances longer than max_utt BEFORE extraction: _start_crop would
@@ -196,6 +204,7 @@ def main() -> None:
             segment_seconds=seg,
             batch_size=args.batch_size,
             chunk_seconds=chunk,
+            source=args.features,
         )
         feats, _, meta = next(feats_iter)
         out = {
@@ -217,6 +226,7 @@ def main() -> None:
         batch_size=args.batch_size,
         segment_seconds=seg,
         chunk_seconds=chunk,
+        source=args.features,
         log_name="ASR train",
         max_samples=max_s,
     )
@@ -228,6 +238,7 @@ def main() -> None:
         batch_size=args.batch_size,
         segment_seconds=seg,
         chunk_seconds=chunk,
+        source=args.features,
         log_name="ASR dev",
         max_samples=max_s,
     )
@@ -357,6 +368,7 @@ def main() -> None:
         "max_utt_seconds": float(max_utt),
         "chunk_seconds": chunk,
         "head": args.head,
+        "features": args.features,
         "n_filtered_train": n_filtered_tr,
         "n_filtered_dev": n_filtered_de,
         "n_unknown_duration_train": n_unknown_tr,

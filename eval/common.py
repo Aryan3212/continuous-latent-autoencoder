@@ -86,6 +86,7 @@ def iter_frame_features(
     num_workers: int = 0,
     log_name: str = "",
     chunk_seconds: float | None = None,
+    source: str = "encoder",
 ) -> Iterable[Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]]:
     """Yield (feats (B,T',D), valid_lens (B,), meta) per batch.
 
@@ -96,9 +97,19 @@ def iter_frame_features(
     inputs, so a single pass over a longer padded waveform is
     out-of-distribution and degrades every frame.
 
+    source selects the representation:
+      - "encoder":  frontend + conformer encoder (the model under test)
+      - "frontend": conv frontend only — localizes whether phonetic info
+        exists before the conformer
+      - "mel":      log-mel filterbank (50 Hz, 64 bins, per-utterance CMVN)
+        that bypasses the model entirely — a known-good control for the
+        probe harness itself
+
     valid_lens counts the frames covered by real audio, from the manifest's
     `duration`; rows without a usable duration get the full frame count.
     """
+    if source not in ("encoder", "frontend", "mel"):
+        raise ValueError(f"unknown feature source: {source!r}")
     ds = AudioDataset(
         DatasetConfig(
             manifest=manifest_path,
@@ -111,6 +122,17 @@ def iter_frame_features(
         ds, batch_size=batch_size, num_workers=num_workers,
         collate_fn=collate_fixed, drop_last=False,
     )
+    melspec = None
+    if source == "mel":
+        import torchaudio
+        melspec = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate, n_fft=512, win_length=512, hop_length=320, n_mels=64
+        ).to(lm.device)
+
+    def _encode(w: torch.Tensor) -> torch.Tensor:  # (B,1,S) -> (B,D,T')
+        h0 = lm.frontend(w)
+        return h0 if source == "frontend" else lm.encoder(h0)
+
     use_amp = lm.device.type == "cuda"
     start_t = time.perf_counter()
     n_samples = 0
@@ -118,18 +140,25 @@ def iter_frame_features(
         wav = batch["wav"].to(lm.device)  # (B, 1, S)
         B, _, S = wav.shape
         total_samples = S
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            if chunk_seconds is not None and int(round(chunk_seconds * sample_rate)) < S:
-                cs = int(round(chunk_seconds * sample_rate))
-                n_chunks = math.ceil(S / cs)
-                total_samples = n_chunks * cs
-                if total_samples > S:
-                    wav = torch.nn.functional.pad(wav, (0, total_samples - S))
-                hE = lm.encoder(lm.frontend(wav.view(B * n_chunks, 1, cs)))  # (B*n, D, Tc)
-                D, Tc = hE.size(1), hE.size(2)
-                hE = hE.view(B, n_chunks, D, Tc).permute(0, 2, 1, 3).reshape(B, D, n_chunks * Tc)
-            else:
-                hE = lm.encoder(lm.frontend(wav))  # (B,D,T')
+        if source == "mel":
+            # fp32 on purpose; per-utterance, per-bin CMVN like standard fbank
+            # frontends. Padding frames contribute a constant to the stats —
+            # acceptable for a control.
+            hE = torch.log(melspec(wav.squeeze(1)) + 1e-5)  # (B, M, Tm)
+            hE = (hE - hE.mean(dim=-1, keepdim=True)) / (hE.std(dim=-1, keepdim=True) + 1e-5)
+        else:
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                if chunk_seconds is not None and int(round(chunk_seconds * sample_rate)) < S:
+                    cs = int(round(chunk_seconds * sample_rate))
+                    n_chunks = math.ceil(S / cs)
+                    total_samples = n_chunks * cs
+                    if total_samples > S:
+                        wav = torch.nn.functional.pad(wav, (0, total_samples - S))
+                    hE = _encode(wav.view(B * n_chunks, 1, cs))  # (B*n, D, Tc)
+                    D, Tc = hE.size(1), hE.size(2)
+                    hE = hE.view(B, n_chunks, D, Tc).permute(0, 2, 1, 3).reshape(B, D, n_chunks * Tc)
+                else:
+                    hE = _encode(wav)  # (B,D,T')
         feats = hE.float()
         n_frames = feats.size(-1)
         samples_per_frame = total_samples / n_frames
