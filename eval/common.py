@@ -15,10 +15,14 @@ def build_charset(texts: List[str]) -> List[str]:
     return ["<blank>"] + chars
 
 
-def greedy_decode_ctc(log_probs: torch.Tensor, id2ch: List[str]) -> List[str]:
+def greedy_decode_ctc(
+    log_probs: torch.Tensor, id2ch: List[str], lens: List[int] | None = None
+) -> List[str]:
     pred = log_probs.argmax(dim=-1).cpu().tolist()  # (B, T)
     outs: List[str] = []
-    for seq in pred:
+    for bi, seq in enumerate(pred):
+        if lens is not None:
+            seq = seq[: int(lens[bi])]
         last = None
         chars: List[str] = []
         for i in seq:
@@ -81,7 +85,20 @@ def iter_frame_features(
     batch_size: int,
     num_workers: int = 0,
     log_name: str = "",
-) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
+    chunk_seconds: float | None = None,
+) -> Iterable[Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]]:
+    """Yield (feats (B,T',D), valid_lens (B,), meta) per batch.
+
+    chunk_seconds: when set and shorter than segment_seconds, the waveform is
+    encoded in independent windows of that length and the frame features are
+    concatenated along time. Pass the PRETRAINING segment length: the encoder
+    has unmasked global attention + BatchNorm and only ever saw segment-length
+    inputs, so a single pass over a longer padded waveform is
+    out-of-distribution and degrades every frame.
+
+    valid_lens counts the frames covered by real audio, from the manifest's
+    `duration`; rows without a usable duration get the full frame count.
+    """
     ds = AudioDataset(
         DatasetConfig(
             manifest=manifest_path,
@@ -98,15 +115,35 @@ def iter_frame_features(
     start_t = time.perf_counter()
     n_samples = 0
     for i, batch in enumerate(dl):
-        wav = batch["wav"].to(lm.device)
+        wav = batch["wav"].to(lm.device)  # (B, 1, S)
+        B, _, S = wav.shape
+        total_samples = S
         with torch.amp.autocast("cuda", enabled=use_amp):
-            h0 = lm.frontend(wav)
-            hE = lm.encoder(h0)  # (B,D,T')
+            if chunk_seconds is not None and int(round(chunk_seconds * sample_rate)) < S:
+                cs = int(round(chunk_seconds * sample_rate))
+                n_chunks = math.ceil(S / cs)
+                total_samples = n_chunks * cs
+                if total_samples > S:
+                    wav = torch.nn.functional.pad(wav, (0, total_samples - S))
+                hE = lm.encoder(lm.frontend(wav.view(B * n_chunks, 1, cs)))  # (B*n, D, Tc)
+                D, Tc = hE.size(1), hE.size(2)
+                hE = hE.view(B, n_chunks, D, Tc).permute(0, 2, 1, 3).reshape(B, D, n_chunks * Tc)
+            else:
+                hE = lm.encoder(lm.frontend(wav))  # (B,D,T')
         feats = hE.float()
+        n_frames = feats.size(-1)
+        samples_per_frame = total_samples / n_frames
+        lens: List[int] = []
+        for m in batch["meta"]:
+            dur = m.get("duration")
+            t_valid = n_frames
+            if isinstance(dur, (int, float)) and not isinstance(dur, bool) and dur > 0:
+                t_valid = min(n_frames, max(1, math.ceil(float(dur) * sample_rate / samples_per_frame)))
+            lens.append(t_valid)
         n_samples += feats.size(0)
         if log_name and (i + 1) % 50 == 0:
             _log_progress(log_name, n_samples, start_t)
-        yield feats.transpose(1, 2).cpu(), batch["meta"]  # (B,T',D)
+        yield feats.transpose(1, 2).cpu(), torch.tensor(lens, dtype=torch.long), batch["meta"]
     if log_name:
         _log_progress(log_name, n_samples, start_t)
 

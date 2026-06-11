@@ -82,8 +82,19 @@ class _BiLSTMHead(nn.Module):
         self.lstm = nn.LSTM(dim, hidden, batch_first=True, bidirectional=True)
         self.proj = nn.Linear(2 * hidden, vocab_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, _ = self.lstm(x)
+    def forward(self, x: torch.Tensor, lens: torch.Tensor | None = None) -> torch.Tensor:
+        # Pack when valid lengths are known so the backward direction starts
+        # at the last real frame instead of carrying state across padding.
+        if lens is not None:
+            packed = nn.utils.rnn.pack_padded_sequence(
+                x, lens.cpu(), batch_first=True, enforce_sorted=False
+            )
+            out, _ = self.lstm(packed)
+            x, _ = nn.utils.rnn.pad_packed_sequence(
+                out, batch_first=True, total_length=x.size(1)
+            )
+        else:
+            x, _ = self.lstm(x)
         return self.proj(x)
 
 
@@ -94,30 +105,36 @@ def _load_feats_and_text(
     text_key: str,
     batch_size: int,
     segment_seconds: float,
+    chunk_seconds: float | None,
     log_name: str = "",
     max_samples: int = 0,
-) -> Tuple[torch.Tensor, List[str]]:
+) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
     feats_list: List[torch.Tensor] = []
+    lens_list: List[torch.Tensor] = []
     texts: List[str] = []
     n = 0
-    for feats, meta in iter_frame_features(
+    for feats, lens, meta in iter_frame_features(
         lm,
         manifest,
         sample_rate=lm.cfg.data.sample_rate,
         segment_seconds=segment_seconds,
         batch_size=batch_size,
+        chunk_seconds=chunk_seconds,
         log_name=log_name,
     ):
         feats_list.append(feats)  # already on CPU from iter_frame_features
+        lens_list.append(lens)
         texts.extend([m[text_key] for m in meta])
         n += feats.size(0)
         if max_samples > 0 and n >= max_samples:
             break
     all_feats = torch.cat(feats_list, dim=0)
+    all_lens = torch.cat(lens_list, dim=0)
     if max_samples > 0 and all_feats.size(0) > max_samples:
         all_feats = all_feats[:max_samples]
+        all_lens = all_lens[:max_samples]
         texts = texts[:max_samples]
-    return all_feats, texts
+    return all_feats, all_lens, texts
 
 
 def main() -> None:
@@ -136,6 +153,11 @@ def main() -> None:
                     help="repeat_interleave features along time before the CTC head (1=off)")
     ap.add_argument("--max_utt_seconds", type=float, default=None,
                     help="Drop manifest rows longer than this (default: effective segment_seconds)")
+    ap.add_argument("--chunk_seconds", type=float, default=None,
+                    help="Encode audio in independent windows of this length and concatenate "
+                         "features (default: pretraining data.segment_seconds; <=0 disables). "
+                         "The encoder has unmasked global attention and only ever saw "
+                         "segment-length inputs, so longer single passes are OOD.")
     ap.add_argument("--head", choices=["linear", "bilstm"], default="linear",
                     help="Probe head: linear (pure probe) or bilstm (1x BiLSTM-256 -> Linear)")
     ap.add_argument("--dry_run", action="store_true")
@@ -149,7 +171,11 @@ def main() -> None:
     # transcript no longer matches the start-cropped audio.
     seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.eval.asr.segment_seconds
     max_utt = args.max_utt_seconds if args.max_utt_seconds is not None else seg
-    print(f"  [ASR] segment_seconds={seg:g}, max_utt_seconds={max_utt:g}", flush=True)
+    chunk = args.chunk_seconds if args.chunk_seconds is not None else lm.cfg.data.segment_seconds
+    if chunk <= 0:
+        chunk = None
+    print(f"  [ASR] segment_seconds={seg:g}, max_utt_seconds={max_utt:g}, "
+          f"chunk_seconds={'off' if chunk is None else f'{chunk:g}'}", flush=True)
     upf = max(1, int(args.upsample_factor))
 
     # Drop utterances longer than max_utt BEFORE extraction: _start_crop would
@@ -169,8 +195,9 @@ def main() -> None:
             sample_rate=lm.cfg.data.sample_rate,
             segment_seconds=seg,
             batch_size=args.batch_size,
+            chunk_seconds=chunk,
         )
-        feats, meta = next(feats_iter)
+        feats, _, meta = next(feats_iter)
         out = {
             "dry_run": True,
             "feats_shape": list(feats.shape),
@@ -183,22 +210,24 @@ def main() -> None:
     # Free the frozen encoder before loading features — we don't need it after extraction
     max_s = args.max_samples
     print(f"  [ASR] Extracting train features{f' (max {max_s})' if max_s else ''}...", flush=True)
-    feats_tr, text_tr = _load_feats_and_text(
+    feats_tr, lens_tr, text_tr = _load_feats_and_text(
         lm,
         train_manifest,
         text_key=args.text_key,
         batch_size=args.batch_size,
         segment_seconds=seg,
+        chunk_seconds=chunk,
         log_name="ASR train",
         max_samples=max_s,
     )
     print(f"  [ASR] Extracting dev features{f' (max {max_s})' if max_s else ''}...", flush=True)
-    feats_de, text_de = _load_feats_and_text(
+    feats_de, lens_de, text_de = _load_feats_and_text(
         lm,
         dev_manifest,
         text_key=args.text_key,
         batch_size=args.batch_size,
         segment_seconds=seg,
+        chunk_seconds=chunk,
         log_name="ASR dev",
         max_samples=max_s,
     )
@@ -225,20 +254,21 @@ def main() -> None:
     targets_tr = [torch.tensor(_encode(t, vocab), dtype=torch.long) for t in text_tr]
 
     # Feasibility accounting: zero_infinity=True silently zeroes the loss of any
-    # sample whose (upsampled) input is shorter than its CTC-minimum target
-    # length — the user must SEE how many samples never contribute gradient.
-    def _count_infeasible(input_len: int, encoded: List[List[int]]) -> int:
-        return sum(1 for t in encoded if _min_ctc_frames(t) > input_len)
+    # sample whose (upsampled) VALID input is shorter than its CTC-minimum
+    # target length — the user must SEE how many samples never contribute
+    # gradient. Uses per-sample valid lengths, not the padded frame count.
+    def _count_infeasible(lens: torch.Tensor, encoded: List[List[int]]) -> int:
+        return sum(1 for t, L in zip(encoded, lens.tolist()) if _min_ctc_frames(t) > L * upf)
 
     enc_tr = [t.tolist() for t in targets_tr]
     enc_de = [_encode(t, vocab) for t in text_de]
-    n_inf_tr = _count_infeasible(feats_tr.size(1) * upf, enc_tr)
-    n_inf_de = _count_infeasible(feats_de.size(1) * upf, enc_de)
+    n_inf_tr = _count_infeasible(lens_tr, enc_tr)
+    n_inf_de = _count_infeasible(lens_de, enc_de)
     pct_inf_tr = 100.0 * n_inf_tr / max(1, len(enc_tr))
     pct_inf_de = 100.0 * n_inf_de / max(1, len(enc_de))
     if n_inf_tr or n_inf_de:
         print(f"  [ASR] WARNING: CTC-infeasible samples at upsample x{upf} "
-              f"(input {feats_tr.size(1) * upf} frames): "
+              f"(per-sample valid frames x {upf}): "
               f"train {n_inf_tr}/{len(enc_tr)} ({pct_inf_tr:.1f}%), "
               f"dev {n_inf_de}/{len(enc_de)} ({pct_inf_de:.1f}%). "
               f"zero_infinity=True silently zeroes their training loss — "
@@ -272,10 +302,13 @@ def main() -> None:
         # linear head, while stored features stay compact on CPU.
         if upf > 1:
             xb = xb.repeat_interleave(upf, dim=1)
+        # Valid (real-audio) lengths: CTC must not be allowed to align target
+        # characters into the padding region.
+        ulens = (lens_tr[idx] * upf).clamp(max=xb.size(1))
         with torch.amp.autocast("cuda", enabled=use_amp):
-            logits = head(xb)
+            logits = head(xb, ulens) if isinstance(head, _BiLSTMHead) else head(xb)
         log_probs = logits.float().log_softmax(dim=-1)  # (B,T,V), CTC in fp32
-        input_lens = torch.full((xb.size(0),), xb.size(1), dtype=torch.long, device=device)
+        input_lens = ulens.to(device)
         yb = [targets_tr[i] for i in idx.tolist()]
         target_lens = torch.tensor([t.numel() for t in yb], dtype=torch.long, device=device)
         ycat = torch.cat([t.to(device) for t in yb], dim=0) if target_lens.sum().item() > 0 else torch.zeros((0,), dtype=torch.long, device=device)
@@ -291,7 +324,7 @@ def main() -> None:
             print(f"  [ASR] step {step_i+1}/{args.steps}  loss={loss.item():.4f}  "
                   f"({rate:.0f} steps/s, ETA {eta:.0f}s)", flush=True)
 
-    def _eval(feats: torch.Tensor, texts: List[str], eval_batch: int = 256) -> Dict[str, Any]:
+    def _eval(feats: torch.Tensor, lens: torch.Tensor, texts: List[str], eval_batch: int = 256) -> Dict[str, Any]:
         head.eval()
         all_hyp: List[str] = []
         # Upsampling multiplies frames per sample, so shrink the eval batch to
@@ -300,13 +333,15 @@ def main() -> None:
         with torch.no_grad():
             # Batch the eval to avoid OOM on large feature tensors
             for start in range(0, feats.size(0), eval_batch):
-                chunk = feats[start : start + eval_batch].to(device)
+                xb = feats[start : start + eval_batch].to(device)
                 if upf > 1:
                     # Same time-upsampling as training — the head was trained
                     # on upsampled inputs.
-                    chunk = chunk.repeat_interleave(upf, dim=1)
-                lp = head(chunk).log_softmax(dim=-1)
-                all_hyp.extend(greedy_decode_ctc(lp, id2ch))
+                    xb = xb.repeat_interleave(upf, dim=1)
+                ulens = (lens[start : start + eval_batch] * upf).clamp(max=xb.size(1))
+                lp = (head(xb, ulens) if isinstance(head, _BiLSTMHead) else head(xb)).log_softmax(dim=-1)
+                # Decode only the valid frames — padding must not emit chars.
+                all_hyp.extend(greedy_decode_ctc(lp, id2ch, lens=ulens.tolist()))
         w = wer(texts, all_hyp)
         examples = []
         for i in range(min(5, len(texts))):
@@ -315,11 +350,12 @@ def main() -> None:
 
     print("  [ASR] Evaluating...", flush=True)
     out = {
-        "train": _eval(feats_tr, text_tr),
-        "dev": _eval(feats_de, text_de),
+        "train": _eval(feats_tr, lens_tr, text_tr),
+        "dev": _eval(feats_de, lens_de, text_de),
         "vocab_size": len(charset),
         "upsample_factor": upf,
         "max_utt_seconds": float(max_utt),
+        "chunk_seconds": chunk,
         "head": args.head,
         "n_filtered_train": n_filtered_tr,
         "n_filtered_dev": n_filtered_de,
