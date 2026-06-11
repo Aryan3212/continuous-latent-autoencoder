@@ -481,7 +481,7 @@ def main() -> None:
                 # no extra /N rescaling here.
                 D_lat = p_cat.size(1)
                 sig_input = p_cat.permute(2, 0, 1)                # (T', V*B, P)
-                l_sig, sig_stats_last = sigreg(
+                l_sig, _ = sigreg(
                     sig_input.reshape(-1, D_lat),                 # (T'*V*B, P)
                     step=step,
                 )
@@ -497,34 +497,31 @@ def main() -> None:
                     )
                 else:
                     l_sig_z = torch.tensor(0.0, device=device)
-                # Utterance-level on p: mean-pool over T' so pooled embeddings
+                # Utterance-level on z: mean-pool over T' so pooled embeddings
                 # (gender/emotion/accent probes) can't collapse to a single
-                # point while per-frame stats stay healthy.
+                # point while per-frame stats stay healthy. Must act on z, not
+                # p — the probes pool z, and the projector can satisfy a
+                # p-level term without pooled z gaining any variance.
                 if sig_utt_w > 0:
                     l_sig_utt, _ = sigreg(
-                        p_cat.mean(dim=2),                        # (V*B, P)
+                        z_cat.mean(dim=2),                        # (V*B, D)
                         step=step,
                     )
                 else:
                     l_sig_utt = torch.tensor(0.0, device=device)
                 sig_stats = {
-                    "sigreg_view": l_sig.detach(),
-                    "l_sig_utt": l_sig_utt.detach(),
-                    "l_sig_z": l_sig_z.detach(),
                     "l_sig_frm": l_sig.detach(),
+                    "l_sig_z": l_sig_z.detach(),
+                    "l_sig_utt": l_sig_utt.detach(),
                     "l_jepa_predict": l_jepa_pred_dbg,
                     "l_jepa_context": l_jepa_ctx_dbg,
                     "l_jepa_global": l_jepa_global_dbg,
-                    "z_var_min": sig_stats_last["z_var_min"],
-                    "z_var_med": sig_stats_last["z_var_med"],
-                    "z_var_max": sig_stats_last["z_var_max"],
                 }
 
                 # Diagnostic slicing: compare global-0 vs local-0 (clean vs masked signal).
                 z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + rank diag)
                 p_a = p_cat[:B]               # view-0 projected (JEPA-space diagnostics)
                 mask_idx = num_globals
-                z_mask = z_cat[mask_idx * B : (mask_idx + 1) * B]
                 p_mask = p_cat[mask_idx * B : (mask_idx + 1) * B]
 
                 # Decode from view-0 to clean wav_a (denoising reconstruction).
@@ -584,11 +581,10 @@ def main() -> None:
                     z_rank_utt = torch.tensor(0.0, device=z_a.device)
                     z_rank_res = torch.tensor(0.0, device=z_a.device)
 
-                # JEPA collapse detector — cheap, run every microbatch
-                z_a_rms = z_a.pow(2).mean().sqrt()
-                z_mask_rms = z_mask.pow(2).mean().sqrt()
+                # JEPA collapse detector — cheap, run every microbatch. Raw z/p
+                # RMS values are pinned ~1 by LayerNorm/BatchNorm and carry no
+                # signal; the informative quantity is diff relative to norm.
                 p_a_rms = p_a.pow(2).mean().sqrt()
-                p_mask_rms = p_mask.pow(2).mean().sqrt()
                 jepa_diff_rms = (p_a - p_mask).pow(2).mean().sqrt()
                 jepa_to_norm_ratio = jepa_diff_rms / p_a_rms.clamp_min(1e-6)
 
@@ -596,19 +592,11 @@ def main() -> None:
                 "l_stft": l_stft.detach(),
                 "l_wav": l_wav.detach(),
                 "l_jepa": l_jepa.detach(),
-                "l_jepa_mask": l_jepa_mask.detach(),
-                "l_sig": l_sig.detach(),
                 "z_rank": z_rank.detach(),
                 "z_rank_utt": z_rank_utt.detach(),
                 "z_rank_res": z_rank_res.detach(),
-                "z_a_rms": z_a_rms.detach(),
-                "z_mask_rms": z_mask_rms.detach(),
-                "p_a_rms": p_a_rms.detach(),
-                "p_mask_rms": p_mask_rms.detach(),
                 "jepa_diff_rms": jepa_diff_rms.detach(),
                 "jepa_to_norm_ratio": jepa_to_norm_ratio.detach(),
-                "z_mean": z_a.mean().detach(),
-                "z_std": z_a.std(unbiased=False).detach(),
                 "vram_gb": torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
             }
             mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})
@@ -659,8 +647,7 @@ def main() -> None:
             for k, v in accum_stats.items():
                 log_stats[k] = v.item() / log_interval
                 v.zero_()
-            epoch_idx = 0
-            row = {"step": step, "epoch": epoch_idx, **log_stats}
+            row = {"step": step, **log_stats}
 
             encoder_mod = model["encoder"]
             if hasattr(encoder_mod, "mhc_wrappers"):

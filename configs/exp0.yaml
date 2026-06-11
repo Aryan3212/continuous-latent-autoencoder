@@ -96,7 +96,7 @@ loss:
     logmag_weight: 1.0
   wav_l1_weight: 0.0
   jepa:
-    weight: 3.0
+    weight: 1.0                 # was 3.0: jepa:z_weight pressure ratio was 150:1 and z_rank equilibrated at ~5.5/64; 1.0 + z_weight 0.1 gives 10:1 (LeWM uses ~11:1)
     # Asymmetric global/local recipe (DINO-style): globals-only center anchors
     # the loss; locals get L_predict + L_context against it; L_global enforces
     # cross-global consistency. Total views = num_globals + num_locals.
@@ -108,8 +108,8 @@ loss:
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
-    z_weight: 0.02              # frame-level SIGReg directly on encoder z — anti-collapse pressure the projector can't filter out
-    utt_weight: 0.05            # SIGReg on time-pooled projector output — fights utterance-level collapse
+    z_weight: 0.1               # was 0.02: frame-level SIGReg directly on encoder z. Judge by z_rank, not l_sig_z — the encoder's final LayerNorm fixes per-frame norms, so l_sig_z has an irreducible floor
+    utt_weight: 0.05            # SIGReg on time-pooled encoder z (was pooled p) — the probes pool z, and the projector can absorb a p-level term without pooled z gaining variance
 
 optim:
   lr: 5.0e-4                    # LeJEPA paper range: 5e-4 to 5e-3
