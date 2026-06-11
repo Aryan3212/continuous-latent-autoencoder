@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -49,13 +49,13 @@ class EppsPulley(nn.Module):
 
 
 class SlicingUnivariateTest(nn.Module):
-    """Algorithm 1 slicing wrapper. Seeded by global_step for DDP sync."""
+    """Algorithm 1 slicing wrapper. Seeded by the training step for DDP sync
+    and resume-reproducibility (no hidden internal counter)."""
 
     def __init__(self, univariate_test: nn.Module, num_slices: int = 256):
         super().__init__()
         self.univariate_test = univariate_test
         self.num_slices = num_slices
-        self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
         self._generator = None
         self._generator_device = None
 
@@ -66,14 +66,12 @@ class SlicingUnivariateTest(nn.Module):
         self._generator.manual_seed(seed)
         return self._generator
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, step: int) -> torch.Tensor:
         # x: (N, D)
         with torch.no_grad():
-            seed = int(self.global_step.item())
-            gen = self._get_generator(x.device, seed)
+            gen = self._get_generator(x.device, int(step))
             A = torch.randn(x.size(-1), self.num_slices, device=x.device, generator=gen)
             A /= A.norm(p=2, dim=0)
-            self.global_step += 1
 
         sliced = x @ A  # (N, M)
         stats = self.univariate_test(sliced)  # (M,)
@@ -100,11 +98,11 @@ class SIGReg(nn.Module):
             num_slices=cfg.num_slices,
         )
 
-    def forward(self, z: torch.Tensor, step: Optional[int] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def forward(self, z: torch.Tensor, step: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         if z.dim() != 2:
             raise ValueError(f"Expected z as (N, D), got {tuple(z.shape)}")
 
-        loss = self.test(z)
+        loss = self.test(z, step=step)
 
         with torch.no_grad():
             var = z.var(dim=0, unbiased=False)  # (D,)

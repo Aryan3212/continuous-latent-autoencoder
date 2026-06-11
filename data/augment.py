@@ -137,36 +137,29 @@ def apply_waveform_augment(wav: torch.Tensor, sample_rate: int, cfg: WaveAugConf
         scale = (ra / (rb * target_ratio)).clamp_min(0.0)
         wav = wav + noise_mask * (noise * scale)
 
-    # 3. Lowpass — bucketed by kernel size for batched conv
+    # 3. Lowpass — per-sample windowed-sinc FIR, one grouped conv over the batch.
+    # (The previous moving-average filter's -3dB point was ~0.44x the configured
+    # cutoff and couldn't represent gentle cutoffs at all.)
     if cfg.lowpass_prob > 0:
-        # Sample per-sample cutoff and convert to kernel size (odd).
-        cutoff = torch.empty(B, device=device).uniform_(cfg.lowpass_min_freq, cfg.lowpass_max_freq)
-        k_float = float(sample_rate) / cutoff
-        k = k_float.to(torch.int64).clamp_min(2)
-        k = k + (1 - (k % 2))  # round up to next odd
-        apply_mask = torch.rand(B, device=device) < cfg.lowpass_prob
+        taps = 63  # odd; transition width ~ 4*fs/taps ≈ 1 kHz at 16 kHz
+        cutoff = torch.empty(B, 1, device=device).uniform_(cfg.lowpass_min_freq, cfg.lowpass_max_freq)
+        fc = (cutoff / float(sample_rate)).clamp(max=0.5)                     # (B, 1) normalized
+        t = torch.arange(taps, device=device, dtype=torch.float32) - (taps - 1) / 2
+        h = 2.0 * fc * torch.sinc(2.0 * fc * t)                               # (B, taps)
+        h = h * torch.hann_window(taps, periodic=False, device=device)
+        h = (h / h.sum(dim=-1, keepdim=True)).to(dtype)
+        apply_mask = torch.rand(B, 1, 1, device=device) < cfg.lowpass_prob
+        xp = F.pad(wav, (taps // 2, taps // 2), mode="reflect")               # (B, 1, T+taps-1)
+        # .to(dtype): under autocast conv1d emits fp16 while wav stays fp32.
+        filtered = F.conv1d(xp.transpose(0, 1), h.unsqueeze(1), groups=B).transpose(0, 1).to(dtype)
+        wav = torch.where(apply_mask, filtered, wav)
 
-        out_lp = wav.clone()
-        unique_k = torch.unique(k).tolist()
-        for kv in unique_k:
-            kv_int = int(kv)
-            if kv_int <= 1:
-                continue
-            sel = apply_mask & (k == kv)
-            if not sel.any():
-                continue
-            idx = sel.nonzero(as_tuple=False).squeeze(-1)
-            xb = wav.index_select(0, idx)             # (Nb, 1, T)
-            pad = kv_int // 2
-            xp = F.pad(xb, (pad, pad), mode='reflect')
-            xc = F.avg_pool1d(xp, kernel_size=kv_int, stride=1)
-            out_lp.index_copy_(0, idx, xc)
-        wav = out_lp
-
-    # 4. Clipping — per-sample threshold and apply mask
+    # 4. Clipping — per-sample threshold relative to that sample's peak, so the
+    # aug actually clips regardless of recording level.
     if cfg.clip_prob > 0:
         clip_mask = (torch.rand(B, 1, 1, device=device) < cfg.clip_prob)
-        thresh = torch.empty(B, 1, 1, device=device, dtype=dtype).uniform_(cfg.clip_min, 0.99)
+        peak = wav.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)           # (B, 1, 1)
+        thresh = torch.empty(B, 1, 1, device=device, dtype=dtype).uniform_(cfg.clip_min, 0.99) * peak
         clipped = torch.maximum(torch.minimum(wav, thresh), -thresh)
         wav = torch.where(clip_mask, clipped, wav)
 

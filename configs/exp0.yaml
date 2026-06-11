@@ -2,7 +2,6 @@ run:
   run_id: null                # if null, auto-generate
   out_dir: runs
   seed: 0
-  device: auto               # auto | cpu | cuda
   amp: true
   wandb:
     enabled: true
@@ -27,7 +26,7 @@ aug:
     noise_snr_min: 0.0          # loud end: noise matches speech
     noise_snr_max: 25.0         # gentle end: barely audible
     lowpass_prob: 1.0           # always lowpass; cutoff sampled per-sample
-    lowpass_min_freq: 2700.0    # was 1500: don't train invariance to the timbre band gender/emotion probes need
+    lowpass_min_freq: 2700.0    # was 1500: don't train invariance to the timbre band gender/emotion probes need. NB: pre-2026-06-11 runs used a boxcar filter whose true -3dB point was ~0.44x this value; cutoffs are now accurate (windowed-sinc)
     lowpass_max_freq: 8000.0    # gentle: Nyquist, ≈ identity
     gain_prob: 1.0              # always vary volume
     gain_min: 0.6
@@ -96,7 +95,7 @@ loss:
     logmag_weight: 1.0
   wav_l1_weight: 0.0
   jepa:
-    weight: 1.0                 # was 3.0: jepa:z_weight pressure ratio was 150:1 and z_rank equilibrated at ~5.5/64; 1.0 + z_weight 0.1 gives 10:1 (LeWM uses ~11:1)
+    weight: 3.0                 # NB: wandb rank charts before the 2026-06-11 logging fix understate z_rank* by 10x (log_interval dilution); don't retune against the old charts
     # Asymmetric global/local recipe (DINO-style): globals-only center anchors
     # the loss; locals get L_predict + L_context against it; L_global enforces
     # cross-global consistency. Total views = num_globals + num_locals.
@@ -108,8 +107,9 @@ loss:
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
-    z_weight: 0.1               # was 0.02: frame-level SIGReg directly on encoder z. Judge by z_rank, not l_sig_z — the encoder's final LayerNorm fixes per-frame norms, so l_sig_z has an irreducible floor
-    utt_weight: 0.05            # SIGReg on time-pooled encoder z (was pooled p) — the probes pool z, and the projector can absorb a p-level term without pooled z gaining variance
+    # z_weight / utt_weight removed 2026-06-11: frame-level SIGReg on p only
+    # (LeJEPA-pure). Collapse monitors: z_rank* and p_rank_utt gauges — if
+    # p_rank_utt sags toward 1-2, reintroduce utterance-level SIGReg.
 
 optim:
   lr: 5.0e-4                    # LeJEPA paper range: 5e-4 to 5e-3
@@ -129,6 +129,7 @@ train:
   log_interval_steps: 10
   eval_interval_steps: 5000
   save_interval_steps: 10000
+  probe_interval_steps: 100   # embedding similarity probe (clean-vs-aug pos/neg MSE on z)
   val_batches: null       # Evaluate on the entire validation set
 
 eval:

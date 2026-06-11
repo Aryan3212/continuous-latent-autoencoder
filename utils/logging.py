@@ -24,10 +24,7 @@ def maybe_init_wandb(cfg: "Config", run_id: str, run_dir: str, resume: bool = Fa
     wb = cfg.run.wandb
     if not wb.enabled:
         return None
-    try:
-        import wandb  # type: ignore
-    except Exception:
-        return None
+    import wandb
     name = wb.name or run_id
     return wandb.init(
         project=wb.project,

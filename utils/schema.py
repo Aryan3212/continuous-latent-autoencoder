@@ -20,7 +20,6 @@ class RunCfg(_Base):
     run_id: Optional[str] = None
     out_dir: str = "runs"
     seed: int = 0
-    device: str = "auto"
     amp: bool = True
     wandb: WandbCfg = Field(default_factory=WandbCfg)
 
@@ -134,8 +133,6 @@ class JEPACfg(_Base):
 
 class SIGRegCfg(_Base):
     weight: float = 0.05
-    z_weight: float = 0.0      # frame-level SIGReg on encoder z (0 = off)
-    utt_weight: float = 0.0    # utterance-level SIGReg on pooled p (0 = off)
     num_slices: int = 1024
     t_max: float = 5.0
     n_points: int = 17
@@ -171,6 +168,7 @@ class TrainCfg(_Base):
     log_interval_steps: int = 10
     eval_interval_steps: int = 5000
     save_interval_steps: int = 10000
+    probe_interval_steps: int = 100  # embedding similarity probe (pos/neg MSE on z)
     val_batches: Optional[int] = None
 
 
