@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 import torch.nn as nn
 
-from jiwer import wer
+from jiwer import cer, wer
 
 from eval.common import build_charset, greedy_decode_ctc, iter_frame_features, load_frozen_encoder
 
@@ -107,6 +107,7 @@ def _load_feats_and_text(
     segment_seconds: float,
     chunk_seconds: float | None,
     source: str,
+    mel_hop: int = 320,
     log_name: str = "",
     max_samples: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
@@ -122,6 +123,7 @@ def _load_feats_and_text(
         batch_size=batch_size,
         chunk_seconds=chunk_seconds,
         source=source,
+        mel_hop=mel_hop,
         log_name=log_name,
     ):
         feats_list.append(feats)  # already on CPU from iter_frame_features
@@ -167,6 +169,10 @@ def main() -> None:
                          "(does phonetic info exist before the conformer?); mel: log-mel "
                          "fbank control bypassing the model — verifies the probe harness "
                          "and gives a ceiling (50 Hz frames: use --upsample_factor 1)")
+    ap.add_argument("--mel_hop", type=int, default=320,
+                    help="mel hop in samples (with --features mel): 320 = 50 Hz; "
+                         "1280 = 12.5 Hz to match the encoder frame rate "
+                         "(then use --upsample_factor 8)")
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--out", required=True)
     ap.add_argument("overrides", nargs="*")
@@ -205,6 +211,7 @@ def main() -> None:
             batch_size=args.batch_size,
             chunk_seconds=chunk,
             source=args.features,
+            mel_hop=args.mel_hop,
         )
         feats, _, meta = next(feats_iter)
         out = {
@@ -227,6 +234,7 @@ def main() -> None:
         segment_seconds=seg,
         chunk_seconds=chunk,
         source=args.features,
+        mel_hop=args.mel_hop,
         log_name="ASR train",
         max_samples=max_s,
     )
@@ -239,6 +247,7 @@ def main() -> None:
         segment_seconds=seg,
         chunk_seconds=chunk,
         source=args.features,
+        mel_hop=args.mel_hop,
         log_name="ASR dev",
         max_samples=max_s,
     )
@@ -353,11 +362,15 @@ def main() -> None:
                 lp = (head(xb, ulens) if isinstance(head, _BiLSTMHead) else head(xb)).log_softmax(dim=-1)
                 # Decode only the valid frames — padding must not emit chars.
                 all_hyp.extend(greedy_decode_ctc(lp, id2ch, lens=ulens.tolist()))
+        # CER is the primary probe metric: char-CTC + greedy decode makes
+        # word-level WER saturate near 1.0 (one wrong char fails the word)
+        # long before the representation stops improving.
         w = wer(texts, all_hyp)
+        c = cer(texts, all_hyp)
         examples = []
         for i in range(min(5, len(texts))):
             examples.append({"ref": texts[i], "hyp": all_hyp[i]})
-        return {"wer": float(w), "num_samples": len(texts), "examples": examples}
+        return {"wer": float(w), "cer": float(c), "num_samples": len(texts), "examples": examples}
 
     print("  [ASR] Evaluating...", flush=True)
     out = {
@@ -369,6 +382,7 @@ def main() -> None:
         "chunk_seconds": chunk,
         "head": args.head,
         "features": args.features,
+        "mel_hop": args.mel_hop if args.features == "mel" else None,
         "n_filtered_train": n_filtered_tr,
         "n_filtered_dev": n_filtered_de,
         "n_unknown_duration_train": n_unknown_tr,
@@ -378,7 +392,8 @@ def main() -> None:
         "n_infeasible_dev": n_inf_de,
         "pct_infeasible_dev": pct_inf_de,
     }
-    print(f"  [ASR] Train WER: {out['train']['wer']:.4f}, Dev WER: {out['dev']['wer']:.4f}", flush=True)
+    print(f"  [ASR] Train WER: {out['train']['wer']:.4f} CER: {out['train']['cer']:.4f}, "
+          f"Dev WER: {out['dev']['wer']:.4f} CER: {out['dev']['cer']:.4f}", flush=True)
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.out).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
 

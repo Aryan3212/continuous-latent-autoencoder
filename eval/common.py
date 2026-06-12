@@ -87,6 +87,7 @@ def iter_frame_features(
     log_name: str = "",
     chunk_seconds: float | None = None,
     source: str = "encoder",
+    mel_hop: int = 320,
 ) -> Iterable[Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]]:
     """Yield (feats (B,T',D), valid_lens (B,), meta) per batch.
 
@@ -101,9 +102,11 @@ def iter_frame_features(
       - "encoder":  frontend + conformer encoder (the model under test)
       - "frontend": conv frontend only — localizes whether phonetic info
         exists before the conformer
-      - "mel":      log-mel filterbank (50 Hz, 64 bins, per-utterance CMVN)
-        that bypasses the model entirely — a known-good control for the
-        probe harness itself
+      - "mel":      log-mel filterbank (64 bins, per-utterance CMVN) that
+        bypasses the model entirely — a known-good control for the probe
+        harness itself. mel_hop sets the frame hop in samples: 320 = 50 Hz;
+        1280 = 12.5 Hz, matching the encoder frame rate, to isolate how much
+        of the encoder/mel gap is frame rate vs feature content
 
     valid_lens counts the frames covered by real audio, from the manifest's
     `duration`; rows without a usable duration get the full frame count.
@@ -125,8 +128,10 @@ def iter_frame_features(
     melspec = None
     if source == "mel":
         import torchaudio
+        # Window must cover the hop at low frame rates (hop 1280 = 80ms).
+        n_fft = 512 if mel_hop <= 512 else 2048
         melspec = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate, n_fft=512, win_length=512, hop_length=320, n_mels=64
+            sample_rate=sample_rate, n_fft=n_fft, win_length=n_fft, hop_length=mel_hop, n_mels=64
         ).to(lm.device)
 
     def _encode(w: torch.Tensor) -> torch.Tensor:  # (B,1,S) -> (B,D,T')
