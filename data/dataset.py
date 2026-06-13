@@ -47,6 +47,33 @@ def _start_crop(wav: torch.Tensor, num_samples: int) -> torch.Tensor:
     return wav[:num_samples]
 
 
+def resolve_manifest_root(
+    manifest_path: str, items: List[Dict[str, Any]]
+) -> pathlib.Path:
+    """Directory against which relative ``audio_filepath`` rows resolve.
+
+    Two layouts exist in the wild: manifests sitting next to the audio
+    (root = the manifest's own directory), and the ``clae_data.pack`` layout
+    ``<root>/manifests/*.jsonl`` whose rows are relative to ``<root>``
+    (e.g. ``audio/openslr53/utt1.flac`` — root = one level up). Probe the
+    first relative row against both candidates so a wrong guess fails here,
+    at construction, rather than mid-epoch inside a dataloader worker.
+    """
+    parent = pathlib.Path(manifest_path).resolve().parent
+    for it in items:
+        p = it.get("audio_filepath")
+        if not p or os.path.isabs(p):
+            continue
+        for cand in (parent, parent.parent):
+            if (cand / p).exists():
+                return cand
+        raise FileNotFoundError(
+            f"relative audio_filepath {p!r} from {manifest_path} not found "
+            f"under {parent} or {parent.parent}"
+        )
+    return parent  # no relative rows: root is never used
+
+
 class AudioDataset(torch.utils.data.Dataset):
     """Map-style dataset over a JSONL manifest.
 
@@ -54,9 +81,10 @@ class AudioDataset(torch.utils.data.Dataset):
     ``duration``, ``text``, ``dataset`` are passed through as metadata).
 
     Path resolution: a relative ``audio_filepath`` is resolved against the
-    *parent directory of the manifest file*. This matches the Tier-2 layout
-    produced by ``clae_data.pack`` where manifest rows store paths relative
-    to the dataset repo root (e.g. ``audio/openslr53/utt00001.flac``).
+    root returned by :func:`resolve_manifest_root` — the manifest's own
+    directory, or one level up for the ``clae_data.pack`` layout where
+    ``<root>/manifests/*.jsonl`` rows store paths relative to ``<root>``
+    (e.g. ``audio/openslr53/utt00001.flac``).
 
     Multi-manifest note: when ``cfg.manifest`` is a list, all entries must
     contain absolute ``audio_filepath`` values. Mixing relative paths with a
@@ -72,7 +100,7 @@ class AudioDataset(torch.utils.data.Dataset):
 
         self._manifest_root: Optional[pathlib.Path]
         if isinstance(cfg.manifest, str):
-            self._manifest_root = pathlib.Path(cfg.manifest).resolve().parent
+            self._manifest_root = resolve_manifest_root(cfg.manifest, self.items)
         else:
             # List-of-manifests: relative paths can't be unambiguously resolved
             # without per-row provenance, so require absolute. Validate eagerly

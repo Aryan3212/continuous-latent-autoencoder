@@ -2,6 +2,28 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-06-12
+
+**Fresh-VM bootstrap + packed-manifest path fix**
+
+- **`setup.sh` (new)**: one-shot GPU-VM bootstrap — loads `.env` (template
+  rewritten in `.env.example`), generates `clae_data/_creds.py`, then `make
+  prepare` → `make fetch-data` → `make train`. Falls back to
+  `WANDB_MODE=offline` when no W&B key is set; `--no-train` stops after the
+  fetch. Only `HF_TOKEN` is required for training (Kaggle keys are
+  prep-instance only).
+- **Bug fix — packed-manifest path resolution**: `clae_data.pack` writes rows
+  relative to the dataset root (`audio/<ds>/<id>.flac`) but manifests live in
+  `<root>/manifests/`, while `AudioDataset` and `eval_asr` resolved relative
+  paths against the manifest's own dir — so `make fetch-data && make train`
+  failed on the first batch. New `resolve_manifest_root` in `data/dataset.py`
+  probes the first relative row against both candidate roots and fails fast
+  at construction; both consumers use it.
+- **Repro pins**: dead `uv.lock` line removed from `.gitignore` (the lockfile
+  is tracked; the rule would silently swallow it if ever untracked) and
+  `.python-version` (3.11) added so `uv sync` picks the same interpreter
+  everywhere.
+
 ## 2026-06-11
 
 **Simplification pass: dead-code removal, config unification, doc consolidation**

@@ -24,14 +24,24 @@ Deterministic continuous-latent speech foundation autoencoder:
 
 ## One-command training on a cloud GPU
 
-The training pipeline is wrapped behind a `Makefile`. On a fresh cloud-GPU
-instance with `git` and `make` installed:
+The training pipeline is wrapped behind a `Makefile`, with `setup.sh` as the
+fresh-instance entrypoint. On a newly provisioned cloud-GPU instance with
+`git` and `make` installed:
 
 ```bash
 git clone <repo-url>
 cd continuous-latent-autoencoder
-# 1) Make sure clae_data/_creds.py has your HF + WandB keys.
-#    Copy clae_data/_creds.example.py to clae_data/_creds.py and edit.
+cp .env.example .env && nano .env   # paste HF_TOKEN (+ WANDB_API_KEY)
+tmux new -s train                   # so training outlives the SSH session
+./setup.sh                          # deps -> creds -> fetch -> train
+```
+
+`setup.sh` generates `clae_data/_creds.py` from `.env`, falls back to
+offline W&B logging when `WANDB_API_KEY` is unset, and accepts `--no-train`
+to stop after the dataset fetch. Equivalently, by hand:
+
+```bash
+# Copy clae_data/_creds.example.py to clae_data/_creds.py and edit, then:
 make all
 ```
 

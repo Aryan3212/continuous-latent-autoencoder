@@ -12,8 +12,8 @@ wandb/
 .ruff_cache/
 
 # Environment
+# NB: uv.lock is deliberately committed (reproducible env on fresh VMs).
 .env
-uv.lock
 
 # Hardcoded credentials (ship _creds.example.py as template instead).
 clae_data/_creds.py

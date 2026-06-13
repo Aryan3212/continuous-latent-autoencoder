@@ -70,12 +70,17 @@ subak_ko, shrutilipi, kathbath — each a `DatasetAdapter` with
 `audio/<dataset>/` plus four JSONL manifests (train/val/asr_probe_{train,val})
 → `push.py`/`fetch.py` move the packed layout to/from HF Hub as raw-file blob
 storage. Driven by `python -m clae_data` and the `Makefile`. Credentials live
-in the gitignored `clae_data/_creds.py` (`_creds.example.py` is the template).
+in the gitignored `clae_data/_creds.py` (`_creds.example.py` is the template);
+on a fresh GPU VM, `./setup.sh` generates it from `.env` (template:
+`.env.example`) and runs deps → fetch → train in one shot (`--no-train` to
+stop after the data fetch). Only `HF_TOKEN` is needed for training; Kaggle
+keys only for `make pack-and-push` on a prep instance.
 
 ## Data loading + augmentation
 
 - `data/dataset.py` — `AudioDataset` (JSONL manifests; relative
-  `audio_filepath` resolved against the manifest dir), `collate_fixed`.
+  `audio_filepath` resolved via `resolve_manifest_root`: manifest dir or one
+  level up for the packed `<root>/manifests/` layout), `collate_fixed`.
 - `data/augment.py` — waveform augment (noise/lowpass/gain/clip) and
   frame/waveform chunk masking for JEPA local views.
 
@@ -84,6 +89,8 @@ in the gitignored `clae_data/_creds.py` (`_creds.example.py` is the template).
 - `get_param_count.py` — four-block parameter breakdown for a config.
 - `check_rank.py` — latent participation-ratio / effective-rank probe.
 - `verify_experiment.py` — end-to-end forward/decode sanity check + plots.
+- `reconstruct_audio.py` — encode/decode audio files through a checkpoint;
+  writes `_orig`/`_recon` WAV pairs + per-file STFT/L1 numbers.
 - `visualize_latents.py` — PCA/UMAP latent-space plot.
 - `smoke_encoder_mhc.py` — encoder+mHC forward smoke test.
 - `test_mhc.py` — standalone mHC wrapper check.

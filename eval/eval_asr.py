@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from jiwer import cer, wer
 
+from data.dataset import resolve_manifest_root
 from eval.common import build_charset, greedy_decode_ctc, iter_frame_features, load_frozen_encoder
 
 
@@ -40,30 +41,26 @@ def _filter_manifest_by_duration(
     dropping them would empty manifests that simply lack durations — but they
     are counted and reported so the user can audit them.
 
-    AudioDataset resolves relative audio_filepath against the manifest's parent
-    directory, so paths are absolutized before relocating the manifest next to
-    --out.
+    Relative audio_filepath rows are absolutized (via resolve_manifest_root,
+    matching AudioDataset) before relocating the manifest next to --out.
     """
-    root = pathlib.Path(manifest).resolve().parent
+    with open(manifest, "r", encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    root = resolve_manifest_root(manifest, rows)
     kept = dropped = unknown = 0
     out_lines: List[str] = []
-    with open(manifest, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            dur = row.get("duration")
-            if not isinstance(dur, (int, float)) or isinstance(dur, bool) or dur <= 0:
-                unknown += 1
-            elif dur > max_seconds:
-                dropped += 1
-                continue
-            p = row.get("audio_filepath")
-            if isinstance(p, str) and not os.path.isabs(p):
-                row["audio_filepath"] = str(root / p)
-            out_lines.append(json.dumps(row, ensure_ascii=False))
-            kept += 1
+    for row in rows:
+        dur = row.get("duration")
+        if not isinstance(dur, (int, float)) or isinstance(dur, bool) or dur <= 0:
+            unknown += 1
+        elif dur > max_seconds:
+            dropped += 1
+            continue
+        p = row.get("audio_filepath")
+        if isinstance(p, str) and not os.path.isabs(p):
+            row["audio_filepath"] = str(root / p)
+        out_lines.append(json.dumps(row, ensure_ascii=False))
+        kept += 1
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(out_lines) + ("\n" if out_lines else ""), encoding="utf-8")
     msg = f"  [ASR] {log_name}: kept {kept} rows, dropped {dropped} rows over {max_seconds:.1f}s"
