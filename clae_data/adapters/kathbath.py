@@ -9,9 +9,12 @@ from clae_data.schema import Record
 
 
 class KathbathAdapter(DatasetAdapter):
-    """Probe-only dataset (eval splits). Records are still emitted; the build
-    step is responsible for routing them to the probe manifest rather than
-    the pretraining manifest.
+    """Bengali eval/probe corpus (valid-* shards). pack.py does NOT
+    special-case kathbath — there is no automatic routing to a probe
+    manifest. To keep it as a held-out eval set, it must be excluded from
+    the pretraining ``--datasets`` list; that's why it's left out of the
+    Makefile default. It remains registered here so it can still be
+    downloaded explicitly via ``DATASETS=kathbath``.
     """
 
     name = "kathbath"

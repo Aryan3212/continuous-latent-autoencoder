@@ -17,8 +17,11 @@ class SubakKoAdapter(DatasetAdapter):
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "subak_ko"
-        # SUBAK.KO is single-language; no allow_patterns filter.
-        hf_snapshot_download(self._REPO_ID, out_dir, allow_patterns=None)
+        # Only fetch the parquet shards we actually use; the repo also has a
+        # large unused zip under `Data/` (23.3 GB) that we don't need.
+        hf_snapshot_download(
+            self._REPO_ID, out_dir, allow_patterns=["data/*.parquet"]
+        )
         return out_dir
 
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:

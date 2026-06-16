@@ -75,7 +75,7 @@ def iter_parquet_records(
             continue
 
         cols = table.column_names
-        audio_col = next((c for c in ("audio", "speech") if c in cols), None)
+        audio_col = next((c for c in ("audio", "speech", "audio_filepath") if c in cols), None)
         if audio_col is None:
             print(f"[{dataset_name}] no audio column in {pf!s}; cols={cols}")
             continue
