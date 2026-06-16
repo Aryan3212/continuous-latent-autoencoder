@@ -22,10 +22,12 @@ class KathbathAdapter(DatasetAdapter):
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "kathbath"
+        # Bengali subset is under `bengali/` as flat shards; no test split
+        # exists, so use valid-* as the held-out probe/eval set.
         hf_snapshot_download(
             self._REPO_ID,
             out_dir,
-            allow_patterns=["bn/test/*", "bn/valid/*"],
+            allow_patterns=["bengali/valid-*.parquet"],
         )
         return out_dir
 
@@ -35,8 +37,7 @@ class KathbathAdapter(DatasetAdapter):
             dataset_name=self.name,
             language=self.language,
             glob_patterns=(
-                "bn/test/**/*.parquet",
-                "bn/valid/**/*.parquet",
-                "**/*.parquet",
+                "bengali/valid-*.parquet",
+                "bengali/**/valid-*.parquet",
             ),
         )

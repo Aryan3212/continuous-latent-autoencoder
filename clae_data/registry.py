@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from clae_data.adapters import (
-    BengaliAISpeechAdapter,
+    CommonVoiceBnAdapter,
     IndicVoicesAdapter,
     KathbathAdapter,
     OpenSLR53Adapter,
@@ -13,7 +13,7 @@ from clae_data.adapters.base import DatasetAdapter
 
 REGISTRY: dict[str, type[DatasetAdapter]] = {
     "openslr53": OpenSLR53Adapter,
-    "bengaliai_speech": BengaliAISpeechAdapter,
+    "common_voice_bn": CommonVoiceBnAdapter,
     "regspeech12": RegSpeech12Adapter,
     "indicvoices": IndicVoicesAdapter,
     "subak_ko": SubakKoAdapter,

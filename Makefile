@@ -16,19 +16,23 @@ OUTPUT_DIR      ?= runs
 CLAE_DATA_ROOT  ?= $(HOME)/data/clae
 CLAE_HF_REPO    ?= aryanrahman/clae-bengali
 CLAE_CKPT_REPO  ?= aryanrahman/clae-bengali-encoder
-DATASETS        ?= openslr53,bengaliai_speech,regspeech12,indicvoices,subak_ko,shrutilipi,kathbath
+DATASETS        ?= openslr53,common_voice_bn,regspeech12,indicvoices,subak_ko,shrutilipi,kathbath
+STAGING_DIR     ?= staging
+LIMIT           ?=
 TRAIN_EXTRA_ARGS ?=
 
 # Ensure local user-installed binaries (uv) are on PATH for `uv run`.
 export PATH := $(HOME)/.local/bin:$(PATH)
 
-.PHONY: help ensure-uv prepare fetch-data pack-and-push train evaluate publish all clean-runs
+.PHONY: help ensure-uv prepare download-data build-data fetch-data pack-and-push train evaluate publish all clean-runs
 
 help:
 	@echo "CLAE — one-command training."
 	@echo ""
 	@echo "Targets:"
 	@echo "  prepare         Install deps via uv sync; print key data paths."
+	@echo "  download-data   Download the raw source datasets to CLAE_DATA_ROOT."
+	@echo "  build-data      Local end-to-end: download -> transcode -> manifests in STAGING_DIR."
 	@echo "  fetch-data      Snapshot-download the packed HF dataset to CLAE_DATA_ROOT."
 	@echo "  pack-and-push   (prep instance) Build packed dataset and push to HF Hub."
 	@echo "  train           Train (depends on fetch-data, ensure-uv)."
@@ -44,6 +48,8 @@ help:
 	@echo "  CLAE_HF_REPO     = $(CLAE_HF_REPO)"
 	@echo "  CLAE_CKPT_REPO   = $(CLAE_CKPT_REPO)"
 	@echo "  DATASETS         = $(DATASETS)"
+	@echo "  STAGING_DIR      = $(STAGING_DIR)"
+	@echo "  LIMIT            = $(LIMIT)"
 	@echo "  TRAIN_EXTRA_ARGS = $(TRAIN_EXTRA_ARGS)"
 	@echo "  RUN_NAME         = (auto: clae-YYYYMMDD-HHMMSS if unset)"
 
@@ -57,6 +63,22 @@ prepare: ensure-uv
 	@echo "  CLAE_DATA_ROOT = $(CLAE_DATA_ROOT)"
 	@echo "  CLAE_HF_REPO   = $(CLAE_HF_REPO)"
 	@echo "  CLAE_CKPT_REPO = $(CLAE_CKPT_REPO)"
+
+# Download the raw upstream archives (OpenSLR / Kaggle / HF) into CLAE_DATA_ROOT.
+# Use this when the packed CLAE snapshot doesn't exist yet; it's the input to
+# pack-and-push. Idempotent: each adapter skips parts already on disk.
+download-data: ensure-uv
+	uv run python -m clae_data download --datasets $(DATASETS) --data-root $(CLAE_DATA_ROOT)
+
+# Full local pipeline: download (idempotent) -> audit -> transcode to 16k mono
+# FLAC -> split -> write manifests under STAGING_DIR/. No HF push. Set LIMIT=N
+# to cap rows per dataset for a quick smoke test (download is still full).
+build-data: ensure-uv
+	uv run python -m clae_data build \
+	    --datasets $(DATASETS) \
+	    --data-root $(CLAE_DATA_ROOT) \
+	    --staging-dir $(STAGING_DIR) \
+	    $(if $(strip $(LIMIT)),--limit $(LIMIT))
 
 # Idempotent: huggingface_hub.snapshot_download verifies LFS pointers without
 # re-downloading existing files.

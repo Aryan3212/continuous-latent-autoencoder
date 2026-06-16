@@ -55,6 +55,7 @@ in `data/dataset.py` is a runtime object, intentionally not YAML-mirrored.
 Frozen-encoder probes + reconstruction metrics.
 
 - `eval/eval_asr.py` — CTC ASR probe (small head over frame features), WER.
+- `eval/eval_asr_attn.py` — attention seq2seq ASR probe (autoregressive decoder, no CTC T>=L constraint); diagnostic vs eval_asr.py to separate CTC frame-rate limits from representation quality.
 - `eval/eval_cls_probe.py` — pooled-embedding MLP probe (`--label_key` selects emotion/gender).
 - `eval/eval_recon.py` — waveform reconstruction metrics (STFT etc.).
 - `eval/common.py` — shared frame-feature extraction.
@@ -64,7 +65,7 @@ Frozen-encoder probes + reconstruction metrics.
 ## Data prep (`clae_data/`)
 
 One unified package replacing the old scattered prep scripts. Per-source
-adapters (`adapters/`: openslr53, bengaliai_speech, regspeech12, indicvoices,
+adapters (`adapters/`: openslr53, common_voice_bn, regspeech12, indicvoices,
 subak_ko, shrutilipi, kathbath — each a `DatasetAdapter` with
 `download()` + `iter_records()`) → `pack.py` writes 16 kHz mono FLAC under
 `audio/<dataset>/` plus four JSONL manifests (train/val/asr_probe_{train,val})

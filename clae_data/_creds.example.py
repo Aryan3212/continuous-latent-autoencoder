@@ -9,6 +9,7 @@ from __future__ import annotations
 HF_TOKEN = "<paste-here>"
 KAGGLE_USERNAME = "<paste-here>"
 KAGGLE_KEY = "<paste-here>"
+MDC_API_KEY = "<paste-here>"  # Mozilla Data Collective (Account -> Credentials)
 WANDB_API_KEY = "<paste-here>"
 
 CLAE_HF_REPO = "<paste-here>"

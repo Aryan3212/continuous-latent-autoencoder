@@ -17,7 +17,8 @@ class ShrutilipiAdapter(DatasetAdapter):
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "shrutilipi"
-        hf_snapshot_download(self._REPO_ID, out_dir, allow_patterns="bn/*")
+        # Bengali subset lives under `bengali/` as flat train-*.parquet shards.
+        hf_snapshot_download(self._REPO_ID, out_dir, allow_patterns="bengali/*")
         return out_dir
 
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
@@ -25,5 +26,5 @@ class ShrutilipiAdapter(DatasetAdapter):
             raw_dir=raw_dir,
             dataset_name=self.name,
             language=self.language,
-            glob_patterns=("bn/**/*.parquet", "**/*.parquet"),
+            glob_patterns=("bengali/*.parquet", "bengali/**/*.parquet", "**/*.parquet"),
         )

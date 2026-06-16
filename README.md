@@ -78,8 +78,8 @@ instance only consumes it via `make fetch-data`.
 
 ```bash
 # On the prep instance:
-# 1) Edit clae_data/_creds.py with HF + Kaggle keys.
-make pack-and-push DATASETS=openslr53,bengaliai_speech,regspeech12,indicvoices
+# 1) Edit clae_data/_creds.py with HF + Kaggle + MDC keys.
+make pack-and-push DATASETS=openslr53,common_voice_bn,regspeech12,indicvoices
 ```
 
 What `pack-and-push` does:

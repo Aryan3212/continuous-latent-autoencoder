@@ -2,6 +2,45 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-06-16
+
+**Data prep: Common Voice swap, HF subdir fixes, local pipeline make targets**
+
+- Replaced the Kaggle `bengaliai_speech` adapter with `common_voice_bn`
+  (Mozilla Common Voice Bengali via the `datacollective` SDK + `MDC_API_KEY`).
+  CC0-licensed and needs no per-competition rules acceptance, which the Kaggle
+  competition download kept 401-ing on. Registry, Makefile `DATASETS`, README,
+  CODEBASE.md, and `_creds.example.py` updated; `kagglehub` dep dropped,
+  `datacollective` added (`kaggle` kept for `regspeech12`).
+- Fixed `shrutilipi` and `kathbath` adapters: their HF repos key the Bengali
+  subset under `bengali/` (not `bn/`), so `allow_patterns` matched 0 files.
+  Kathbath has no `test` split, so `valid-*` shards are used as the eval set.
+- Added Makefile targets `download-data` (raw download), `build-data` (full
+  local pipeline: download → transcode → manifests under `STAGING_DIR`, with a
+  `LIMIT` knob for smoke tests).
+
+## 2026-06-15
+
+**Attention seq2seq ASR diagnostic probe (`eval/eval_asr_attn.py`)**
+
+- New `eval/eval_asr_attn.py`: autoregressive Transformer decoder probe over
+  the same frozen encoder features as `eval_asr.py`, but with **no CTC T>=L
+  constraint**. Lets us attribute poor ASR CER to either (a) CTC's frame-rate
+  alignment limit or (b) the encoder representation itself.
+- Reuses `_filter_manifest_by_duration` and `_load_feats_and_text` from
+  `eval_asr.py` verbatim for a fair feature comparison. Writes filtered
+  manifests with an `.attn.` infix so they never clobber the CTC probe's
+  outputs. Caches vocabulary to `<train_manifest>.charset_attn.json`
+  (distinct from `.charset.json`).
+- `AttnDecoderHead`: `Linear` in-proj + `SinusoidalPE` on both memory and
+  target embeddings + `nn.TransformerDecoder` + output projection. Greedy
+  autoregressive decode respects per-sample valid frame lengths via
+  `memory_key_padding_mask`.
+- Output JSON matches `eval_asr.py` schema where applicable; omits
+  `upsample_factor`/`infeasible` keys (not relevant); adds `decoder` config
+  block and `"ctc_free": true`.
+- `CODEBASE.md` Evaluation section updated.
+
 ## 2026-06-12
 
 **Fresh-VM bootstrap + packed-manifest path fix**
@@ -290,4 +329,3 @@ flow, removed features, and diagnostics placement.
 -   **Created HISTORICAL_CHANGES.md**: Compiled the audit findings into a structured historical reference document.
 -   **Git History Rewrite**: Systematically updated all commit messages and descriptions in the repository's history to reflect the refined technical understanding, outcomes, and hypotheses.
 -   **Improved Repository Observability**: Standardized commit nomenclature (feat/fix/perf/refactor) and provided detailed context in the commit bodies to improve future maintainability.
-
