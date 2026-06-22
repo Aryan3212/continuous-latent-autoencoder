@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "continuous-latent-autoencoder"
 version = "0.0.0"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "PyYAML>=6.0",
   "numpy>=1.26",
@@ -27,12 +27,17 @@ dependencies = [
   "pyarrow>=23.0.1",
   "librosa>=0.11.0",
   "umap-learn>=0.5.5",
+  "transformers>=5.12.1",
+  "utmosv2",
 ]
+
+[tool.setuptools]
+py-modules = ["data_loading", "losses", "schema", "config"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data*", "eval*", "losses*", "models*", "utils*"]
-exclude = ["icefall*", "RAE*", "lejepa*", "mHC-*", "configs*", "papers*", "paper-summaries*", "scripts*", "runs*"]
+include = ["eval*", "models*"]
+exclude = ["icefall*", "RAE*", "lejepa*", "mHC-*", "configs*", "papers*", "paper-summaries*", "scripts*", "runs*", "data*"]
 
 [[tool.uv.index]]
 name = "pytorch"
@@ -43,3 +48,4 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
+utmosv2 = { git = "https://github.com/sarulab-speech/UTMOSv2.git" }

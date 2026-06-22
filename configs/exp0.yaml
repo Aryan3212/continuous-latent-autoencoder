@@ -9,7 +9,7 @@ run:
     name: null
 
 data:
-  # Note: manifests are JSONL files produced by `python -m clae_data build`
+  # Note: manifests are JSONL files produced by `python scripts/housekeeping.py build`
   # (or fetched from HF Hub via `make fetch-data`).
   sample_rate: 16000
   segment_seconds: 3.0

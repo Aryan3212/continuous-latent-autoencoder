@@ -130,7 +130,7 @@ train:
   val_batches: null
 
 eval:
-  enabled: true
+  enabled: false
   emotion:
     enabled: true
   gender:
