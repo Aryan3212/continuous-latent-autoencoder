@@ -1,9 +1,11 @@
 # continuous-latent-autoencoder
 
-> ⚠️ **CREDENTIALS NOTICE** — `clae_data/_creds.py` (gitignored) and
-> `scripts/datasets_download.py` (in git history) contain hardcoded HF,
-> Kaggle, and WandB API keys for research-velocity. **Before making this
-> repo public, or before sharing access with anyone outside the author**:
+> ⚠️ **CREDENTIALS NOTICE** — credentials now live only in `.env` (gitignored)
+> and are read from the environment at runtime; there is no committed creds
+> file. However, **git history** still contains hardcoded HF, Kaggle, and WandB
+> keys (from the old `clae_data/_creds.py` and `scripts/datasets_download.py`).
+> **Before making this repo public, or before sharing access with anyone
+> outside the author**:
 >
 > 1. Rotate the HF token at https://huggingface.co/settings/tokens
 > 2. Rotate the Kaggle key at https://www.kaggle.com/settings
@@ -33,15 +35,17 @@ git clone <repo-url>
 cd continuous-latent-autoencoder
 cp .env.example .env && nano .env   # paste HF_TOKEN (+ WANDB_API_KEY)
 tmux new -s train                   # so training outlives the SSH session
-./setup.sh                          # deps -> creds -> fetch -> train
+./setup.sh                          # deps -> fetch -> train
 ```
 
-`setup.sh` generates `clae_data/_creds.py` from `.env`, falls back to
-offline W&B logging when `WANDB_API_KEY` is unset, and accepts `--no-train`
-to stop after the dataset fetch. Equivalently, by hand:
+`setup.sh` sources `.env` into the environment (the CLI and `train.py` read
+the vars directly), falls back to offline W&B logging when `WANDB_API_KEY` is
+unset, and accepts `--no-train` to stop after the dataset fetch. Equivalently,
+by hand:
 
 ```bash
-# Copy clae_data/_creds.example.py to clae_data/_creds.py and edit, then:
+# Put HF_TOKEN in .env (or export it into your shell), then:
+set -a && . ./.env && set +a
 make all
 ```
 
@@ -49,15 +53,15 @@ make all
 
 1. `prepare` installs Python deps via `uv sync`.
 2. `fetch-data` snapshot-downloads the packed dataset from HF Hub into
-   `$CLAE_DATA_ROOT/` (default `$HOME/data/clae`). Idempotent — re-running
+   `$DATA_ROOT/` (default `<repo>/datasets`). Idempotent — re-running
    skips files already present.
 3. `train` runs `train.py` with the manifests at
-   `$CLAE_DATA_ROOT/manifests/{train,val}.jsonl`. WandB receives logs;
+   `$DATA_ROOT/manifests/{train,val}.jsonl`. WandB receives logs;
    checkpoints land in `runs/<run_id>/checkpoints/`.
 4. `evaluate` runs the offline ASR probe (`eval/eval_asr.py`) against the
    most recent `last.pt`.
 5. `publish` uploads `last.pt` plus a generated model card to the HF model
-   repo (`$CLAE_CKPT_REPO`).
+   repo (`$HF_MODEL_REPO`).
 
 Any variable can be overridden on the command line:
 
@@ -78,14 +82,15 @@ instance only consumes it via `make fetch-data`.
 
 ```bash
 # On the prep instance:
-# 1) Edit clae_data/_creds.py with HF + Kaggle + MDC keys.
-make pack-and-push DATASETS=openslr53,common_voice_bn,regspeech12,indicvoices
+# 1) Put HF + Kaggle + MDC keys in .env, then load them into the env:
+set -a && . ./.env && set +a
+make pack-and-push DATASETS=openslr53,bengaliai_speech,regspeech12,indicvoices
 ```
 
 What `pack-and-push` does:
 
 - Downloads raw archives from HF Hub, Kaggle, and OpenSLR into
-  `$CLAE_DATA_ROOT/`. Each adapter is responsible for its own source.
+  `$DATA_ROOT/`. Each adapter is responsible for its own source.
 - Iterates each adapter's records (one per audio clip, with transcript +
   language + dataset tag).
 - Audits files via `soundfile.info`, dropping clips < 1s, > 30s, or
@@ -95,7 +100,7 @@ What `pack-and-push` does:
   `manifests/`: `train.jsonl`, `val.jsonl`, `asr_probe_train.jsonl`, and
   `asr_probe_val.jsonl`. Paths inside each manifest are relative to the
   staging root.
-- Uploads the entire packed layout to `$CLAE_HF_REPO` (default
+- Uploads the entire packed layout to `$HF_DATASET_REPO` (default
   `aryanrahman/clae-bengali`) via `huggingface_hub.upload_folder`.
 
 Once pushed, the training instance just runs `make all` — no Kaggle
@@ -108,14 +113,14 @@ migration or download-concatenate-republish cycle.
 
 ## Adding a new dataset source
 
-1. Implement an adapter in `clae_data/adapters/<name>.py` that subclasses
-   `DatasetAdapter`. Two methods are required:
+1. Add a `DatasetAdapter` subclass in `scripts/housekeeping.py` (in the
+   "Adapters" section). Two methods are required:
    - `download(dest)` — idempotent; place raw archives under `dest` and
      return the path to the raw directory.
    - `iter_records(raw_dir)` — yield `Record` dicts with at minimum
      `audio_filepath`, optionally `text`, plus `dataset=<name>` and
      `language`.
-2. Register the adapter in `clae_data/registry.py`.
+2. Register the adapter in the `REGISTRY` dict (same file).
 3. On the prep instance, re-run
    `make pack-and-push DATASETS=...,<name>`. Use a versioned manifest
    (e.g. `manifests/train_v2.jsonl`) so older runs stay reproducible.
@@ -144,15 +149,15 @@ uv pip install -r requirements.txt
 
 3) Prepare your datasets. For a full pipeline build, use the prep-instance
 workflow above (`make pack-and-push`). For an existing packed layout under
-`$CLAE_DATA_ROOT/`, the manifests at
-`$CLAE_DATA_ROOT/manifests/{train,val}.jsonl` are ready to use directly.
+`$DATA_ROOT/`, the manifests at
+`$DATA_ROOT/manifests/{train,val}.jsonl` are ready to use directly.
 
 4) Run:
 
 ```bash
 uv run python train.py --config configs/exp0.yaml \
-    data.train_manifest=$HOME/data/clae/manifests/train.jsonl \
-    data.val_manifest=$HOME/data/clae/manifests/val.jsonl
+    data.train_manifest=$DATA_ROOT/manifests/train.jsonl \
+    data.val_manifest=$DATA_ROOT/manifests/val.jsonl
 ```
 
 Artifacts:
@@ -168,15 +173,15 @@ Artifacts:
 ## Folder guide
 
 - `configs/`: experiment configs (`exp0.yaml` cloud ~6M, `local_6gb.yaml` local PC)
-- `clae_data/`: dataset prep package (adapters → pack → push/fetch)
-- `data/`: dataset loading + augmentation
+- `data_loading.py`: dataset loading (JSONL manifests) + waveform augmentation
+- `datasets/`: gitignored; where housekeeping fetches/builds the data (default `$DATA_ROOT`)
 - `eval/`: probes + evaluation entrypoints (`eval_asr.py`, `eval_cls_probe.py`, `eval_recon.py`, `run_all.py`)
-- `losses/`: loss functions (multi-res STFT)
+- `losses.py`: multi-res STFT reconstruction loss (`MultiResSTFTLoss`)
+- `schema.py`: pydantic config schema (single source of truth, `extra="forbid"`)
+- `config.py`: `load_config` / `apply_overrides` (YAML → validated `Config`)
 - `models/`: core model components (frontend, encoder, mHC, projector, decoder, sigreg)
-- `scripts/`: one-off utilities + smoke scripts
-- `utils/`: misc helpers (config/schema, logging, checkpointing)
+- `scripts/`: utilities — `housekeeping.py` (data/artifact CLI: adapters → pack → push/fetch + publish-checkpoint), `reconstruct_audio.py`, `visualize_latents.py`, `fill_durations.py`
 - `reference-implementations/`: slim in-tree references (single-file impls + notes); full vendored repos live at `../reference-implementations-archive`
-- `docs/`: live research notes
 - `runs/`: training outputs (checkpoints/logs)
 
 ## Running things
@@ -185,8 +190,8 @@ Train (use `configs/local_6gb.yaml` instead of `exp0.yaml` on the local PC):
 
 ```bash
 uv run python train.py --config configs/exp0.yaml \
-    data.train_manifest=$HOME/data/clae/manifests/train.jsonl \
-    data.val_manifest=$HOME/data/clae/manifests/val.jsonl
+    data.train_manifest=$DATA_ROOT/manifests/train.jsonl \
+    data.val_manifest=$DATA_ROOT/manifests/val.jsonl
 ```
 
 Run all eval (reconstruction + all enabled probes in one go):
@@ -225,52 +230,4 @@ uv run python scripts/visualize_latents.py --config configs/exp0.yaml --ckpt /pa
     --manifest /path/to/val.jsonl --out runs/latents.png --limit 500
 ```
 
-Unit tests:
-
-```bash
-uv run pytest tests/
-```
-
-Smoke tests (model components, no data needed):
-
-```bash
-PYTHONPATH=. uv run --no-project python scripts/smoke_encoder_mhc.py
-```
-
-## Static analysis (dead-code / unused-symbol audit)
-
-The project has no static-analysis deps installed. Tools below run via
-ephemeral `uvx` / `npx` envs and write reports under `.static-analysis/`.
-None of them touch `pyproject.toml`.
-
-```bash
-mkdir -p .static-analysis
-
-# 1. ruff — fast linter (Rust). Finds unused imports/vars, dead branches,
-#    undefined names (real bugs), commented-out code.
-uvx ruff check --select F,ARG,ERA,RUF --output-format=concise \
-    train.py models/ data/ losses/ eval/ utils/ tests/ \
-    > .static-analysis/ruff.txt
-
-# 2. vulture — flags unused functions/classes/methods/attrs across modules.
-#    The allowlist suppresses framework magic (torch.nn.Module.forward, etc.)
-uvx vulture --min-confidence 60 \
-    train.py models/ data/ losses/ eval/ utils/ tests/ \
-    .static-analysis/vulture-allowlist.py \
-    > .static-analysis/vulture.txt
-
-# 3. pyright — cross-file unused-symbol + unreachable + undefined-name pass.
-#    Ignore `reportMissingImports` warnings (torch/yaml/etc. aren't installed).
-npx -y pyright --project .static-analysis/pyrightconfig.json --outputjson \
-    > .static-analysis/pyright.json
-jq -r '.generalDiagnostics[]
-       | select(.rule | test("reportUnused|reportUndefined|reportUnreachable"))
-       | "\(.severity)\t\(.rule)\t\(.file)\t\(.range.start.line + 1)\t\(.message)"' \
-    .static-analysis/pyright.json \
-    > .static-analysis/pyright-clean.txt
-```
-
-Static analysis catches **symbol-level** dead code (unused imports/functions/
-vars, undefined names). It cannot catch **config-gated** dead branches (e.g.
-`if mix_recon_enabled:`). For those, delete the branches by hand first, then
-re-run the tools — orphans cascade out.
+`train.py` prints a per-block trainable-parameter breakdown at startup.

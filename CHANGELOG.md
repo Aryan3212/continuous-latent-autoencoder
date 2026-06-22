@@ -2,6 +2,90 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-06-17
+
+**Simplification turn 5: two housekeeping bug/cruft fixes**
+
+- **openslr53 re-download bug**: `download()` re-fetched and re-extracted all 16
+  multi-GB part zips on every run (zips deleted after extract, so their absence
+  was read as "not done"). Now writes a per-part `.part_<p>.done` marker after a
+  successful extract and skips marked parts. Also dropped the silent
+  try/except around download/extract — failures now raise (and leave no marker,
+  so the next run retries just that part).
+- **pack/audit double pass collapsed**: the separate parallel `audit_records`
+  pre-pass (header-probe every file) followed by a serial transcode (full-read
+  every file) is now one pass. `_transcode_one` reads each file once, filters on
+  duration inline, and returns a `(record, status)` so dropped rows are tallied
+  (`transcode_status_counts` in `build_meta.yaml`) instead of silently returned
+  as `None`. `audit_records` is retained for the standalone `audit` subcommand.
+
+**Simplification turn 4: generalize `CLAE`/`clae`, prune scripts + scaffolding**
+
+- Renamed env vars: `CLAE_DATA_ROOT`→`DATA_ROOT`, `CLAE_HF_REPO`→`HF_DATASET_REPO`,
+  `CLAE_CKPT_REPO`→`HF_MODEL_REPO` (Makefile, setup.sh, housekeeping.py, docs,
+  .env.example). Generalized remaining `CLAE`/`clae` branding (Makefile/setup
+  headers, `run-` run-name prefix, `pack_` tmp prefix, dataset-card title). Kept
+  the actual Hub slugs `aryanrahman/clae-bengali{,-encoder}`.
+- Deleted folders: `.static-analysis/`, `.plans/`, `docs/`, `tests/`.
+- Deleted scripts: `check_rank.py` (not imported anywhere), `get_param_count.py`
+  (folded into `train.py`, which now prints a per-block trainable-parameter
+  breakdown at startup), `smoke_encoder_mhc.py`, `test_mhc.py`,
+  `verify_experiment.py`. Kept `reconstruct_audio.py`, `visualize_latents.py`,
+  `fill_durations.py`.
+- README: dropped the Unit-tests / Smoke-tests / Static-analysis sections (all
+  referenced deleted paths); folder guide + CODEBASE.md updated.
+
+**Simplification turn 3: `data/` package → `data_loading.py`; data root → `datasets/`**
+
+- Consolidated `data/dataset.py` + `data/augment.py` into a single root module
+  `data_loading.py` (no package). Updated the 6 import sites (`train.py`,
+  `eval/common.py`, `eval/eval_asr.py`, `eval/eval_recon.py`,
+  `scripts/check_rank.py`, `scripts/visualize_latents.py`) to
+  `from data_loading import ...`. pyproject: dropped `data*` from packages.find,
+  added `py-modules = ["data_loading"]`.
+- Default `CLAE_DATA_ROOT` is now `<repo>/datasets` (gitignored, created by
+  `scripts/housekeeping.py` on demand) instead of `$HOME/data/clae`. Updated
+  Makefile (`$(CURDIR)/datasets`), setup.sh (`$PWD/datasets`),
+  `housekeeping._data_root` (`_REPO_ROOT/datasets`), `.env.example`, `.gitignore`,
+  README, CODEBASE.md.
+- Removed the stale `data/bengaliai_speech` symlink (left over from the
+  swapped-out Kaggle dataset). The `data/bengaliai-speech/` dir + the root
+  `bengaliai-speech.zip` are left in place for the user to delete.
+
+**Simplification turn 2: `clae_data/` package collapsed into one script**
+
+- Replaced the whole `clae_data/` package with a single self-contained file,
+  `scripts/housekeeping.py`. The adapter pattern is preserved (one
+  `DatasetAdapter` subclass per source + a `REGISTRY` dict, all in-file);
+  schema, audit, pack, push, fetch, and publish-checkpoint are sections of the
+  same file. Heavy deps stay lazily imported inside the functions that use them.
+- Invocation changed: `python -m clae_data <cmd>` → `python scripts/housekeeping.py <cmd>`.
+  Makefile targets (download-data, build-data, fetch-data, pack-and-push,
+  publish) rewired. A `sys.path` bootstrap at the top lets it run by path from
+  any cwd while still resolving `from utils.checkpoint import ...`.
+- `publish-checkpoint` stays as a subcommand (model upload is housekeeping too).
+- Docs updated: README "Adding a new dataset source" + folder guide, CODEBASE.md
+  "Data prep + HF I/O" section + Scripts list, `configs/exp0.yaml` comment,
+  `data/dataset.py` + `scripts/fill_durations.py` docstrings.
+
+**Simplification turn 1: credentials are pure env vars**
+
+- Deleted the credentials indirection: removed `clae_data/_creds.py`
+  generation from `setup.sh`, the `_CREDS` dict + `_load_creds()` +
+  `_ensure_kaggle_env()` shim in `cli.py`, and `clae_data/_creds.example.py`.
+  All secrets are now read straight from the environment at point of use
+  (`os.environ["HF_TOKEN"]`, `MDC_API_KEY`, `KAGGLE_*`) — a missing key is a
+  hard `KeyError`, not a silent fallback to blanks. `setup.sh` sources `.env`;
+  standalone `make` calls need `set -a && . ./.env && set +a` first.
+- Repo IDs / data root: `cli.py` reads `CLAE_HF_REPO`, `CLAE_CKPT_REPO`,
+  `CLAE_DATA_ROOT` from the env with literal defaults (these aren't secrets).
+- Fixed latent bug: `MDC_API_KEY` (needed by `common_voice_bn`) was never
+  written by `setup.sh`'s `_creds.py` heredoc nor listed in `.env.example`, so
+  the Common Voice download crashed on import. Now in `.env.example`.
+- Removed the dead `requires_credentials` adapter field — declared on every
+  adapter but never read anywhere.
+- `.gitignore`, `.env.example`, `README.md`, `CODEBASE.md` updated.
+
 ## 2026-06-16
 
 **Data prep: Common Voice swap, HF subdir fixes, local pipeline make targets**

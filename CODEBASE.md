@@ -6,7 +6,7 @@ decoder back to waveform, trained jointly with reconstruction + JEPA + SIGReg.
 
 ## Core pipeline
 
-All modules take their pydantic `*Cfg` from `utils/schema.py` directly (no
+All modules take their pydantic `*Cfg` from `schema.py` directly (no
 mirror dataclasses). Internal tensor layout is `(B, T, D)`; external module
 interfaces use channels-first `(B, D, T)` as noted.
 
@@ -26,7 +26,7 @@ interfaces use channels-first `(B, D, T)` as noted.
   stack with FiLM ResBlocks conditioned on the latent. `(B, D, T')` → `(B, 1, T)`.
 - `models/sigreg.py` — `SIGReg` (Epps–Pulley sliced univariate Gaussianity
   test). `forward` returns a bare scalar. Single-GPU only.
-- `losses/multires_stft.py` — `MultiResSTFTLoss`: multi-resolution STFT
+- `losses.py` — `MultiResSTFTLoss`: multi-resolution STFT
   reconstruction (spectral convergence + log-magnitude).
 
 ## Training
@@ -44,11 +44,11 @@ interfaces use channels-first `(B, D, T)` as noted.
 
 ## Config system
 
-`utils/schema.py` (pydantic, `extra="forbid"`) is the single source of truth.
-`utils/config.py`: `load_config(path)` parses YAML → `Config`;
+`schema.py` (pydantic, `extra="forbid"`) is the single source of truth.
+`config.py`: `load_config(path)` parses YAML → `Config`;
 `apply_overrides(cfg, ["a.b=c", ...])` applies dotted CLI overrides. Both
 return the pydantic model; call sites use attribute access. `DatasetConfig`
-in `data/dataset.py` is a runtime object, intentionally not YAML-mirrored.
+in `data_loading.py` is a runtime object, intentionally not YAML-mirrored.
 
 ## Evaluation
 
@@ -62,43 +62,52 @@ Frozen-encoder probes + reconstruction metrics.
 - `eval/run_probes.py` — orchestrates the three probes (direct schema access).
 - `eval/run_all.py` — CLI: recon + all enabled probes in one call.
 
-## Data prep (`clae_data/`)
+## Data prep + HF I/O (`scripts/housekeeping.py`)
 
-One unified package replacing the old scattered prep scripts. Per-source
-adapters (`adapters/`: openslr53, common_voice_bn, regspeech12, indicvoices,
-subak_ko, shrutilipi, kathbath — each a `DatasetAdapter` with
-`download()` + `iter_records()`) → `pack.py` writes 16 kHz mono FLAC under
-`audio/<dataset>/` plus four JSONL manifests (train/val/asr_probe_{train,val})
-→ `push.py`/`fetch.py` move the packed layout to/from HF Hub as raw-file blob
-storage. Driven by `python -m clae_data` and the `Makefile`. Credentials live
-in the gitignored `clae_data/_creds.py` (`_creds.example.py` is the template);
-on a fresh GPU VM, `./setup.sh` generates it from `.env` (template:
-`.env.example`) and runs deps → fetch → train in one shot (`--no-train` to
-stop after the data fetch). Only `HF_TOKEN` is needed for training; Kaggle
-keys only for `make pack-and-push` on a prep instance.
+One self-contained file (no package) holding the whole data/artifact pipeline,
+driven by `python scripts/housekeeping.py <cmd>` and the `Makefile`. The adapter
+pattern lives inside it: per-source `DatasetAdapter` subclasses (openslr53,
+common_voice_bn, bengaliai_speech, regspeech12, indicvoices, subak_ko,
+shrutilipi, kathbath — each `download()` + `iter_records()`), registered in the
+`REGISTRY` dict. The
+`pack_to_dir` step writes 16 kHz mono FLAC under `audio/<dataset>/` plus four
+JSONL manifests (train/val/asr_probe_{train,val}); `push_to_hub`/`fetch_dataset`
+move the packed layout to/from HF Hub; `publish_checkpoint` uploads a trained
+`last.pt` + model card. Subcommands: download, build, audit, push, fetch,
+pack-and-push, publish-checkpoint. Credentials are read from the environment at
+point of use (`os.environ["HF_TOKEN"]` etc.) —
+there is no committed creds file. They live in the gitignored `.env` (template:
+`.env.example`); on a fresh GPU VM, `./setup.sh` sources `.env` and runs deps →
+fetch → train in one shot (`--no-train` to stop after the data fetch). Running
+`make` targets standalone (e.g. on a prep instance) requires sourcing `.env`
+first: `set -a && . ./.env && set +a`. Only `HF_TOKEN` is needed for training;
+`KAGGLE_*` (regspeech12, bengaliai_speech) and `MDC_API_KEY` (common_voice_bn)
+only for `make pack-and-push`/`download` on a prep instance. The
+`bengaliai_speech` competition also requires accepting its rules once at
+kaggle.com/competitions/bengaliai-speech.
 
 ## Data loading + augmentation
 
-- `data/dataset.py` — `AudioDataset` (JSONL manifests; relative
-  `audio_filepath` resolved via `resolve_manifest_root`: manifest dir or one
-  level up for the packed `<root>/manifests/` layout), `collate_fixed`.
-- `data/augment.py` — waveform augment (noise/lowpass/gain/clip) and
-  frame/waveform chunk masking for JEPA local views.
+One module, `data_loading.py` (repo root, not a package):
+- `AudioDataset` (JSONL manifests; relative `audio_filepath` resolved via
+  `resolve_manifest_root`: manifest dir or one level up for the packed
+  `<root>/manifests/` layout), `collate_fixed`, `DatasetConfig`.
+- waveform augment (noise/lowpass/gain/clip) and frame/waveform chunk masking
+  for JEPA local views (`apply_waveform_augment`, `make_frame_chunk_masks`,
+  `apply_waveform_chunk_mask`).
+
+Fetched/built datasets live under `$DATA_ROOT` (default the gitignored
+`datasets/` at the repo root), never in the repo source tree.
 
 ## Scripts (`scripts/`)
 
-- `get_param_count.py` — four-block parameter breakdown for a config.
-- `check_rank.py` — latent participation-ratio / effective-rank probe.
-- `verify_experiment.py` — end-to-end forward/decode sanity check + plots.
+- `housekeeping.py` — the data/artifact CLI (see "Data prep + HF I/O" above).
 - `reconstruct_audio.py` — encode/decode audio files through a checkpoint;
   writes `_orig`/`_recon` WAV pairs + per-file STFT/L1 numbers.
 - `visualize_latents.py` — PCA/UMAP latent-space plot.
-- `smoke_encoder_mhc.py` — encoder+mHC forward smoke test.
-- `test_mhc.py` — standalone mHC wrapper check.
+- `fill_durations.py` — backfill `duration` into manifests that have `null`.
 
-## Tests (`tests/`)
-
-`test_sigreg.py`, `test_multires_stft.py` — run with `uv run pytest tests/`.
+(`train.py` prints a per-block trainable-parameter breakdown at startup.)
 
 ## Reference implementations (`reference-implementations/`)
 
@@ -112,5 +121,3 @@ Slim, in-tree: single-file refs (`lejepa_*`, `mhc_*`, `zipformer2_*`) +
 - `README.md` — setup, running things, cloud one-command flow, credentials.
 - `CHANGELOG.md` — dated log of major changes.
 - `LAB_NOTEBOOK.md` — experiment log + open research decisions.
-- `docs/` — live research notes (log interpretation, experiment plan, SIGReg
-  notes).

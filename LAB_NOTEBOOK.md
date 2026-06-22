@@ -6,7 +6,7 @@
 |------|--------|------------|---------|-------|
 | 2026-02-10 | exp0_sweep | Hyperparameter sweep for baseline | Pending | Sweeping lr, d_model, latent_dim, loss weights |
 | 2026-02-11 | n/a | Numerical instability in STFT loss during silence | Resolved | Increased `logmag_eps` to 1e-3 in `losses/multires_stft.py` and `configs/exp0.yaml` to prevent Spectral Convergence explosion on near-zero targets. |
-| 2026-06-10 | local_6gb, 8,280 steps | Projector-space SIGReg + JEPA would keep encoder z healthy on its own | Refuted — z rank-collapsed to ~4 of 64 dims while every projector-space metric looked healthy | z_rank 3.62, z_rank_res 3.36, z_rank_utt 0.54 (mathematically impossible — metric bug, see human log). Rank plateaued by ~4k steps; losses kept falling. Fix set: SIGReg directly on z + on pooled p, projector output_dim ≥ d_model, weight_decay 1e-5. Plan: `docs/EXPERIMENT_PLAN_2026_06_10.md`. |
+| 2026-06-10 | local_6gb, 8,280 steps | Projector-space SIGReg + JEPA would keep encoder z healthy on its own | Refuted — z rank-collapsed to ~4 of 64 dims while every projector-space metric looked healthy | z_rank 3.62, z_rank_res 3.36, z_rank_utt 0.54 (mathematically impossible — metric bug, see human log). Rank plateaued by ~4k steps; losses kept falling. Fix set: SIGReg directly on z + on pooled p, projector output_dim ≥ d_model, weight_decay 1e-5. |
 
 
 ## Human log
@@ -29,7 +29,7 @@ We ran the local_6gb config (d_model 64, 3 Conformer layers, projector 64→128�
 - Eigenvalue clamp in the three z_rank metrics so they can never report < 1 again.
 - Secondary: chunk-mask target_ratio 0.15→0.25 (harder prediction task), segments 1.5 s→2.5 s with batch 96→64, lowpass_min_freq raised to 2700 Hz so we stop training away the timbre band the gender/emotion probes need, gender/emotion probes enabled in-config, ASR probe steps 1000→8000, and ASR probe feasibility fixes (12.5 Hz frames vs ~8–15 Bengali chars/sec made many CTC samples infeasible and `zero_infinity=True` silently zeroed them — the probe was measuring its own handicap).
 
-**Lesson for us:** never judge a self-supervised run by metrics computed in the same space the regularizer acts on. The backbone rank metrics (z_rank, z_rank_utt) are the ones the probes actually feel, and they are now the primary gauges — see `docs/EXPERIMENT_PLAN_2026_06_10.md` for what "healthy" must look like before we commit to a full 30k run.
+**Lesson for us:** never judge a self-supervised run by metrics computed in the same space the regularizer acts on. The backbone rank metrics (z_rank, z_rank_utt) are the ones the probes actually feel, and they are now the primary gauges for what "healthy" must look like before we commit to a full 30k run.
 
 ### 2026-06-11 — open decisions carried over from the simplification pass
 
