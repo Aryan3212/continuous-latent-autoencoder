@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from jiwer import cer, wer
 
-from eval.common import load_frozen_encoder
+from eval.common import amp_enabled, load_frozen_encoder
 from eval.eval_asr import _filter_manifest_by_duration, _load_feats_and_text
 
 # Special-token indices — these must not collide with the CTC probe's vocab
@@ -482,7 +482,7 @@ def main() -> None:
     ).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
     loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-    use_amp = device.type == "cuda"
+    use_amp = amp_enabled(device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # ------------------------------------------------------------------

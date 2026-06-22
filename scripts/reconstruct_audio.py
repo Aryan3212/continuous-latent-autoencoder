@@ -25,11 +25,11 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 
-from losses.multires_stft import MultiResSTFTLoss
+from losses import MultiResSTFTLoss
 from models.decoder_generator import WaveformDecoder
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
-from utils.config import load_config
+from config import load_config
 
 
 def _load_audio(path: str, sample_rate: int) -> torch.Tensor:

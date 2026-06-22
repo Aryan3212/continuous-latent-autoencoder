@@ -5,7 +5,7 @@ from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 
-from utils.schema import STFTCfg
+from schema import STFTCfg
 
 
 def _get_window(kind: str, win_length: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:

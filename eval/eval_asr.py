@@ -12,8 +12,8 @@ import torch.nn as nn
 
 from jiwer import cer, wer
 
-from data.dataset import resolve_manifest_root
-from eval.common import build_charset, greedy_decode_ctc, iter_frame_features, load_frozen_encoder
+from data_loading import resolve_manifest_root
+from eval.common import amp_enabled, build_charset, greedy_decode_ctc, iter_frame_features, load_frozen_encoder
 
 
 def _encode(text: str, vocab: Dict[str, int]) -> List[int]:
@@ -32,7 +32,7 @@ def _filter_manifest_by_duration(
     """Write a filtered copy of `manifest`, dropping rows with duration > max_seconds.
 
     Rationale: iter_frame_features start-crops audio to segment_seconds (see
-    _start_crop in data/dataset.py) while the probe keeps the FULL transcript as
+    _start_crop in data_loading.py) while the probe keeps the FULL transcript as
     CTC target, so utterances longer than the segment would train on misaligned
     audio/text. Drop them before feature extraction.
 
@@ -301,7 +301,7 @@ def main() -> None:
         head = nn.Linear(feats_tr.size(-1), len(charset)).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
     ctc = nn.CTCLoss(blank=0, zero_infinity=True)
-    use_amp = device.type == "cuda"
+    use_amp = amp_enabled(device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     head.train()

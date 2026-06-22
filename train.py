@@ -1,40 +1,102 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import pathlib
+import random
 import shutil
 import signal
+import subprocess
 import sys
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import yaml
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 
-from data.augment import (
+from data_loading import (
     apply_waveform_augment,
     apply_waveform_chunk_mask,
     make_frame_chunk_masks,
 )
-from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from losses.multires_stft import MultiResSTFTLoss
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
+from losses import MultiResSTFTLoss
 from models.decoder_generator import WaveformDecoder
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
 from models.mhc import sinkhorn_log
 from models.projector import Projector
 from models.sigreg import SIGReg
-from utils.checkpoint import save_checkpoint, save_run_metadata, try_git_hash
-from utils.config import apply_overrides, load_config
-from utils.logging import JsonlLogger, maybe_init_wandb
-from utils.seed import seed_all
+from config import apply_overrides, load_config
+from schema import Config
 
 
 def _now_run_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
+
+
+def seed_all(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+class JsonlLogger:
+    def __init__(self, path: str):
+        self.path = pathlib.Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, row: Dict[str, Any]) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+
+def maybe_init_wandb(cfg: Config, run_id: str, run_dir: str, resume: bool = False):
+    wb = cfg.run.wandb
+    if not wb.enabled:
+        return None
+    import wandb
+    return wandb.init(
+        project=wb.project,
+        name=wb.name or run_id,
+        id=run_id,
+        resume="allow" if resume else None,
+        dir=run_dir,
+        config=cfg.model_dump(),
+    )
+
+
+def save_checkpoint(
+    path: str,
+    *,
+    step: int,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    cfg: Config,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "step": step,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+        "cfg": cfg.model_dump(),
+        "extra": extra or {},
+    }
+    tmp = p.with_suffix(".tmp")
+    torch.save(payload, str(tmp))
+    tmp.rename(p)
 
 
 def _global_local_jepa_loss(
@@ -183,11 +245,13 @@ def main() -> None:
     if dcfg.train_manifest is None:
         raise ValueError("Set data.train_manifest to a JSONL manifest path (e.g. data/manifests/train.jsonl)")
     meta_extra = {
-        "git_hash": try_git_hash(cwd=str(pathlib.Path(".").resolve())),
+        "git_hash": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
         "train_manifest": str(dcfg.train_manifest),
         "val_manifest": str(dcfg.val_manifest or ""),
     }
-    save_run_metadata(str(out_root), cfg, extra=meta_extra)
+    out_root.mkdir(parents=True, exist_ok=True)
+    (out_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(), sort_keys=False), encoding="utf-8")
+    (out_root / "run_meta.yaml").write_text(yaml.safe_dump(meta_extra, sort_keys=False), encoding="utf-8")
     train_ds = AudioDataset(
         DatasetConfig(
             manifest=dcfg.train_manifest,
@@ -251,6 +315,16 @@ def main() -> None:
             "sigreg": sigreg,
         }
     ).to(device)
+
+    # One-time trainable-parameter breakdown (replaces scripts/get_param_count.py).
+    _block_params = {
+        name: sum(p.numel() for p in model[name].parameters() if p.requires_grad)
+        for name in ("frontend", "encoder", "projector", "decoder", "sigreg")
+    }
+    print("[train] trainable parameters:")
+    for _name, _n in _block_params.items():
+        print(f"  {_name:<10} {_n:>12,}")
+    print(f"  {'total':<10} {sum(_block_params.values()):>12,}")
 
     # Losses
     stft = MultiResSTFTLoss(cfg.loss.stft).to(device)

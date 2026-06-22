@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
@@ -8,6 +9,19 @@ from typing import Any, Dict, Iterable, List, Tuple
 import torch
 
 BLANK_IDX = 0
+
+
+def amp_enabled(device: torch.device) -> bool:
+    """Whether to use fp16 autocast for this device.
+
+    AMP only ever applies on CUDA, but can be force-disabled with the env var
+    CLAE_AMP=0. GTX 16-series (Turing, no tensor cores) cards are prone to
+    driver hangs / black-screen lockups under fp16 autocast; set CLAE_AMP=0 to
+    run the eval extractors and CTC probe in fp32.
+    """
+    if device.type != "cuda":
+        return False
+    return os.environ.get("CLAE_AMP", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def build_charset(texts: List[str]) -> List[str]:
@@ -35,11 +49,11 @@ def greedy_decode_ctc(
         outs.append("".join(chars))
     return outs
 
-from data.dataset import AudioDataset, DatasetConfig, collate_fixed
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
-from utils.config import apply_overrides, load_config
-from utils.schema import Config
+from config import apply_overrides, load_config
+from schema import Config
 
 
 @dataclass
@@ -138,7 +152,7 @@ def iter_frame_features(
         h0 = lm.frontend(w)
         return h0 if source == "frontend" else lm.encoder(h0)
 
-    use_amp = lm.device.type == "cuda"
+    use_amp = amp_enabled(lm.device)
     start_t = time.perf_counter()
     n_samples = 0
     for i, batch in enumerate(dl):
@@ -214,7 +228,7 @@ def iter_embeddings_masked(
         ds, batch_size=batch_size, num_workers=num_workers,
         collate_fn=collate_fixed, drop_last=False,
     )
-    use_amp = lm.device.type == "cuda"
+    use_amp = amp_enabled(lm.device)
     start_t = time.perf_counter()
     n_samples = 0
     for i, batch in enumerate(dl):

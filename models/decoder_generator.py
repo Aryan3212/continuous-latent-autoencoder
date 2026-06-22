@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.schema import DecoderCfg
+from schema import DecoderCfg
 
 
 class FiLM(nn.Module):

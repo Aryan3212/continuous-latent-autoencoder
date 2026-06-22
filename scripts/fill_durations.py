@@ -1,6 +1,6 @@
 """Fill real durations into JSONL manifests via soundfile.
 
-The clae_data adapters emit ``duration: null``; the probes need real values:
+The housekeeping.py adapters emit ``duration: null``; the probes need real values:
 eval_asr's too-long-utterance filter, per-sample CTC input lengths, and the
 masked mean/std pooling in iter_embeddings_masked all silently degrade to
 worst-case behavior without them. Run this once per manifest on the machine

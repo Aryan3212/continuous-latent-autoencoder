@@ -5,10 +5,10 @@ import numpy as np
 import pathlib
 import json
 from sklearn.decomposition import PCA
-from data.dataset import AudioDataset, DatasetConfig, collate_fixed
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
-from utils.config import load_config
+from config import load_config
 
 def main():
     parser = argparse.ArgumentParser()

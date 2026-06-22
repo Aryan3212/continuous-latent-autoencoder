@@ -7,7 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
-    from utils.schema import Config
+    from schema import Config
 
 
 def run_all_probes(

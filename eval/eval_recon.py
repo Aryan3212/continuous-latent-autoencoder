@@ -7,12 +7,12 @@ from typing import Dict
 
 import torch
 
-from data.dataset import AudioDataset, DatasetConfig, collate_fixed
-from losses.multires_stft import MultiResSTFTLoss
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
+from losses import MultiResSTFTLoss
 from models.decoder_generator import WaveformDecoder
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
-from utils.config import apply_overrides, load_config
+from config import apply_overrides, load_config
 
 
 def main() -> None:

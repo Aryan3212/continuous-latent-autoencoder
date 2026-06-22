@@ -7,7 +7,7 @@ import subprocess
 from typing import Any, Dict
 
 from eval.run_probes import run_all_probes
-from utils.config import load_config
+from config import load_config
 
 
 def main() -> None:

@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from models.conformer import ConformerLayer
 from models.mhc import MHCWrapper
-from utils.schema import EncoderCfg
+from schema import EncoderCfg
 
 
 class Encoder(nn.Module):

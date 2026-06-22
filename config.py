@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 import yaml
 
-from utils.schema import Config
+from schema import Config
 
 
 def _deep_update(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
