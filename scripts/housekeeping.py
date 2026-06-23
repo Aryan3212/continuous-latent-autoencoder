@@ -375,8 +375,11 @@ class CommonVoiceBnAdapter(DatasetAdapter):
     ``POST /datasets/<id>/download`` with a Bearer token returns a presigned URL
     (valid 12h; rate-limited to 30 requests/day per org), which we stream to a
     tar.gz and extract. On disk it's the standard Common Voice layout:
-    ``cv-corpus-*/bn/clips/*.mp3`` plus ``*.tsv`` manifests (we read
-    ``validated.tsv`` — confirmed transcripts).
+    ``cv-corpus-*/bn/clips/*.mp3`` plus ``*.tsv`` manifests. For self-supervised
+    pretraining we enumerate the ``clips/`` dir directly (every recorded clip —
+    ~1M for bn), attaching transcripts/speaker from the validated/invalidated/
+    other TSVs where present, instead of emitting only the small ``validated.tsv``
+    subset (~44k) the old path was limited to.
     """
 
     name = "common_voice_bn"
@@ -463,47 +466,101 @@ class CommonVoiceBnAdapter(DatasetAdapter):
                 return hits[0]
         return None
 
+    @staticmethod
+    def _find_clips_dir(raw_dir: Path) -> Path | None:
+        """Locate the clips/ dir — flat Kaggle mount (``<root>/clips``) or the
+        nested ``cv-corpus-*/<locale>/clips`` layout from the tar extract."""
+        direct = raw_dir / "clips"
+        if direct.is_dir():
+            return direct
+        # Bounded globs first so we never rglob a 1M-file tree on the common
+        # (flat) mount; rglob is only the last-resort fallback.
+        for pat in ("*/clips", "*/*/clips", "*/*/*/clips"):
+            for p in raw_dir.glob(pat):
+                if p.is_dir():
+                    return p
+        hits = [p for p in raw_dir.rglob("clips") if p.is_dir()]
+        return hits[0] if hits else None
+
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
         import pandas as pd
 
-        tsv = self._find_validated_tsv(raw_dir)
-        if tsv is None:
-            print(f"[common_voice_bn] no validated.tsv/train.tsv under {raw_dir!s}")
+        clips_dir = self._find_clips_dir(raw_dir)
+        if clips_dir is None:
+            print(f"[common_voice_bn] no clips/ dir under {raw_dir!s}")
             return
-        cv_dir = tsv.parent
-        clips_dir = cv_dir / "clips"
+        cv_dir = clips_dir.parent
 
-        df = pd.read_csv(tsv, sep="\t", low_memory=False)
-        # Common Voice tsv: client_id, path, sentence, up_votes, down_votes, ...
-        if "path" not in df.columns or "sentence" not in df.columns:
-            print(f"[common_voice_bn] unexpected tsv columns: {list(df.columns)}")
-            return
-
-        for _, row in df.iterrows():
-            rel = str(row["path"])
-            audio_path = clips_dir / rel
-            if not audio_path.exists():
-                # Some versions already include the clips/ prefix in `path`.
-                alt = cv_dir / rel
-                if alt.exists():
-                    audio_path = alt
-                else:
+        # Transcripts/speakers, built once as a filename -> (sentence, client)
+        # map. Common Voice partitions every recorded clip across validated /
+        # invalidated / other (train/dev/test are subsets of validated), so the
+        # union of those three carries the metadata for the whole corpus. This
+        # is ONLY for metadata — the authoritative clip list is the clips/ dir
+        # below, so self-supervised training sees all ~1M clips rather than the
+        # validated ~4% the old validated.tsv-only path emitted.
+        meta: dict[str, tuple[Optional[str], Optional[str]]] = {}
+        for name in ("validated.tsv", "invalidated.tsv", "other.tsv"):
+            tsv = cv_dir / name
+            if not tsv.exists():
+                continue
+            try:
+                df = pd.read_csv(
+                    tsv,
+                    sep="\t",
+                    low_memory=False,
+                    usecols=lambda c: c in ("path", "sentence", "client_id"),
+                )
+            except Exception as e:
+                print(f"[common_voice_bn] failed to read {tsv.name}: {e}")
+                continue
+            if "path" not in df.columns:
+                print(f"[common_voice_bn] {tsv.name}: no 'path' column; skipping")
+                continue
+            n = len(df)
+            paths = df["path"].tolist()
+            sents = df["sentence"].tolist() if "sentence" in df.columns else [None] * n
+            clients = df["client_id"].tolist() if "client_id" in df.columns else [None] * n
+            for fname, sentence, client in zip(paths, sents, clients):
+                if fname is None or (isinstance(fname, float) and pd.isna(fname)):
                     continue
-            sentence = row.get("sentence")
-            text = None if sentence is None or pd.isna(sentence) else str(sentence)
-            client = row.get("client_id")
-            speaker = None if client is None or pd.isna(client) else str(client)
-            rec: Record = {
-                "audio_filepath": str(audio_path),
-                "text": text,
-                "duration": None,
-                "sample_rate": None,
-                "dataset": self.name,
-                "id": Path(rel).stem,
-                "speaker_id": speaker,
-                "language": self.language,
-            }
-            yield rec
+                fname = str(fname)
+                if fname in meta:
+                    continue
+                text = (
+                    None
+                    if sentence is None or (isinstance(sentence, float) and pd.isna(sentence))
+                    else str(sentence)
+                )
+                spk = (
+                    None
+                    if client is None or (isinstance(client, float) and pd.isna(client))
+                    else str(client)
+                )
+                meta[fname] = (text, spk)
+
+        # Authoritative clip list: every audio file actually present on disk.
+        # scandir avoids a per-row exists() check and never references a clip the
+        # mount doesn't have.
+        emitted = 0
+        with os.scandir(clips_dir) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue
+                fname = entry.name
+                text, spk = meta.get(fname, (None, None))
+                emitted += 1
+                yield {
+                    "audio_filepath": entry.path,
+                    "text": text,
+                    "duration": None,
+                    "sample_rate": None,
+                    "dataset": self.name,
+                    "id": Path(fname).stem,
+                    "speaker_id": spk,
+                    "language": self.language,
+                }
+        if emitted == 0:
+            print(f"[common_voice_bn] clips/ dir is empty: {clips_dir!s}")
 
 
 def _authenticate_kaggle() -> "object":

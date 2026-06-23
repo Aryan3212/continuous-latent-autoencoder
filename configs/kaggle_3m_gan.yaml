@@ -20,7 +20,12 @@ run:
   out_dir: /kaggle/working/runs
   amp: true
 
+# Under DDP (torchrun --nproc_per_node=N, auto-selected by kaggle_session.sh on
+# >1 GPU), train.batch_size is PER-GPU and effective batch =
+# batch_size * grad_accum_steps * N. The base batch_size: 10 was sized for the
+# 6 GB GTX 1660 — on 16 GB T4/P100 raise it (and lower grad_accum to keep the
+# effective batch where you want it) via `-- train.batch_size=... grad_accum_steps=...`.
 data:
   train_manifest: /kaggle/working/manifests/train.jsonl
   val_manifest: /kaggle/working/manifests/val.jsonl
-  num_workers: 4
+  num_workers: 2  # per-GPU under DDP; Kaggle ~4 vCPU / 2 GPU

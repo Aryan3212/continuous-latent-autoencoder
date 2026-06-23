@@ -19,6 +19,7 @@ import yaml
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
+import torch.distributed as dist
 
 from data_loading import (
     apply_waveform_augment,
@@ -53,6 +54,37 @@ def seed_all(seed: int) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
+    """Return the underlying module if DDP-wrapped, else the module itself."""
+    if isinstance(module, torch.nn.parallel.DistributedDataParallel):
+        return module.module
+    return module
+
+
+def _clean_state_dict(model: torch.nn.Module) -> Dict[str, Any]:
+    """state_dict with any DDP ``module.`` prefix stripped, so checkpoints written
+    under DDP are byte-compatible with single-GPU ones (and resume either way)."""
+    return {k.replace(".module.", ".", 1): v for k, v in model.state_dict().items()}
+
+
+def _gather_with_grad(x: torch.Tensor, world_size: int, rank: int) -> torch.Tensor:
+    """All-gather ``x`` (N_local, D) across ranks into (N_global, D).
+
+    Other ranks' rows are gathered as constants; the local rank's slot keeps its
+    autograd graph, so backward delivers gradients only to the local samples. The
+    caller compensates DDP's 1/world_size gradient averaging by scaling the loss
+    term by world_size, recovering the single-GPU full-batch gradient. No-op when
+    world_size == 1.
+    """
+    if world_size == 1:
+        return x
+    xc = x.contiguous()
+    gathered = [torch.empty_like(xc) for _ in range(world_size)]
+    dist.all_gather(gathered, xc)
+    gathered[rank] = x  # restore autograd on the local slot
+    return torch.cat(gathered, dim=0)
 
 
 class JsonlLogger:
@@ -97,14 +129,14 @@ def save_checkpoint(
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "step": step,
-        "model": model.state_dict(),
+        "model": _clean_state_dict(model),
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
         "cfg": cfg.model_dump(),
         "extra": extra or {},
     }
     if disc is not None:
-        payload["disc"] = disc.state_dict()
+        payload["disc"] = _unwrap(disc).state_dict()
         payload["optimizer_d"] = optimizer_d.state_dict() if optimizer_d is not None else None
         payload["scaler_d"] = scaler_d.state_dict() if scaler_d is not None else None
     tmp = p.with_suffix(".tmp")
@@ -219,11 +251,24 @@ def main() -> None:
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
+    # Distributed (DDP) bootstrap. Launched via `torchrun --nproc_per_node=N`; with
+    # no such env (plain `python train.py`) world_size==1, so every DDP-specific
+    # path below is skipped and single-GPU behaviour is byte-for-byte unchanged.
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    is_dist = world_size > 1
+    is_main = rank == 0
+    if is_dist:
+        dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+
     # Hardware acceleration flags
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
-    # Limit PyTorch to 95% of physical VRAM to prevent WSL2/Windows shared memory slowdowns
-    torch.cuda.set_per_process_memory_fraction(0.85, device=0)
+    # Cap VRAM per process (avoids WSL2/Windows shared-memory slowdowns), per local rank.
+    torch.cuda.set_per_process_memory_fraction(0.85, device=local_rank)
 
     # Everything in the config is settable via trailing dotted overrides, e.g.
     #   python train.py --config configs/exp0.yaml train.max_steps=5000 train.log_interval_steps=50
@@ -251,31 +296,37 @@ def main() -> None:
     # When resuming, pass run.run_id=<id> matching the checkpoint's run dir
     # (<out_dir>/<run_id>/checkpoints/<name>.pt) to reuse its out_dir and wandb run.
 
-    seed_all(cfg.run.seed)
-    device = torch.device("cuda")
+    # Per-rank seed offset: identical model init is enforced by DDP's broadcast at
+    # wrap time anyway, so offsetting by rank only diversifies the per-rank waveform
+    # augmentation / chunk-mask RNG. rank 0 -> unchanged from single-GPU.
+    seed_all(cfg.run.seed + rank)
 
     run_id = cfg.run.run_id or _now_run_id()
     out_root = pathlib.Path(cfg.run.out_dir) / run_id
     ckpt_dir = out_root / "checkpoints"
     log_dir = out_root / "logs"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    log_dir.mkdir(parents=True, exist_ok=True)
 
-    jsonl = JsonlLogger(str(log_dir / "train.jsonl"))
-    wb = maybe_init_wandb(cfg, run_id, str(out_root), resume=bool(args.resume))
+    # Only rank 0 touches disk / W&B; non-main ranks never create dirs or log.
+    jsonl = None
+    wb = None
+    if is_main:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        jsonl = JsonlLogger(str(log_dir / "train.jsonl"))
+        wb = maybe_init_wandb(cfg, run_id, str(out_root), resume=bool(args.resume))
 
     # Data
     dcfg = cfg.data
     if dcfg.train_manifest is None:
         raise ValueError("Set data.train_manifest to a JSONL manifest path (e.g. data/manifests/train.jsonl)")
-    meta_extra = {
-        "git_hash": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
-        "train_manifest": str(dcfg.train_manifest),
-        "val_manifest": str(dcfg.val_manifest or ""),
-    }
-    out_root.mkdir(parents=True, exist_ok=True)
-    (out_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(), sort_keys=False), encoding="utf-8")
-    (out_root / "run_meta.yaml").write_text(yaml.safe_dump(meta_extra, sort_keys=False), encoding="utf-8")
+    if is_main:
+        meta_extra = {
+            "git_hash": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
+            "train_manifest": str(dcfg.train_manifest),
+            "val_manifest": str(dcfg.val_manifest or ""),
+        }
+        (out_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(), sort_keys=False), encoding="utf-8")
+        (out_root / "run_meta.yaml").write_text(yaml.safe_dump(meta_extra, sort_keys=False), encoding="utf-8")
     train_ds = AudioDataset(
         DatasetConfig(
             manifest=dcfg.train_manifest,
@@ -283,6 +334,15 @@ def main() -> None:
             segment_seconds=dcfg.segment_seconds,
             random_crop=True,
         )
+    )
+    # DistributedSampler shards the data across ranks under DDP; set_epoch (in the
+    # loop) reshuffles each pass. Single-GPU -> sampler None and shuffle=True (unchanged).
+    train_sampler = (
+        torch.utils.data.distributed.DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True
+        )
+        if is_dist
+        else None
     )
     train_dl = torch.utils.data.DataLoader(
         train_ds,
@@ -295,7 +355,8 @@ def main() -> None:
         multiprocessing_context="spawn" if dcfg.num_workers > 0 else None,
         collate_fn=collate_fixed,
         drop_last=True,
-        shuffle=True,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
     )
 
     val_dl = None
@@ -345,10 +406,11 @@ def main() -> None:
         name: sum(p.numel() for p in model[name].parameters() if p.requires_grad)
         for name in ("frontend", "encoder", "projector", "decoder", "sigreg")
     }
-    print("[train] trainable parameters:")
-    for _name, _n in _block_params.items():
-        print(f"  {_name:<10} {_n:>12,}")
-    print(f"  {'total':<10} {sum(_block_params.values()):>12,}")
+    if is_main:
+        print("[train] trainable parameters:")
+        for _name, _n in _block_params.items():
+            print(f"  {_name:<10} {_n:>12,}")
+        print(f"  {'total':<10} {sum(_block_params.values()):>12,}")
 
     # Adversarial discriminator (HiFi-GAN MPD). Built separately from `model`
     # so the generator optimizer / param breakdown stay clean; trained by its
@@ -358,7 +420,8 @@ def main() -> None:
     if acfg.enabled:
         disc = MultiPeriodDiscriminator(acfg.periods, channels=acfg.disc_channels).to(device)
         _d_params = sum(p.numel() for p in disc.parameters() if p.requires_grad)
-        print(f"  {'disc(MPD)':<10} {_d_params:>12,}  (adversarial, separate optimizer)")
+        if is_main:
+            print(f"  {'disc(MPD)':<10} {_d_params:>12,}  (adversarial, separate optimizer)")
 
     # Losses
     stft = MultiResSTFTLoss(cfg.loss.stft).to(device)
@@ -443,6 +506,21 @@ def main() -> None:
                 scaler_d.load_state_dict(state["scaler_d"])
         step = int(state.get("step", 0))
 
+    # Wrap param-bearing submodules in DDP AFTER any resume-load (so the clean
+    # single-GPU checkpoint format loads into the raw modules). `sigreg` has no
+    # learnable params, so it is never wrapped. DDP shares param tensors with the
+    # raw modules, so the optimizer(s) built above stay valid. (If MHC ever leaves
+    # encoder params unused in a forward, add find_unused_parameters=True there.)
+    if is_dist:
+        for _name in ("frontend", "encoder", "projector", "decoder"):
+            model[_name] = torch.nn.parallel.DistributedDataParallel(
+                model[_name], device_ids=[local_rank], output_device=local_rank
+            )
+        if disc is not None:
+            disc = torch.nn.parallel.DistributedDataParallel(
+                disc, device_ids=[local_rank], output_device=local_rank
+            )
+
     # Training loop
     model.train()
     max_steps = cfg.train.max_steps
@@ -457,6 +535,9 @@ def main() -> None:
     if num_globals < 1 or num_locals < 1:
         raise ValueError(f"loss.jepa.num_globals and num_locals must both be >= 1; got G={num_globals}, L={num_locals}")
     sig_w = cfg.loss.sigreg.weight
+    # SIGReg is gathered across ranks (see loop); DDP averages gradients by 1/W, so
+    # scaling its term by world_size restores the single-GPU full-batch gradient.
+    sig_scale = float(world_size)
     stft_w = cfg.loss.stft_weight
     wav_l1_w = cfg.loss.wav_l1_weight
     adv_w = acfg.adv_weight
@@ -477,8 +558,8 @@ def main() -> None:
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for vb in val_dl:
                 vw = vb["wav"].to(device)
-                z = model["encoder"](model["frontend"](vw))
-                xh = _decode(model, z, target_len=vw.size(-1))
+                z = _unwrap(model["encoder"])(_unwrap(model["frontend"])(vw))
+                xh = _unwrap(model["decoder"])(z, target_len=vw.size(-1))
                 v_stft, _ = stft(xh, vw)
                 sums["val_stft"] += v_stft.detach()
                 n += 1
@@ -493,7 +574,7 @@ def main() -> None:
         return payload
 
     prof = None
-    if args.profile:
+    if args.profile and is_main:
         import wandb
         if wandb.run is None:
             print("Warning: W&B is not initialized, logging profiler trace to local './profiler_logs' directory.")
@@ -516,14 +597,29 @@ def main() -> None:
     start_time = time.monotonic()
     max_seconds = args.max_hours * 3600.0 if args.max_hours else None
 
+    epoch = 0
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch)
     train_it = iter(train_dl)
-    while step < max_steps and not _shutdown:
-        if max_seconds is not None and time.monotonic() - start_time >= max_seconds:
-            print(
-                f"[train] wall-clock budget ({args.max_hours}h) reached at step {step} "
-                "— stopping and saving last.pt.",
-                flush=True,
-            )
+    while step < max_steps:
+        # Stop decision must be COLLECTIVE under DDP: if one rank breaks (SIGTERM or
+        # wall-clock budget) while others keep going, the others hang at the next
+        # collective. all_reduce(MAX) makes every rank stop on the same iteration.
+        # (step < max_steps is already identical across ranks.)
+        stop = _shutdown or (
+            max_seconds is not None and time.monotonic() - start_time >= max_seconds
+        )
+        if is_dist:
+            _stop_t = torch.tensor([1.0 if stop else 0.0], device=device)
+            dist.all_reduce(_stop_t, op=dist.ReduceOp.MAX)
+            stop = _stop_t.item() > 0.0
+        if stop:
+            if is_main:
+                print(
+                    f"[train] stopping at step {step} (shutdown or wall-clock budget) "
+                    "— saving last.pt.",
+                    flush=True,
+                )
             break
         optimizer.zero_grad(set_to_none=True)
         if optimizer_d is not None:
@@ -536,6 +632,9 @@ def main() -> None:
             try:
                 batch = next(train_it)
             except StopIteration:
+                epoch += 1
+                if train_sampler is not None:
+                    train_sampler.set_epoch(epoch)
                 train_it = iter(train_dl)
                 batch = next(train_it)
             microbatches.append(batch)
@@ -587,10 +686,13 @@ def main() -> None:
                 # no extra /N rescaling here.
                 D_lat = p_cat.size(1)
                 sig_input = p_cat.permute(2, 0, 1)                # (T', V*B, P)
-                l_sig = sigreg(
-                    sig_input.reshape(-1, D_lat),                 # (T'*V*B, P)
-                    step=step,
-                )
+                sig_flat = sig_input.reshape(-1, D_lat)           # (T'*V*B, P)
+                # Gather across ranks so the characteristic-function estimate (and
+                # its ×N scaling) uses the GLOBAL batch, matching single-GPU. Only
+                # the local slot carries grad; DDP + sig_scale (×W) restore the
+                # single-GPU gradient magnitude.
+                sig_global = _gather_with_grad(sig_flat, world_size, rank)
+                l_sig = sigreg(sig_global, step=step)
                 sig_stats = {
                     "l_sig_frm": l_sig.detach(),
                     "l_jepa_predict": l_jepa_pred_dbg,
@@ -640,7 +742,7 @@ def main() -> None:
                 if disc_active:
                     for p in disc.parameters():
                         p.requires_grad_(False)
-                    _, g_fake, fmap_r, fmap_g = disc(wav_a, x_hat)
+                    _, g_fake, fmap_r, fmap_g = _unwrap(disc)(wav_a, x_hat)
                     l_adv = generator_adv_loss(g_fake)
                     if step >= fm_start:
                         l_fm = feature_matching_loss(fmap_r, fmap_g)
@@ -649,7 +751,7 @@ def main() -> None:
                     stft_w * l_stft
                     + wav_l1_w * l_wav
                     + jepa_w * l_jepa
-                    + sig_w * l_sig
+                    + sig_w * sig_scale * l_sig
                     + adv_w * l_adv
                     + fm_w * l_fm
                 )
@@ -717,12 +819,12 @@ def main() -> None:
         # frame and utterance level. pos ≪ neg means the encoder identifies
         # the same audio under augmentation while keeping utterances apart;
         # contrast (neg/pos) drifting toward 1 means collapse or aug-sensitivity.
-        if step % cfg.train.probe_interval_steps == 0:
+        if is_main and step % cfg.train.probe_interval_steps == 0:
             model.eval()
             with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
-                z_clean = model["encoder"](model["frontend"](wav_a)).float()
-                z_aug = model["encoder"](
-                    model["frontend"](apply_waveform_augment(wav_a, dcfg.sample_rate, wave_aug_cfg))
+                z_clean = _unwrap(model["encoder"])(_unwrap(model["frontend"])(wav_a)).float()
+                z_aug = _unwrap(model["encoder"])(
+                    _unwrap(model["frontend"])(apply_waveform_augment(wav_a, dcfg.sample_rate, wave_aug_cfg))
                 ).float()
                 pos_frame = (z_clean - z_aug).pow(2).mean()
                 neg_frame = (z_clean - z_aug.roll(1, dims=0)).pow(2).mean()
@@ -745,7 +847,7 @@ def main() -> None:
                 wb.log(probe_row, step=step)
 
         log_interval = cfg.train.log_interval_steps
-        if step % log_interval == 0:
+        if is_main and step % log_interval == 0:
             log_stats = {k: (v / accum_counts[k]).item() for k, v in accum_sums.items()}
             accum_sums.clear()
             accum_counts.clear()
@@ -766,7 +868,7 @@ def main() -> None:
                 log_stats["p_rank_utt"] = _participation_ratio(p_cat[:B].detach().float().mean(dim=2)).item()
             row = {"step": step, **log_stats}
 
-            encoder_mod = model["encoder"]
+            encoder_mod = _unwrap(model["encoder"])
             if hasattr(encoder_mod, "mhc_wrappers"):
                 for wrapper in encoder_mod.mhc_wrappers:
                     if not hasattr(wrapper, "H_res_alpha_logit"):
@@ -789,7 +891,7 @@ def main() -> None:
             if wb is not None:
                 wb.log(row, step=step)
 
-        if step % cfg.train.save_interval_steps == 0:
+        if is_main and step % cfg.train.save_interval_steps == 0:
             # Step-tagged so a later collapse still leaves usable checkpoints
             # to roll back to / post-mortem; last.pt stays the resume target.
             step_ckpt = ckpt_dir / f"step_{step:06d}.pt"
@@ -807,7 +909,7 @@ def main() -> None:
             )
             shutil.copyfile(step_ckpt, ckpt_dir / "last.pt")
 
-        if step % cfg.train.eval_interval_steps == 0:
+        if is_main and step % cfg.train.eval_interval_steps == 0:
             v = _validate_one()
             if v:
                 row = {"step": step, **v}
@@ -821,18 +923,25 @@ def main() -> None:
     if prof is not None:
         prof.stop()
 
-    save_checkpoint(
-        str(ckpt_dir / "last.pt"),
-        step=step,
-        model=model,
-        optimizer=optimizer,
-        scaler=scaler if scaler.is_enabled() else None,
-        cfg=cfg,
-        extra=_extra_state(),
-        disc=disc,
-        optimizer_d=optimizer_d,
-        scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
-    )
+    if is_main:
+        save_checkpoint(
+            str(ckpt_dir / "last.pt"),
+            step=step,
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler if scaler.is_enabled() else None,
+            cfg=cfg,
+            extra=_extra_state(),
+            disc=disc,
+            optimizer_d=optimizer_d,
+            scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
+        )
+
+    # Barrier so non-main ranks wait for rank 0's final save before tearing the
+    # process group down (destroy can race a still-writing rank 0 otherwise).
+    if is_dist:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

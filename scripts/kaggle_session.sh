@@ -9,7 +9,17 @@
 #   5. publish last.pt back to HF (resume point for the next session / final model)
 #
 # Run from the repo root in a Kaggle notebook cell:
-#   !bash scripts/kaggle_session.sh
+#   !bash scripts/kaggle_session.sh                        # defaults
+#   !bash scripts/kaggle_session.sh -H 6                   # 6h session
+#   !bash scripts/kaggle_session.sh -- train.batch_size=48 data.num_workers=8
+#
+# Options (each also settable via the env var in parens):
+#   -H, --hours N      wall-clock training budget in hours (MAX_HOURS, default 11.5)
+#   -c, --config PATH  training config (CONFIG, default configs/kaggle_3m_gan.yaml)
+#   -h, --help         show usage and exit
+# Everything after `--` is forwarded verbatim to train.py as dotted config
+# overrides — use it to size train.batch_size / data.num_workers to the GPU and
+# vCPUs reported at startup so a session fully utilises the hardware.
 #
 # Required secrets (Kaggle "Add-ons -> Secrets", exposed as env vars in a prior
 # cell, or exported inline): WANDB_API_KEY, HF_TOKEN (a WRITE token).
@@ -31,6 +41,33 @@ CKPT="${CKPT:-/kaggle/working/runs/clae_3m_kaggle/checkpoints/last.pt}"
 REGSPEECH_DIR="${REGSPEECH_DIR:-/kaggle/input/regspeech12}"
 CV_DIR="${CV_DIR:-/kaggle/input/common-voice-24-bn}"
 
+# --- CLI parsing (flags override the env defaults above) -------------------- #
+# Anything after `--` is forwarded to train.py as trailing dotted overrides, so
+# a session can be retuned without editing the config — the lever for filling
+# the GPU/CPUs reported at startup, e.g.
+#   bash scripts/kaggle_session.sh -H 6 -- train.batch_size=48 data.num_workers=8
+usage() {
+  cat >&2 <<'EOF'
+Usage: bash scripts/kaggle_session.sh [-H HOURS] [-c CONFIG] [-- TRAIN_OVERRIDES...]
+  -H, --hours N      wall-clock training budget in hours (default 11.5; env MAX_HOURS)
+  -c, --config PATH  training config (default configs/kaggle_3m_gan.yaml; env CONFIG)
+  -h, --help         show this help
+Args after `--` are forwarded to train.py as dotted overrides, e.g.
+  -- train.batch_size=48 data.num_workers=8
+EOF
+}
+TRAIN_OVERRIDES=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--hours)  MAX_HOURS="$2"; shift 2 ;;
+    -c|--config) CONFIG="$2"; shift 2 ;;
+    -h|--help)   usage; exit 0 ;;
+    --)          shift; TRAIN_OVERRIDES+=("$@"); break ;;
+    -*)          echo "[kaggle] unknown option: $1" >&2; usage; exit 2 ;;
+    *)           echo "[kaggle] unexpected arg '$1' (forward train.py overrides after '--')" >&2; exit 2 ;;
+  esac
+done
+
 # --- 0. sanity: secrets ----------------------------------------------------- #
 : "${HF_TOKEN:?set HF_TOKEN (a HF WRITE token) before running}"
 : "${WANDB_API_KEY:?set WANDB_API_KEY before running}"
@@ -41,6 +78,26 @@ export MALLOC_ARENA_MAX=2
 # --- 1. deps (torch/torchaudio already in the Kaggle image; don't touch them) #
 # If train.py later dies on a missing import, add that package here.
 pip install -q wandb pydantic pyyaml pandas openpyxl "huggingface_hub>=0.23" soundfile
+
+# --- 1b. report hardware so batch_size / num_workers can be sized to it ------ #
+# Kaggle's T4/P100 (~15-16 GB) and ~30 GB host RAM dwarf the dev box, so the
+# base config's small batch leaves the GPU mostly idle. Read the numbers below,
+# then raise `train.batch_size` (VRAM) and `data.num_workers` (vCPUs) via `--`.
+echo "[kaggle] hardware:"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null \
+  | sed 's/^/[kaggle]   gpu: /' || echo "[kaggle]   nvidia-smi unavailable"
+python - <<'PY'
+import os
+print(f"[kaggle]   cpus: {os.cpu_count()}  (set data.num_workers near this)")
+try:
+    import torch
+    if torch.cuda.is_available():
+        p = torch.cuda.get_device_properties(0)
+        print(f"[kaggle]   torch: {torch.cuda.device_count()}x {p.name} "
+              f"({p.total_memory / 1e9:.1f} GB) — raise train.batch_size until ~90% VRAM")
+except Exception as e:  # torch import shouldn't fail on Kaggle, but don't abort
+    print(f"[kaggle]   torch GPU query skipped: {e}")
+PY
 
 # --- 2. manifests over the attached raw datasets (skip if already built) ---- #
 if [[ -f "$MANIFEST_DIR/train.jsonl" ]]; then
@@ -89,5 +146,19 @@ else
   echo "[kaggle] no checkpoint found — fresh start"
 fi
 
-python train.py --config "$CONFIG" "${resume_arg[@]}" --max_hours "$MAX_HOURS"
+# Multi-GPU -> DDP via torchrun (train.py reads RANK/WORLD_SIZE/LOCAL_RANK from the
+# env and shards across the GPUs); single-GPU -> plain python (unchanged path).
+# NOTE: under DDP train.batch_size is PER-GPU, so effective batch =
+# batch_size * grad_accum_steps * NPROC. Force single-GPU with NPROC=1.
+NPROC="${NPROC:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
+[[ "$NPROC" =~ ^[0-9]+$ ]] && (( NPROC >= 1 )) || NPROC=1
+if (( NPROC > 1 )); then
+  echo "[kaggle] launching DDP across $NPROC GPUs (torchrun)"
+  launcher=(torchrun --standalone --nproc_per_node="$NPROC")
+else
+  echo "[kaggle] launching single-GPU"
+  launcher=(python)
+fi
+
+"${launcher[@]}" train.py --config "$CONFIG" "${resume_arg[@]}" --max_hours "$MAX_HOURS" "${TRAIN_OVERRIDES[@]}"
 echo "[kaggle] training finished cleanly — EXIT trap will publish the checkpoint."
