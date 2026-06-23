@@ -123,13 +123,28 @@ except Exception as e:  # torch import shouldn't fail on Kaggle, but don't abort
 PY
 
 # --- 2. manifests over the attached raw datasets (skip if already built) ---- #
-if [[ -f "$MANIFEST_DIR/train.jsonl" ]]; then
+# Building manifests over the full corpus (~1M Common Voice clips) costs minutes
+# every ephemeral session, so cache the deterministic output: use a local copy
+# if present, else restore the gzipped cache from HF, else build once and
+# publish it for the next session. The manifests embed absolute mount paths, so
+# the cache is valid only while the same datasets stay attached at the same
+# slugs — set REBUILD_MANIFESTS=1 to force a rebuild + re-publish if that changes
+# (or attach a Kaggle Dataset of prebuilt manifests and point MANIFEST_DIR at it).
+if [[ -z "${REBUILD_MANIFESTS:-}" && -f "$MANIFEST_DIR/train.jsonl" ]]; then
   echo "[kaggle] manifests already present in $MANIFEST_DIR — skipping build"
+elif [[ -z "${REBUILD_MANIFESTS:-}" ]] && python scripts/housekeeping.py fetch-manifests \
+       --repo-id "$CKPT_REPO" --dest-dir "$MANIFEST_DIR"; then
+  echo "[kaggle] restored cached manifests from $CKPT_REPO"
 else
+  echo "[kaggle] building manifests from raw (slow, once) ..."
   python scripts/housekeeping.py make-manifests \
     --map "regspeech12=$REGSPEECH_DIR" \
     --map "common_voice_bn=$CV_DIR" \
     --out-dir "$MANIFEST_DIR"
+  echo "[kaggle] publishing manifests to $CKPT_REPO for reuse next session ..."
+  python scripts/housekeeping.py publish-manifests \
+    --manifest-dir "$MANIFEST_DIR" --repo-id "$CKPT_REPO" \
+    || echo "[kaggle] WARNING: manifest publish failed; will rebuild next session."
 fi
 
 # --- 3. pull latest checkpoint from HF (no-op on the first session) --------- #

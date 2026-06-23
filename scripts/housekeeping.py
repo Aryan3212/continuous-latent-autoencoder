@@ -1599,6 +1599,102 @@ def publish_checkpoint(
 
 
 # =========================================================================== #
+# Manifest cache (gzip train/val jsonl into a HF model repo, reuse next session)
+# =========================================================================== #
+#
+# The manifest build walks the whole corpus (~1M Common Voice clips: read the
+# TSVs, scandir clips/, shuffle+split) — minutes of work that an ephemeral
+# Kaggle session would otherwise repeat every time. The output is deterministic
+# (fixed seed) and holds ABSOLUTE audio paths into the attached dataset mounts,
+# so it is byte-for-byte reusable as long as the SAME datasets stay attached at
+# the SAME slugs. Cache it under the ``manifests/`` prefix of the model repo and
+# the build becomes a once-ever cost. Change the corpus/slugs -> the cache is
+# stale; delete ``manifests/`` on the Hub (or bypass the fetch) to rebuild.
+
+_MANIFEST_PREFIX = "manifests"
+_MANIFEST_FILES = ("train.jsonl", "val.jsonl")
+
+
+def publish_manifests(
+    manifest_dir: Path,
+    repo_id: str,
+    commit_message: str | None = None,
+    private: bool = True,
+) -> str:
+    """Gzip train/val jsonl (+ build_meta) and upload under ``manifests/``."""
+    import gzip
+    import shutil
+    from huggingface_hub import HfApi
+
+    manifest_dir = Path(manifest_dir)
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True, private=private)
+
+    msg = commit_message or f"publish manifests {_dt.datetime.utcnow().isoformat()}Z"
+    print(f"[publish-manifests] {manifest_dir} -> {repo_id}/{_MANIFEST_PREFIX}/")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        uploads: list[tuple[str, str]] = []
+        for name in _MANIFEST_FILES:
+            src = manifest_dir / name
+            if not src.exists():
+                raise SystemExit(f"[publish-manifests] missing {src}")
+            gz = tmp_dir / (name + ".gz")
+            with open(src, "rb") as fi, gzip.open(gz, "wb", compresslevel=6) as fo:
+                shutil.copyfileobj(fi, fo)
+            uploads.append((str(gz), f"{_MANIFEST_PREFIX}/{name}.gz"))
+        meta = manifest_dir / "build_meta.yaml"
+        if meta.exists():
+            uploads.append((str(meta), f"{_MANIFEST_PREFIX}/build_meta.yaml"))
+        for local, path_in_repo in uploads:
+            api.upload_file(
+                path_or_fileobj=local,
+                path_in_repo=path_in_repo,
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=msg,
+            )
+
+    url = f"https://huggingface.co/{repo_id}/tree/main/{_MANIFEST_PREFIX}"
+    print(f"[publish-manifests] done: {url}")
+    return url
+
+
+def fetch_manifests(repo_id: str, dest_dir: Path) -> bool:
+    """Download + gunzip cached manifests into ``dest_dir``.
+
+    Returns ``True`` if the full set (train + val) was restored, ``False`` if
+    the cache is absent (first session, before any publish) — the caller then
+    builds from the raw corpus instead.
+    """
+    import gzip
+    import shutil
+    from huggingface_hub import hf_hub_download
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for name in _MANIFEST_FILES:
+        try:
+            local = hf_hub_download(
+                repo_id=repo_id,
+                repo_type="model",
+                filename=f"{_MANIFEST_PREFIX}/{name}.gz",
+                token=os.environ.get("HF_TOKEN"),
+            )
+        except Exception as e:  # noqa: BLE001 — 404 / missing-repo surface various ways
+            print(
+                f"[fetch-manifests] {repo_id}:{_MANIFEST_PREFIX}/{name}.gz "
+                f"unavailable ({type(e).__name__}) — will build from raw."
+            )
+            return False
+        with gzip.open(local, "rb") as fi, open(dest_dir / name, "wb") as fo:
+            shutil.copyfileobj(fi, fo)
+        print(f"[fetch-manifests] {repo_id}:{_MANIFEST_PREFIX}/{name}.gz -> {dest_dir / name}")
+    return True
+
+
+# =========================================================================== #
 # CLI
 # =========================================================================== #
 #
@@ -1989,6 +2085,41 @@ def _run_fetch_checkpoint(args: argparse.Namespace) -> None:
     fetch_checkpoint(repo_id=repo_id, dest=Path(args.dest), filename=args.filename)
 
 
+# --- publish-manifests / fetch-manifests ----------------------------------- #
+
+
+def _add_publish_manifests(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--manifest-dir", required=True, help="Dir holding train.jsonl/val.jsonl.")
+    p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
+    p.add_argument("--commit-message", default=None)
+    p.set_defaults(func=_run_publish_manifests)
+
+
+def _run_publish_manifests(args: argparse.Namespace) -> None:
+    repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
+    print(f"[housekeeping] publish-manifests: {args.manifest_dir} -> {repo_id}")
+    publish_manifests(
+        manifest_dir=Path(args.manifest_dir),
+        repo_id=repo_id,
+        commit_message=args.commit_message,
+    )
+
+
+def _add_fetch_manifests(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
+    p.add_argument("--dest-dir", required=True, help="Dir to write train.jsonl/val.jsonl into.")
+    p.set_defaults(func=_run_fetch_manifests)
+
+
+def _run_fetch_manifests(args: argparse.Namespace) -> None:
+    repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
+    print(f"[housekeeping] fetch-manifests: {repo_id} -> {args.dest_dir}")
+    ok = fetch_manifests(repo_id=repo_id, dest_dir=Path(args.dest_dir))
+    # Exit non-zero when the cache is absent so a shell caller can branch on it
+    # (build-from-raw) without parsing stdout.
+    raise SystemExit(0 if ok else 3)
+
+
 # --- dispatch -------------------------------------------------------------- #
 
 
@@ -2021,6 +2152,18 @@ def main() -> None:
         sub.add_parser(
             "fetch-checkpoint",
             help="Download a checkpoint from a HF model repo (for cross-session resume).",
+        )
+    )
+    _add_publish_manifests(
+        sub.add_parser(
+            "publish-manifests",
+            help="Gzip + upload train/val manifests to a HF model repo (build-once cache).",
+        )
+    )
+    _add_fetch_manifests(
+        sub.add_parser(
+            "fetch-manifests",
+            help="Download cached manifests from a HF model repo (exit 3 if absent).",
         )
     )
 
