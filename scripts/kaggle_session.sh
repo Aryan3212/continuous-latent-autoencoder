@@ -56,7 +56,31 @@ fi
 python scripts/housekeeping.py fetch-checkpoint \
   --repo-id "$CKPT_REPO" --dest "$CKPT" || true
 
-# --- 4. train --------------------------------------------------------------- #
+# --- 4. train (crash-safe: publish last.pt on ANY exit) --------------------- #
+# An EXIT trap publishes the checkpoint whether training finishes, hits the
+# --max_hours budget, or crashes (OOM etc.), so a 12h session's progress is
+# never lost. This is fault tolerance for a flaky environment, not paranoia:
+#   - train.py writes last.pt atomically (tmp -> rename), so we never upload a
+#     half-written file;
+#   - `local rc=$?` is captured first and re-raised, so a training failure still
+#     surfaces as a non-zero exit instead of being masked.
+# The 12h HARD kill is handled by --max_hours self-stopping FIRST — Kaggle's
+# post-SIGTERM grace window is too short to rely on for a network upload.
+publish_on_exit() {
+  local rc=$?
+  if [[ -f "$CKPT" ]]; then
+    echo "[kaggle] publishing checkpoint (training exit code $rc) ..."
+    python scripts/housekeeping.py publish-checkpoint \
+      --ckpt "$CKPT" --repo-id "$CKPT_REPO" \
+      --commit-message "kaggle session $(date -u +%Y%m%dT%H%M%SZ) rc=$rc" \
+      || echo "[kaggle] WARNING: publish failed; last.pt is still at $CKPT."
+  else
+    echo "[kaggle] WARNING: no checkpoint at $CKPT to publish."
+  fi
+  exit "$rc"
+}
+trap publish_on_exit EXIT
+
 resume_arg=()
 if [[ -f "$CKPT" ]]; then
   echo "[kaggle] resuming from $CKPT"
@@ -66,13 +90,4 @@ else
 fi
 
 python train.py --config "$CONFIG" "${resume_arg[@]}" --max_hours "$MAX_HOURS"
-
-# --- 5. publish the resulting checkpoint back to HF ------------------------- #
-if [[ -f "$CKPT" ]]; then
-  python scripts/housekeeping.py publish-checkpoint \
-    --ckpt "$CKPT" --repo-id "$CKPT_REPO" \
-    --commit-message "kaggle session $(date -u +%Y%m%dT%H%M%SZ)"
-  echo "[kaggle] session done. Checkpoint published to $CKPT_REPO."
-else
-  echo "[kaggle] WARNING: no checkpoint at $CKPT to publish."
-fi
+echo "[kaggle] training finished cleanly — EXIT trap will publish the checkpoint."
