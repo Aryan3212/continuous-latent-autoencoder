@@ -21,6 +21,10 @@ class RunCfg(_Base):
     out_dir: str = "runs"
     seed: int = 0
     amp: bool = True
+    # Per-process VRAM cap for PyTorch's allocator. Note the CUDA context + NCCL
+    # (~0.9 GiB) live OUTSIDE this cap, so fraction*total + that must stay under
+    # the card; back off if you OOM right at the cap.
+    gpu_mem_fraction: float = Field(0.92, gt=0.0, le=1.0)
     wandb: WandbCfg = Field(default_factory=WandbCfg)
 
 

@@ -19,6 +19,7 @@ run:
   run_id: clae_3m_kaggle
   out_dir: /kaggle/working/runs
   amp: true
+  gpu_mem_fraction: 0.95    # dedicated T4 (~15 GB) -> ~13.8 GiB for PyTorch; aggressive (CUDA ctx+NCCL ~0.9 GiB sit on top), drop to 0.92 if it OOMs at the cap
 
 # Under DDP (torchrun --nproc_per_node=N, auto-selected by kaggle_session.sh on
 # >1 GPU), train.batch_size is PER-GPU and effective batch =

@@ -267,8 +267,7 @@ def main() -> None:
     # Hardware acceleration flags
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
-    # Cap VRAM per process (avoids WSL2/Windows shared-memory slowdowns), per local rank.
-    torch.cuda.set_per_process_memory_fraction(0.85, device=local_rank)
+    # (Per-process VRAM cap is applied below, once cfg is loaded — it's tunable.)
 
     # Everything in the config is settable via trailing dotted overrides, e.g.
     #   python train.py --config configs/exp0.yaml train.max_steps=5000 train.log_interval_steps=50
@@ -292,6 +291,11 @@ def main() -> None:
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
     cfg.resolved_config_path = args.config
+
+    # Cap per-process VRAM now that cfg is known (must be after set_device, before
+    # any large allocation — argparse/config load do none). Raise on a dedicated
+    # GPU; leave ~0.9 GiB for the CUDA context + NCCL (outside PyTorch's allocator).
+    torch.cuda.set_per_process_memory_fraction(cfg.run.gpu_mem_fraction, device=local_rank)
 
     # When resuming, pass run.run_id=<id> matching the checkpoint's run dir
     # (<out_dir>/<run_id>/checkpoints/<name>.pt) to reuse its out_dir and wandb run.
