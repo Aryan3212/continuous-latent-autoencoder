@@ -138,12 +138,34 @@ class SIGRegCfg(_Base):
     n_points: int = 17
 
 
+class AdvCfg(_Base):
+    """HiFi-GAN-style adversarial + feature-matching loss on the decoder output.
+
+    Disabled by default so existing configs/runs are unaffected. When enabled,
+    train.py builds a Multi-Period Discriminator and a second optimizer.
+    """
+    enabled: bool = False
+    adv_weight: float = 1.0
+    fm_weight: float = 2.0
+    adv_start_step: int = 0          # generator adversarial term active from here
+    fm_start_step: int = 20000       # feature-matching term active from here
+    lr: float = 2.0e-4               # discriminator AdamW lr
+    betas: List[float] = Field(default_factory=lambda: [0.8, 0.99])
+    periods: List[int] = Field(default_factory=lambda: [2, 3, 5, 7, 11])
+    # MPD hidden channel widths. HiFi-GAN default (32,128,512,1024) is a ~41M
+    # discriminator — too heavy for 6 GB; slim default keeps it ~proportionate
+    # to the generator. Raise on a bigger GPU.
+    disc_channels: List[int] = Field(default_factory=lambda: [16, 64, 128, 256])
+    loss_type: str = "lsgan"         # least-squares GAN (stable default)
+
+
 class LossCfg(_Base):
     stft_weight: float = 0.005
     stft: STFTCfg = Field(default_factory=STFTCfg)
     wav_l1_weight: float = 0.0
     jepa: JEPACfg = Field(default_factory=JEPACfg)
     sigreg: SIGRegCfg = Field(default_factory=SIGRegCfg)
+    adv: AdvCfg = Field(default_factory=AdvCfg)
 
 
 class SchedulerCfg(_Base):

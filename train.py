@@ -26,8 +26,14 @@ from data_loading import (
     make_frame_chunk_masks,
 )
 from data_loading import AudioDataset, DatasetConfig, collate_fixed
-from losses import MultiResSTFTLoss
+from losses import (
+    MultiResSTFTLoss,
+    discriminator_loss,
+    feature_matching_loss,
+    generator_adv_loss,
+)
 from models.decoder_generator import WaveformDecoder
+from models.discriminator import MultiPeriodDiscriminator
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
 from models.mhc import sinkhorn_log
@@ -83,6 +89,9 @@ def save_checkpoint(
     scaler: Optional[torch.cuda.amp.GradScaler],
     cfg: Config,
     extra: Optional[Dict[str, Any]] = None,
+    disc: Optional[torch.nn.Module] = None,
+    optimizer_d: Optional[torch.optim.Optimizer] = None,
+    scaler_d: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> None:
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +103,10 @@ def save_checkpoint(
         "cfg": cfg.model_dump(),
         "extra": extra or {},
     }
+    if disc is not None:
+        payload["disc"] = disc.state_dict()
+        payload["optimizer_d"] = optimizer_d.state_dict() if optimizer_d is not None else None
+        payload["scaler_d"] = scaler_d.state_dict() if scaler_d is not None else None
     tmp = p.with_suffix(".tmp")
     torch.save(payload, str(tmp))
     tmp.rename(p)
@@ -196,18 +209,21 @@ def main() -> None:
 
     _shutdown = False
 
-    def _sigint_handler(sig: int, frame: object) -> None:
+    def _stop_handler(sig: int, frame: object) -> None:
         nonlocal _shutdown
-        print("\n[train] SIGINT received — stopping after current step.", flush=True)
+        print(f"\n[train] {signal.Signals(sig).name} received — stopping after current step.", flush=True)
         _shutdown = True
 
-    signal.signal(signal.SIGINT, _sigint_handler)
+    # SIGTERM as well as SIGINT: Kaggle / Slurm / cloud preemption send SIGTERM
+    # before the hard kill, so catching it lets us save last.pt on the way out.
+    signal.signal(signal.SIGINT, _stop_handler)
+    signal.signal(signal.SIGTERM, _stop_handler)
 
     # Hardware acceleration flags
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
     # Limit PyTorch to 95% of physical VRAM to prevent WSL2/Windows shared memory slowdowns
-    torch.cuda.set_per_process_memory_fraction(0.95, device=0)
+    torch.cuda.set_per_process_memory_fraction(0.85, device=0)
 
     # Everything in the config is settable via trailing dotted overrides, e.g.
     #   python train.py --config configs/exp0.yaml train.max_steps=5000 train.log_interval_steps=50
@@ -218,6 +234,14 @@ def main() -> None:
     ap.add_argument("--profile_wait", type=int, default=0, help="Steps to wait before profiling")
     ap.add_argument("--profile_warmup", type=int, default=0, help="Steps to warm up profiler")
     ap.add_argument("--profile_active", type=int, default=1, help="Steps to actively profile")
+    ap.add_argument(
+        "--max_hours",
+        type=float,
+        default=None,
+        help="Wall-clock budget in hours: stop cleanly and save last.pt after this "
+        "long. For fixed-length sessions (e.g. Kaggle's 12h cap) set it below the "
+        "limit (e.g. 11.5) so the final save lands before the hard kill.",
+    )
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
 
@@ -326,6 +350,16 @@ def main() -> None:
         print(f"  {_name:<10} {_n:>12,}")
     print(f"  {'total':<10} {sum(_block_params.values()):>12,}")
 
+    # Adversarial discriminator (HiFi-GAN MPD). Built separately from `model`
+    # so the generator optimizer / param breakdown stay clean; trained by its
+    # own optimizer below. Disabled -> None and the loop runs exactly as before.
+    acfg = cfg.loss.adv
+    disc = None
+    if acfg.enabled:
+        disc = MultiPeriodDiscriminator(acfg.periods, channels=acfg.disc_channels).to(device)
+        _d_params = sum(p.numel() for p in disc.parameters() if p.requires_grad)
+        print(f"  {'disc(MPD)':<10} {_d_params:>12,}  (adversarial, separate optimizer)")
+
     # Losses
     stft = MultiResSTFTLoss(cfg.loss.stft).to(device)
     wave_aug_cfg = cfg.aug.wave_aug
@@ -379,6 +413,19 @@ def main() -> None:
     use_amp = cfg.run.amp
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
+    # Discriminator optimizer + scaler (constant LR; HiFi-GAN AdamW betas).
+    optimizer_d = None
+    scaler_d = None
+    if disc is not None:
+        optimizer_d = torch.optim.AdamW(
+            disc.parameters(),
+            lr=acfg.lr,
+            betas=tuple(acfg.betas),
+            eps=ocfg.eps,
+            weight_decay=ocfg.weight_decay,
+        )
+        scaler_d = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     step = 0
     if args.resume:
         state = torch.load(args.resume, map_location="cpu")
@@ -388,6 +435,12 @@ def main() -> None:
             scaler.load_state_dict(state["scaler"])
         if (state.get("extra") or {}).get("scheduler"):
             scheduler.load_state_dict(state["extra"]["scheduler"])
+        if disc is not None and state.get("disc") is not None:
+            disc.load_state_dict(state["disc"], strict=True)
+            if state.get("optimizer_d") is not None:
+                optimizer_d.load_state_dict(state["optimizer_d"])
+            if state.get("scaler_d") and scaler_d is not None and scaler_d.is_enabled():
+                scaler_d.load_state_dict(state["scaler_d"])
         step = int(state.get("step", 0))
 
     # Training loop
@@ -406,6 +459,10 @@ def main() -> None:
     sig_w = cfg.loss.sigreg.weight
     stft_w = cfg.loss.stft_weight
     wav_l1_w = cfg.loss.wav_l1_weight
+    adv_w = acfg.adv_weight
+    fm_w = acfg.fm_weight
+    adv_start = acfg.adv_start_step
+    fm_start = acfg.fm_start_step
 
     # V-JEPA 2.1 context-loss weight: relative weight of L_context vs L_predict
     # in the Dense Predictive Loss. Paper uses ~1.0 with distance weighting.
@@ -456,9 +513,21 @@ def main() -> None:
     accum_sums: Dict[str, torch.Tensor] = {}
     accum_counts: Dict[str, int] = {}
 
+    start_time = time.monotonic()
+    max_seconds = args.max_hours * 3600.0 if args.max_hours else None
+
     train_it = iter(train_dl)
     while step < max_steps and not _shutdown:
+        if max_seconds is not None and time.monotonic() - start_time >= max_seconds:
+            print(
+                f"[train] wall-clock budget ({args.max_hours}h) reached at step {step} "
+                "— stopping and saving last.pt.",
+                flush=True,
+            )
+            break
         optimizer.zero_grad(set_to_none=True)
+        if optimizer_d is not None:
+            optimizer_d.zero_grad(set_to_none=True)
 
         total_loss = torch.tensor(0.0, device=device)
 
@@ -473,7 +542,6 @@ def main() -> None:
 
         for batch in microbatches:
             wav_a = batch["wav"]  # (B,1,T)
-            dataset_names = [m.get("dataset", "unknown") for m in batch["meta"]]
 
             wav_a = wav_a.to(device, non_blocking=True)
 
@@ -544,11 +612,46 @@ def main() -> None:
                 l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
                 l_wav = l_wav_ps.mean()
 
+                # ---- Discriminator update (MPD) -------------------------------
+                # The whole GAN path is skipped until step >= adv_start: no point
+                # training D before the generator uses its signal, and skipping it
+                # keeps the pre-GAN phase fast / low-VRAM. Real + detached fake ->
+                # this graph only touches D; requires_grad True so the D backward
+                # (below) accumulates D grads. (Assumes adv_start <= fm_start.)
+                disc_active = disc is not None and step >= adv_start
+                loss_d = None
+                if disc_active:
+                    for p in disc.parameters():
+                        p.requires_grad_(True)
+                    d_real, d_fake, _, _ = disc(wav_a, x_hat.detach())
+                    loss_d = discriminator_loss(d_real, d_fake)
+
+            if loss_d is not None:
+                scaler_d.scale(loss_d / grad_accum).backward()
+
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                # ---- Generator adversarial + feature matching ----------------
+                # Freeze D params: gradient still flows THROUGH D into x_hat (the
+                # generator signal), but D grads aren't accumulated, so the G
+                # backward can't corrupt the D grads accumulated above (needed
+                # because we accumulate over microbatches before stepping).
+                l_adv = x_hat.new_zeros(())
+                l_fm = x_hat.new_zeros(())
+                if disc_active:
+                    for p in disc.parameters():
+                        p.requires_grad_(False)
+                    _, g_fake, fmap_r, fmap_g = disc(wav_a, x_hat)
+                    l_adv = generator_adv_loss(g_fake)
+                    if step >= fm_start:
+                        l_fm = feature_matching_loss(fmap_r, fmap_g)
+
                 loss = (
                     stft_w * l_stft
                     + wav_l1_w * l_wav
                     + jepa_w * l_jepa
                     + sig_w * l_sig
+                    + adv_w * l_adv
+                    + fm_w * l_fm
                 )
                 loss = loss / grad_accum
 
@@ -575,16 +678,13 @@ def main() -> None:
                 "z_diff_rms": z_diff_rms.detach(),
                 "z_to_norm_ratio": z_to_norm_ratio.detach(),
             }
+            if disc is not None:
+                mb_step_stats["l_adv"] = l_adv.detach()
+                mb_step_stats["l_fm"] = l_fm.detach()
+                if loss_d is not None:
+                    mb_step_stats["l_disc"] = loss_d.detach()
             mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})
             mb_step_stats.update({k: v.detach() for k, v in sig_stats.items()})
-
-            unique_ds = set(dataset_names)
-            if len(unique_ds) > 1:
-                for ds_name in unique_ds:
-                    indices = [i for i, n in enumerate(dataset_names) if n == ds_name]
-                    idx_t = torch.tensor(indices, device=device)
-                    mb_step_stats[f"loss_stft/{ds_name}"] = l_stft_ps[idx_t].mean().detach()
-                    mb_step_stats[f"loss_wav/{ds_name}"] = l_wav_ps[idx_t].mean().detach()
 
             for k, v in mb_step_stats.items():
                 accum_sums[k] = accum_sums.get(k, torch.zeros((), device=device)) + v.detach()
@@ -593,12 +693,20 @@ def main() -> None:
         accum_sums["loss"] = accum_sums.get("loss", torch.zeros((), device=device)) + total_loss.detach()
         accum_counts["loss"] = accum_counts.get("loss", 0) + 1
 
-        # Optimize
+        # Optimize generator
         if grad_clip and grad_clip > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         scaler.update()
+
+        # Optimize discriminator (only once the GAN path is active)
+        if optimizer_d is not None and step >= adv_start:
+            if grad_clip and grad_clip > 0:
+                scaler_d.unscale_(optimizer_d)
+                torch.nn.utils.clip_grad_norm_(disc.parameters(), grad_clip)
+            scaler_d.step(optimizer_d)
+            scaler_d.update()
 
         step += 1
         scheduler.step()
@@ -693,6 +801,9 @@ def main() -> None:
                 scaler=scaler if scaler.is_enabled() else None,
                 cfg=cfg,
                 extra=_extra_state(),
+                disc=disc,
+                optimizer_d=optimizer_d,
+                scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
             )
             shutil.copyfile(step_ckpt, ckpt_dir / "last.pt")
 
@@ -718,6 +829,9 @@ def main() -> None:
         scaler=scaler if scaler.is_enabled() else None,
         cfg=cfg,
         extra=_extra_state(),
+        disc=disc,
+        optimizer_d=optimizer_d,
+        scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
     )
 
 

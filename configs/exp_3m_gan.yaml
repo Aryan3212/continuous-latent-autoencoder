@@ -1,0 +1,164 @@
+# exp_3m + adversarial training, SMALL + FAST variant. ~2.8M generator
+# (encoder ~1.45M, decoder ~0.79M) + ~0.5M MPD discriminator. Loss recipe:
+# SLIGHT reconstruction (stft 1.0 -> 0.1, wav_l1 -> 0), HiFi-GAN adversarial +
+# feature-matching losses (BOTH start at step 20000), JEPA weight up 3 -> 6,
+# SIGReg unchanged (0.05). Fast 30k-step run for a quick is-it-working eval.
+#
+# The discriminator isn't built/trained until step 20000, so steps 0-20000 are a
+# fast pure AE+JEPA phase (eval a checkpoint there for a pre-GAN read). Tuned for
+# the 6 GB GTX 1660: fp32 (run.amp=false — AMP unreliable on this card), MPD only,
+# batch 10 x grad_accum 20 (eff 200). If it OOMs, drop batch / raise grad_accum.
+
+run:
+  run_id: null
+  out_dir: runs
+  seed: 0
+  amp: false                     # fp32 on the 1660 (fp16 AMP hard-locks this card)
+  wandb:
+    enabled: true
+    project: "continuous-latent-ae"
+    name: "exp_3m_gan"
+
+data:
+  sample_rate: 16000
+  segment_seconds: 3.0
+  # Produced by: python scripts/housekeeping.py build --staging-dir staging --data-root datasets
+  train_manifest: "staging/manifests/train.jsonl"
+  val_manifest: "staging/manifests/val.jsonl"
+  num_workers: 3                 # was 8: 8 persistent workers grew to ~1.9GB EACH (glibc heap frag from variable-len torchaudio.load) and OOM'd the 15GB host at step ~7930. Pair with MALLOC_ARENA_MAX=2 to bound per-worker growth across epochs.
+  pin_memory: true
+  persistent_workers: true
+
+aug:
+  wave_aug:
+    enabled: true
+    noise_prob: 1.0
+    noise_snr_min: 0.0
+    noise_snr_max: 25.0
+    lowpass_prob: 1.0
+    lowpass_min_freq: 2700.0
+    lowpass_max_freq: 8000.0
+    gain_prob: 1.0
+    gain_min: 0.6
+    gain_max: 1.5
+    clip_prob: 0.3
+    clip_min: 0.5
+  wave_chunk_mask:
+    enabled: true
+    target_ratio: 0.25
+    min_span_frames: 2
+    max_span_frames: 8
+
+model:
+  frontend:
+    channels: [32, 64, 96, 128, 128]
+    kernels:  [10, 8, 8, 4, 4]
+    strides:  [5, 4, 4, 4, 4]      # product=1280 -> 12.5Hz at 16k
+    groups: 8
+  encoder:
+    d_model: 128
+    n_layers: 5                    # ~1.45M params (was 7 / 2.25M) — smaller + faster
+    num_heads: 4
+    feedforward_dim: 320           # was 384
+    dropout: 0.1
+    cnn_module_kernel: 31
+    mhc:
+      enabled: true
+      num_streams: 2
+      start_layer: 2
+      period: 3
+      sinkhorn_iters: 10
+      tau: 0.05
+      dropout: 0.0
+      identity_mix: true
+      alpha_init: 0.01
+  decoder:
+    channels: 256                  # ~0.79M params (was 160 / 0.34M) — a bit larger
+    up_strides: [4, 4, 4, 4, 5]
+    up_kernels: [8, 8, 8, 8, 10]
+    res_blocks_per_up: 1
+    res_dilations: [1, 3, 9]
+    film_hidden: 128               # was 64
+  projector:
+    hidden_dim: 512
+    output_dim: 48
+    n_hidden_layers: 2
+
+loss:
+  # SLIGHT reconstruction: GAN now carries waveform fidelity, so STFT is dialed
+  # back (1.0 -> 0.1) and the wav-L1 term is off.
+  stft_weight: 0.1
+  stft:
+    fft_sizes: [256, 512, 1024, 2048]
+    hop_ratio: 0.25
+    win_ratio: 1.0
+    center: true
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 1.0
+    mag_weight: 1.0
+    logmag_weight: 1.0
+  wav_l1_weight: 0.0
+  jepa:
+    weight: 6.0                    # was 3.0: main ASR/representation lever, increased
+    num_globals: 2
+    num_locals: 4
+    context_weight: 1.0
+  sigreg:
+    weight: 0.05                   # unchanged
+    num_slices: 1024
+    t_max: 5.0
+    n_points: 17
+  adv:
+    enabled: true
+    adv_weight: 1.0
+    fm_weight: 2.0
+    adv_start_step: 20000          # adversarial + feature matching BOTH start at 20k
+    fm_start_step: 20000           # (D isn't built/trained before this — fast pre-GAN phase)
+    lr: 2.0e-4                     # discriminator AdamW lr
+    betas: [0.8, 0.99]             # HiFi-GAN discriminator betas
+    periods: [2, 3, 5, 7, 11]      # MPD periods
+    disc_channels: [24, 48, 64, 96]    # ~0.5M-param MPD (HiFi-GAN default 32/128/512/1024 is ~41M, OOMs on 6GB)
+    loss_type: lsgan
+
+optim:
+  lr: 5.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-5
+  scheduler:
+    warmup_steps: 2000
+    total_steps: 30000             # match train.max_steps
+    min_lr_ratio: 0.0
+  grad_clip: 1.0
+
+train:
+  # Measured peak VRAM (fp32, slim MPD, incl. desktop): batch 8 -> 3.7GB,
+  # batch 10 -> ~4.6GB, batch 12 -> 5.2GB (only ~0.4GB headroom — risky with a
+  # live AnyDesk desktop sharing the 6GB), batch 16 -> OOM. JEPA encodes 6 views
+  # per sample, so batch 10 is already 60 encoder passes/microbatch. Peak VRAM is
+  # per-microbatch; grad_accum sets the effective batch without raising VRAM.
+  batch_size: 10                   # safe-but-higher; bump to 12 only if desktop kept idle
+  grad_accum_steps: 20             # eff batch = 10*20 = 200
+  max_steps: 30000                 # fast run; GAN active 20k-30k. Stop earlier for a pre-GAN eval
+  log_interval_steps: 10
+  eval_interval_steps: 5000
+  save_interval_steps: 2000        # was 10000: a step-7930 host-RAM OOM lost the whole run (first save wasn't until 10000). Cheap insurance on a crash-prone box.
+  probe_interval_steps: 100
+  val_batches: null
+
+eval:
+  enabled: true
+  emotion:
+    enabled: false
+  gender:
+    enabled: false
+  asr:
+    enabled: true
+    train_manifest: "staging/manifests/asr_probe_train.jsonl"
+    dev_manifest: "staging/manifests/asr_probe_val.jsonl"
+    text_key: text
+    steps: 8000
+    batch_size: 16
+    segment_seconds: 15.0
+    max_samples: 500

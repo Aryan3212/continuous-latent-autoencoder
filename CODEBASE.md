@@ -26,21 +26,35 @@ interfaces use channels-first `(B, D, T)` as noted.
   stack with FiLM ResBlocks conditioned on the latent. `(B, D, T')` → `(B, 1, T)`.
 - `models/sigreg.py` — `SIGReg` (Epps–Pulley sliced univariate Gaussianity
   test). `forward` returns a bare scalar. Single-GPU only.
-- `losses.py` — `MultiResSTFTLoss`: multi-resolution STFT
-  reconstruction (spectral convergence + log-magnitude).
+- `models/discriminator.py` — `MultiPeriodDiscriminator` (HiFi-GAN MPD) for the
+  optional adversarial loss. Slim channel widths by default (~2.7M params) to fit
+  6 GB; `disc_channels` is configurable. Built only when `loss.adv.enabled`.
+- `losses.py` — `MultiResSTFTLoss` (multi-resolution STFT reconstruction:
+  spectral convergence + log-magnitude) plus the HiFi-GAN GAN losses
+  `discriminator_loss` / `generator_adv_loss` / `feature_matching_loss` (LSGAN).
 
 ## Training
 
 - `train.py` — single entrypoint and training loop. Objective:
   `stft_weight·L_stft + jepa_weight·L_jepa + sigreg_weight·L_sig` (+ optional
-  L1 wav term). `L_jepa` is the V-JEPA global/local dense loss
+  L1 wav term, + optional `adv_weight·L_adv + fm_weight·L_fm` when
+  `loss.adv.enabled`). The GAN path adds a HiFi-GAN MPD discriminator with its
+  own AdamW optimizer + GradScaler. The whole GAN path is skipped until
+  `step >= adv_start_step` (fast pre-GAN phase); once active, per microbatch it
+  runs a discriminator update (real vs detached fake) then adds the generator
+  adversarial + feature-matching terms with D frozen (grad still flows to the
+  decoder, but D grads aren't corrupted under grad accumulation). `L_fm` is
+  additionally gated on `fm_start_step`. `L_jepa` is the V-JEPA global/local
+  dense loss
   (`l_global` + `l_predict` + `context_weight·l_context`); `l_global ≡ 0` when
   `num_globals == 1`. `L_sig` is frame-level SIGReg on the projector output.
   Validation computes `val_stft` only; the val dataloader is built once at
   startup.
-- Configs: `configs/exp0.yaml` (cloud, ~6M params, d_model 192) and
-  `configs/local_6gb.yaml` (local 6 GB-VRAM PC, smaller). Both are valid
-  full configs, not overrides.
+- Configs: `configs/exp0.yaml` (cloud, ~6M params, d_model 192),
+  `configs/exp_3m.yaml` (~3.1M, staging data), `configs/exp_3m_gan.yaml`
+  (small + fast GAN variant: ~2.78M generator + ~0.5M MPD, slight recon, JEPA up,
+  adversarial/FM from step 20k; fp32, batch 10, 30k steps for the 6 GB card), and
+  `configs/local_6gb.yaml` (tiny). All are valid full configs, not overrides.
 
 ## Config system
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -111,3 +111,39 @@ class MultiResSTFTLoss(nn.Module):
                 "stft_log": total_log.mean().detach(),
             }
             return loss, stats
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial + feature-matching losses (HiFi-GAN, LSGAN variant).
+# The discriminator outputs (d_real / d_fake) and feature maps are lists over
+# sub-discriminators; see models/discriminator.py.
+# --------------------------------------------------------------------------- #
+def discriminator_loss(
+    d_real: List[torch.Tensor], d_fake: List[torch.Tensor]
+) -> torch.Tensor:
+    """LSGAN discriminator loss: pull real -> 1, fake -> 0."""
+    loss = d_real[0].new_zeros(())
+    for dr, dg in zip(d_real, d_fake):
+        loss = loss + (1.0 - dr).pow(2).mean() + dg.pow(2).mean()
+    return loss
+
+
+def generator_adv_loss(d_fake: List[torch.Tensor]) -> torch.Tensor:
+    """LSGAN generator loss: push fake -> 1."""
+    loss = d_fake[0].new_zeros(())
+    for dg in d_fake:
+        loss = loss + (1.0 - dg).pow(2).mean()
+    return loss
+
+
+def feature_matching_loss(
+    fmap_real: List[List[torch.Tensor]], fmap_fake: List[List[torch.Tensor]]
+) -> torch.Tensor:
+    """Mean L1 between real/fake discriminator feature maps (real detached)."""
+    loss = fmap_fake[0][0].new_zeros(())
+    n = 0
+    for fr_list, fg_list in zip(fmap_real, fmap_fake):
+        for fr, fg in zip(fr_list, fg_list):
+            loss = loss + (fr.detach() - fg).abs().mean()
+            n += 1
+    return loss / max(1, n)

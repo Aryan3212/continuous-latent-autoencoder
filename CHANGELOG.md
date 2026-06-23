@@ -2,6 +2,39 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-06-22
+
+**Adversarial + feature-matching losses (optional GAN path)**
+
+- **New `loss.adv` config block** (`schema.py`, `AdvCfg`, default `enabled:
+  false` so all existing configs/runs are byte-for-byte unchanged): adversarial
+  + feature-matching weights, start steps (`adv_start_step`, `fm_start_step`),
+  discriminator lr/betas, MPD `periods`, and slim `disc_channels`.
+- **`models/discriminator.py`**: HiFi-GAN Multi-Period Discriminator. The
+  textbook channel widths (32/128/512/1024) give a ~41M-param disc that OOMs the
+  6 GB card next to the ~3M generator, so `disc_channels` defaults to a slim
+  `[16,64,128,256]` (~2.7M).
+- **`losses.py`**: `discriminator_loss` / `generator_adv_loss` /
+  `feature_matching_loss` (LSGAN + L1 feature matching).
+- **`train.py`**: two-optimizer GAN loop, gated on `loss.adv.enabled`. The whole
+  GAN path (D build/update + generator adv/FM) is skipped until `step >=
+  adv_start_step`, so the pre-GAN phase stays fast / low-VRAM. When active, per
+  microbatch: D update on real vs detached fake, then generator adv/FM with D
+  params frozen (grad flows through D to the decoder, but D grads aren't
+  corrupted by the generator backward under grad accumulation). Second
+  AdamW + GradScaler; discriminator/optimizer state added to checkpoints
+  (backward-compatible — old checkpoints lack the keys). Logs `l_adv` / `l_fm`
+  / `l_disc`. Also dropped the per-dataset `loss_stft/<ds>` / `loss_wav/<ds>`
+  logging breakdown.
+- **`configs/exp_3m_gan.yaml`**: small + fast GAN variant. Slight recon
+  (STFT 1.0→0.1, wav_l1→0), JEPA weight 3→6, SIGReg unchanged (0.05),
+  adversarial + feature matching BOTH from step 20000. Smaller model — encoder
+  ~1.45M (n_layers 7→5, ff 384→320), decoder ~0.79M (channels 160→256, film
+  64→128), ~0.5M MPD (`disc_channels [24,48,64,96]`); ~2.78M generator total.
+  Fast 30k-step run. fp32 (`run.amp=false`), `batch_size: 10` / `grad_accum: 20`
+  → peak ~4.5 GB (incl. desktop). Earlier batch sweep: 8→3.7 GB, 12→5.2 GB
+  (tight), 16→OOM.
+
 ## 2026-06-17
 
 **Simplification turn 5: two housekeeping bug/cruft fixes**

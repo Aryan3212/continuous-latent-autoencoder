@@ -369,17 +369,28 @@ class CommonVoiceBnAdapter(DatasetAdapter):
     """Mozilla Common Voice (Scripted Speech) — Bengali.
 
     Distributed via the Mozilla Data Collective platform (Common Voice left HF
-    in Oct 2025). We pull it with the official ``datacollective`` SDK, which is
-    CC0-licensed and needs no per-competition rules acceptance — just an
-    ``MDC_API_KEY``. On disk it's the standard Common Voice layout:
-    ``clips/*.mp3`` plus ``*.tsv`` manifests (we read ``validated.tsv``).
+    in Oct 2025). CC0-licensed, so no per-competition rules acceptance — but you
+    DO have to accept the dataset terms once in the MDC web UI, then it needs an
+    ``MDC_API_KEY``. We use the documented REST flow (no SDK dependency):
+    ``POST /datasets/<id>/download`` with a Bearer token returns a presigned URL
+    (valid 12h; rate-limited to 30 requests/day per org), which we stream to a
+    tar.gz and extract. On disk it's the standard Common Voice layout:
+    ``cv-corpus-*/bn/clips/*.mp3`` plus ``*.tsv`` manifests (we read
+    ``validated.tsv`` — confirmed transcripts).
     """
 
     name = "common_voice_bn"
     language = "bn"
 
-    # Tail of the dataset URL: mozilladatacollective.com/datasets/<id>
-    _DATASET_ID = "cmn3ipo8b00ejmi079e8upl2k"
+    # Tail of the dataset URL: mozilladatacollective.com/datasets/<id>.
+    # This is "Common Voice Scripted Speech 26.0 - Bengali".
+    _DATASET_ID = "cmqim44fo00tinr07mbu70eg7"
+    # API docs live under a `dev.` host; the production API shares the
+    # dataset-page host. We try production first, then dev. Override w/ MDC_API_BASE.
+    _API_BASES = (
+        "https://mozilladatacollective.com/api",
+        "https://dev.mozilladatacollective.com/api",
+    )
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "common_voice_bn"
@@ -391,27 +402,55 @@ class CommonVoiceBnAdapter(DatasetAdapter):
             print(f"[common_voice_bn] already extracted under {out_dir!s}")
             return out_dir
 
-        # The SDK reads MDC_API_KEY from the env. Touch it here so a missing key
-        # is a hard KeyError up front (get it from your Mozilla Data Collective
-        # Account -> Credentials) rather than an opaque SDK failure later.
-        _ = os.environ["MDC_API_KEY"]
-        # Contain the SDK's download under our data root (default is ~/.mozdata).
-        os.environ["MDC_DOWNLOAD_PATH"] = str(out_dir)
+        import requests
 
-        # Import after env is set so the SDK picks up our config.
-        from datacollective import download_dataset
+        api_key = os.environ["MDC_API_KEY"]  # hard KeyError up front if unset
+        headers = {"Authorization": f"Bearer {api_key}"}
+        bases = (
+            [os.environ["MDC_API_BASE"]]
+            if os.environ.get("MDC_API_BASE")
+            else list(self._API_BASES)
+        )
 
-        print(f"[common_voice_bn] download_dataset {self._DATASET_ID} -> {out_dir}")
-        download_dataset(self._DATASET_ID)
+        # 1) Ask MDC for a presigned download URL (counts against the daily cap).
+        info = None
+        last_err: Exception | None = None
+        for base in bases:
+            url = f"{base}/datasets/{self._DATASET_ID}/download"
+            try:
+                print(f"[common_voice_bn] requesting presigned URL: {url}")
+                resp = requests.post(url, headers=headers, timeout=60)
+                resp.raise_for_status()
+                info = resp.json()
+                break
+            except Exception as e:  # noqa: BLE001 — try the next host
+                last_err = e
+                print(f"[common_voice_bn] {url} failed: {e}")
+        if info is None:
+            raise RuntimeError(
+                "MDC download request failed on all hosts "
+                f"(did you accept the dataset terms in the web UI?): {last_err}"
+            )
 
-        # The SDK may or may not auto-extract the tar.gz; do it ourselves if the
-        # tsv isn't visible yet but an archive is present.
-        if self._find_validated_tsv(out_dir) is None:
-            for tar_path in sorted(out_dir.rglob("*.tar.gz")):
-                print(f"[common_voice_bn] extracting {tar_path.name}")
-                with tarfile.open(tar_path, "r:gz") as tf:
-                    tf.extractall(out_dir)
-                # Keep the archive; deleting risks re-download against the daily cap.
+        dl_url = info["downloadUrl"]
+        filename = info.get("filename") or "common_voice_bn.tar.gz"
+        size_gb = int(info.get("sizeBytes") or 0) >> 30
+        tar_path = out_dir / filename
+
+        # 2) Stream the presigned URL to disk (already signed — no auth header).
+        print(f"[common_voice_bn] downloading {filename} (~{size_gb} GB)")
+        with requests.get(dl_url, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            with open(tar_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+
+        # 3) Extract the Common Voice tar.gz (cv-corpus-*/bn/...).
+        print(f"[common_voice_bn] extracting {tar_path.name}")
+        with tarfile.open(tar_path, "r:gz") as tf:
+            tf.extractall(out_dir)
+        # Keep the archive; deleting risks a re-download against the 30/day cap.
 
         return out_dir
 
@@ -1155,6 +1194,105 @@ def pack_to_dir(
 
 
 # =========================================================================== #
+# Manifest-only build (no transcode; absolute paths into already-mounted raw
+# datasets, e.g. Kaggle's read-only /kaggle/input/<slug>/). Train directly off
+# the attached sources — the loader resamples + downmixes on the fly — instead
+# of repacking to FLAC (which would blow a tight disk budget).
+# =========================================================================== #
+
+
+def build_manifests_only(
+    adapters_with_dirs: list[tuple[DatasetAdapter, Path]],
+    out_dir: Path,
+    val_pct: float = 0.05,
+    seed: int = 42,
+    audit: bool = False,
+    num_workers: int = 4,
+    min_duration: float = 1.0,
+    max_duration: float = 30.0,
+) -> dict[str, Any]:
+    """Walk attached raw datasets and write ``train.jsonl`` / ``val.jsonl`` with
+    ABSOLUTE audio paths — no transcode, no copy.
+
+    Each adapter's ``iter_records`` runs against its already-mounted raw dir, so
+    the rows point straight at the read-only source. ``audit`` is off by default:
+    the loader tolerates any clip length (short clips are zero-padded) and the
+    adapters already skip missing files, so probing every file (slow, and needs
+    soundfile's mp3 support) is opt-in.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_counts: dict[str, int] = {}
+    all_records: list[Record] = []
+    for adapter, raw_dir in adapters_with_dirs:
+        raw_dir = Path(raw_dir)
+        if not raw_dir.exists():
+            raise SystemExit(
+                f"[manifest] raw dir for {adapter.name} does not exist: {raw_dir}"
+            )
+        print(f"[manifest] {adapter.name}: iterating records from {raw_dir}")
+        recs = list(adapter.iter_records(raw_dir))
+        for r in recs:
+            r["dataset"] = adapter.name  # belt-and-suspenders
+            # iter_records emits absolute paths; absolutize defensively so the
+            # manifest is portable regardless of cwd at train time.
+            p = r.get("audio_filepath")
+            if p and not os.path.isabs(p):
+                r["audio_filepath"] = str((raw_dir / p).resolve())
+        raw_counts[adapter.name] = len(recs)
+        all_records.extend(recs)
+        print(f"[manifest]   {adapter.name}: {len(recs)} records")
+        if not recs:
+            # Loudest, most actionable diagnostic: the #1 failure mode is a wrong
+            # --map path (Kaggle often nests the data one level under the slug).
+            listing = (
+                sorted(p.name for p in raw_dir.iterdir())[:25]
+                if raw_dir.is_dir()
+                else []
+            )
+            print(
+                f"[manifest]   WARNING: 0 records for {adapter.name}. "
+                f"Top-level of {raw_dir}: {listing}"
+            )
+
+    if not all_records:
+        raise SystemExit("[manifest] no records from any adapter — check --map paths.")
+
+    if audit:
+        all_records, _ = audit_records(
+            all_records,
+            num_workers=num_workers,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+
+    # Deterministic shuffle + per-dataset split (so both splits see every source).
+    rng = random.Random(seed)
+    rng.shuffle(all_records)
+    train_rows, val_rows = _per_dataset_split(all_records, val_pct, rng)
+    print(f"[manifest] split: {len(train_rows)} train / {len(val_rows)} val")
+
+    _write_jsonl(out_dir / "train.jsonl", train_rows)
+    _write_jsonl(out_dir / "val.jsonl", val_rows)
+
+    meta: dict[str, Any] = {
+        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "mode": "manifest_only",
+        "sources": {a.name: str(d) for a, d in adapters_with_dirs},
+        "audit": bool(audit),
+        "raw_counts": raw_counts,
+        "train_rows": len(train_rows),
+        "val_rows": len(val_rows),
+        "val_pct": float(val_pct),
+        "seed": int(seed),
+    }
+    _write_build_meta(out_dir, meta)
+    print(f"[manifest] done. manifests in: {out_dir}")
+    return meta
+
+
+# =========================================================================== #
 # Push (upload a packed staging dir to a HF dataset repo)
 # =========================================================================== #
 
@@ -1240,6 +1378,42 @@ def fetch_dataset(
     else:
         print(f"[fetch] note: no manifests/ subdir under {local_root}")
     return local_root
+
+
+# =========================================================================== #
+# Fetch checkpoint (pull last.pt from a HF model repo, for cross-session resume)
+# =========================================================================== #
+
+
+def fetch_checkpoint(
+    repo_id: str, dest: Path, filename: str = "last.pt"
+) -> Optional[Path]:
+    """Download ``filename`` from a HF model repo to ``dest``.
+
+    Returns the local path, or ``None`` if the repo or file doesn't exist yet
+    (the first session, before any checkpoint has been published) — the caller
+    then starts training fresh instead of resuming.
+    """
+    from huggingface_hub import hf_hub_download
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        local = hf_hub_download(
+            repo_id=repo_id,
+            repo_type="model",
+            filename=filename,
+            token=os.environ.get("HF_TOKEN"),
+        )
+    except Exception as e:  # noqa: BLE001 — 404 / missing-repo surface various ways
+        print(f"[fetch-ckpt] {repo_id}:{filename} unavailable ({type(e).__name__}) — starting fresh.")
+        return None
+
+    import shutil
+
+    shutil.copyfile(local, dest)
+    print(f"[fetch-ckpt] {repo_id}:{filename} -> {dest}")
+    return dest
 
 
 # =========================================================================== #
@@ -1688,6 +1862,76 @@ def _run_pack_and_push(args: argparse.Namespace) -> None:
             _do(Path(tmp))
 
 
+# --- make-manifests (manifest-only build over attached raw datasets) ------- #
+
+
+def _add_make_manifests(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Adapter name = its mounted raw dir. Repeatable. e.g. "
+        "--map regspeech12=/kaggle/input/regspeech12 "
+        "--map common_voice_bn=/kaggle/input/common-voice-24-bn",
+    )
+    p.add_argument(
+        "--out-dir",
+        required=True,
+        help="Where to write train.jsonl / val.jsonl (e.g. /kaggle/working/manifests).",
+    )
+    p.add_argument("--val-pct", type=float, default=0.05)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--audit",
+        action="store_true",
+        help="Probe every file (fills duration, drops bad/too-short/too-long rows). "
+        "Slow, and needs soundfile mp3 support; off by default.",
+    )
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--min-duration", type=float, default=1.0)
+    p.add_argument("--max-duration", type=float, default=30.0)
+    p.set_defaults(func=_run_make_manifests)
+
+
+def _run_make_manifests(args: argparse.Namespace) -> None:
+    if not args.map:
+        raise SystemExit("--map NAME=PATH is required (at least one).")
+    pairs: list[tuple[DatasetAdapter, Path]] = []
+    for m in args.map:
+        if "=" not in m:
+            raise SystemExit(f"--map must be NAME=PATH, got: {m!r}")
+        name, path = m.split("=", 1)
+        pairs.append((get_adapter(name), Path(path)))
+    print(f"[housekeeping] make-manifests: {[a.name for a, _ in pairs]} -> {args.out_dir}")
+    build_manifests_only(
+        adapters_with_dirs=pairs,
+        out_dir=Path(args.out_dir),
+        val_pct=args.val_pct,
+        seed=args.seed,
+        audit=args.audit,
+        num_workers=args.num_workers,
+        min_duration=args.min_duration,
+        max_duration=args.max_duration,
+    )
+
+
+# --- fetch-checkpoint ------------------------------------------------------- #
+
+
+def _add_fetch_checkpoint(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
+    p.add_argument("--dest", required=True, help="Local path to write the checkpoint to.")
+    p.add_argument("--filename", default="last.pt")
+    p.set_defaults(func=_run_fetch_checkpoint)
+
+
+def _run_fetch_checkpoint(args: argparse.Namespace) -> None:
+    repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
+    print(f"[housekeeping] fetch-checkpoint: {repo_id} -> {args.dest}")
+    fetch_checkpoint(repo_id=repo_id, dest=Path(args.dest), filename=args.filename)
+
+
 # --- dispatch -------------------------------------------------------------- #
 
 
@@ -1709,6 +1953,18 @@ def main() -> None:
     )
     _add_pack_and_push(
         sub.add_parser("pack-and-push", help="Build + push in one shot.")
+    )
+    _add_make_manifests(
+        sub.add_parser(
+            "make-manifests",
+            help="Write train/val manifests over attached raw datasets (no transcode).",
+        )
+    )
+    _add_fetch_checkpoint(
+        sub.add_parser(
+            "fetch-checkpoint",
+            help="Download a checkpoint from a HF model repo (for cross-session resume).",
+        )
     )
 
     args = ap.parse_args()

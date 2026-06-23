@@ -1,5 +1,8 @@
 # Data and Artifacts
 data/manifests/
+datasets/
+staging/
+_hf_upload_tmp/
 runs/
 __pycache__/
 *.pyc
