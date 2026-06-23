@@ -113,6 +113,16 @@ class AudioDataset(torch.utils.data.Dataset):
         self.num_samples = int(math.ceil(cfg.segment_seconds * cfg.sample_rate))
         self._resamplers: Dict[int, Any] = {}  # cached torchaudio Resample per source rate
 
+        # A single corrupt/undecodable file must never raise out of a worker:
+        # an exception there kills the worker, which under DDP stalls that rank's
+        # input pipeline and hangs the other rank at the next NCCL collective
+        # (600s watchdog -> SIGABRT -> whole job fails). Instead substitute the
+        # next readable sample so the batch stays full and both ranks keep in
+        # lockstep. Warn once per bad path per worker to flag a broken manifest
+        # without spamming the log every epoch.
+        self._max_decode_retries = 20
+        self._warned_bad: set[str] = set()
+
         self._manifest_root: Optional[pathlib.Path]
         if isinstance(cfg.manifest, str):
             self._manifest_root = resolve_manifest_root(cfg.manifest, self.items)
@@ -146,7 +156,7 @@ class AudioDataset(torch.utils.data.Dataset):
             self._resamplers[key] = torchaudio.transforms.Resample(src_sr, self.cfg.sample_rate)
         return self._resamplers[key](wav)
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def _load_one(self, idx: int) -> Dict[str, Any]:
         import torchaudio
         item = self.items[idx]
         if "audio_filepath" not in item:
@@ -169,6 +179,31 @@ class AudioDataset(torch.utils.data.Dataset):
         else:
             wav = _start_crop(wav, self.num_samples)
         return {"wav": wav, "meta": item}
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # Retry on the next consecutive rows so a corrupt file yields a valid
+        # substitute rather than crashing the worker (see __init__). A KeyError
+        # is a manifest-schema bug, not bad audio, so it still propagates.
+        n = len(self.items)
+        for offset in range(self._max_decode_retries + 1):
+            j = (idx + offset) % n
+            try:
+                return self._load_one(j)
+            except KeyError:
+                raise
+            except Exception as e:  # decode/IO error on this file: skip it
+                path = self.items[j].get("audio_filepath", f"<row {j}>")
+                if path not in self._warned_bad:
+                    self._warned_bad.add(path)
+                    print(
+                        f"[data] WARNING: skipping unreadable audio {path!r}: "
+                        f"{type(e).__name__}: {e}",
+                        flush=True,
+                    )
+        raise RuntimeError(
+            f"failed to read {self._max_decode_retries + 1} consecutive audio "
+            f"files starting at idx {idx}; manifest/dataset is likely broken"
+        )
 
 
 def collate_fixed(batch: List[Dict[str, Any]]) -> Dict[str, Any]:

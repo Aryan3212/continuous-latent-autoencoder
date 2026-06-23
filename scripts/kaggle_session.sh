@@ -35,7 +35,11 @@ CONFIG="${CONFIG:-configs/kaggle_3m_gan.yaml}"
 CKPT_REPO="${HF_MODEL_REPO:-aryanrahman/clae-bengali-encoder}"
 MAX_HOURS="${MAX_HOURS:-11.5}"                  # stop before Kaggle's 12h hard kill
 MANIFEST_DIR="${MANIFEST_DIR:-/kaggle/working/manifests}"
-CKPT="${CKPT:-/kaggle/working/runs/clae_3m_kaggle/checkpoints/last.pt}"
+# CKPT (the resume target + publish source) is resolved AFTER CLI parsing from
+# the config's run.out_dir/run.run_id with the `--` overrides applied — so it
+# always tracks where train.py actually writes, even when run.run_id is changed
+# at launch. Set CKPT explicitly to override the resolution.
+CKPT="${CKPT:-}"
 
 # Attached-dataset mount points. Adjust to match `ls /kaggle/input` if needed.
 REGSPEECH_DIR="${REGSPEECH_DIR:-/kaggle/input/regspeech12}"
@@ -79,6 +83,25 @@ export MALLOC_ARENA_MAX=2
 # If train.py later dies on a missing import, add that package here.
 pip install -q wandb pydantic pyyaml pandas openpyxl "huggingface_hub>=0.23" soundfile
 
+# --- 1a. resolve the checkpoint path train.py will actually write ----------- #
+# Mirror train.py exactly: ckpt = <run.out_dir>/<run.run_id>/checkpoints/last.pt
+# with the trailing `--` overrides applied. This is what stops the publish step
+# from looking in the wrong run dir when run.run_id is overridden at launch.
+# OUT_DIR is also captured so the EXIT trap can fall back to globbing for the
+# newest last.pt if the exact path can't be resolved (e.g. a timestamp run_id).
+read -r OUT_DIR RESOLVED_CKPT < <(python - "$CONFIG" "${TRAIN_OVERRIDES[@]}" <<'PY'
+import pathlib, sys
+from config import apply_overrides, load_config
+cfg = apply_overrides(load_config(sys.argv[1]), sys.argv[2:])
+out_dir = cfg.run.out_dir
+run_id = cfg.run.run_id  # empty -> train.py picks a timestamp we can't predict
+ckpt = str(pathlib.Path(out_dir) / run_id / "checkpoints" / "last.pt") if run_id else "-"
+print(out_dir, ckpt)
+PY
+)
+[[ -z "${CKPT:-}" && "$RESOLVED_CKPT" != "-" ]] && CKPT="$RESOLVED_CKPT"
+echo "[kaggle] checkpoint path: ${CKPT:-<unresolved; will glob $OUT_DIR on exit>}"
+
 # --- 1b. report hardware so batch_size / num_workers can be sized to it ------ #
 # Kaggle's T4/P100 (~15-16 GB) and ~30 GB host RAM dwarf the dev box, so the
 # base config's small batch leaves the GPU mostly idle. Read the numbers below,
@@ -110,8 +133,12 @@ else
 fi
 
 # --- 3. pull latest checkpoint from HF (no-op on the first session) --------- #
-python scripts/housekeeping.py fetch-checkpoint \
-  --repo-id "$CKPT_REPO" --dest "$CKPT" || true
+if [[ -n "${CKPT:-}" ]]; then
+  python scripts/housekeeping.py fetch-checkpoint \
+    --repo-id "$CKPT_REPO" --dest "$CKPT" || true
+else
+  echo "[kaggle] run_id unresolved — skipping HF fetch (fresh start)"
+fi
 
 # --- 4. train (crash-safe: publish last.pt on ANY exit) --------------------- #
 # An EXIT trap publishes the checkpoint whether training finishes, hits the
@@ -125,14 +152,22 @@ python scripts/housekeeping.py fetch-checkpoint \
 # post-SIGTERM grace window is too short to rely on for a network upload.
 publish_on_exit() {
   local rc=$?
-  if [[ -f "$CKPT" ]]; then
+  local ckpt="$CKPT"
+  # Fall back to the newest last.pt under OUT_DIR if the resolved path is
+  # missing (unresolved run_id, or a path drift we didn't anticipate) — better
+  # to publish a slightly different run dir than to lose the session entirely.
+  if [[ ! -f "$ckpt" && -d "$OUT_DIR" ]]; then
+    ckpt="$(ls -t "$OUT_DIR"/*/checkpoints/last.pt 2>/dev/null | head -n1 || true)"
+    [[ -n "$ckpt" ]] && echo "[kaggle] resolved path missing; falling back to $ckpt"
+  fi
+  if [[ -n "$ckpt" && -f "$ckpt" ]]; then
     echo "[kaggle] publishing checkpoint (training exit code $rc) ..."
     python scripts/housekeeping.py publish-checkpoint \
-      --ckpt "$CKPT" --repo-id "$CKPT_REPO" \
+      --ckpt "$ckpt" --repo-id "$CKPT_REPO" \
       --commit-message "kaggle session $(date -u +%Y%m%dT%H%M%SZ) rc=$rc" \
-      || echo "[kaggle] WARNING: publish failed; last.pt is still at $CKPT."
+      || echo "[kaggle] WARNING: publish failed; last.pt is still at $ckpt."
   else
-    echo "[kaggle] WARNING: no checkpoint at $CKPT to publish."
+    echo "[kaggle] WARNING: no checkpoint found (looked at '$CKPT' and under '$OUT_DIR') to publish."
   fi
   exit "$rc"
 }
