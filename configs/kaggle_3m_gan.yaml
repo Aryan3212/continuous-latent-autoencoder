@@ -28,4 +28,7 @@ run:
 data:
   train_manifest: /kaggle/working/manifests/train.jsonl
   val_manifest: /kaggle/working/manifests/val.jsonl
-  num_workers: 2  # per-GPU under DDP; Kaggle ~4 vCPU / 2 GPU
+  # Pipeline is mp3-decode + on-the-fly resample bound, so feed the GPU hard:
+  num_workers: 3            # per-GPU under DDP; 3x2=6 over ~4 vCPU — oversubscribe since reads block on I/O
+  persistent_workers: true  # keep spawn'd workers + their resampler cache warm across epochs (safe w/ MALLOC_ARENA_MAX=2)
+  prefetch_factor: 6        # deep queue smooths the sawtooth; ~9MB/batch -> ~330MB total, trivial on 30GB

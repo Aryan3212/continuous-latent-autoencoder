@@ -32,6 +32,7 @@ class DataCfg(_Base):
     num_workers: int = 4
     pin_memory: bool = True
     persistent_workers: bool = False
+    prefetch_factor: int = 2  # batches each worker buffers ahead; raise to hide decode/resample spikes
 
 
 class WaveAugCfg(_Base):

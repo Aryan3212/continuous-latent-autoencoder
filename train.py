@@ -350,6 +350,10 @@ def main() -> None:
         num_workers=dcfg.num_workers,
         pin_memory=dcfg.pin_memory,
         persistent_workers=dcfg.persistent_workers if dcfg.num_workers > 0 else False,
+        # Deeper prefetch queue absorbs per-item decode/resample spikes (mp3 ->
+        # 16k) so the GPU doesn't drain the queue between steps. Must be None when
+        # there are no workers (torch rejects an int with num_workers=0).
+        prefetch_factor=dcfg.prefetch_factor if dcfg.num_workers > 0 else None,
         # "spawn" avoids inheriting CUDA's locked mutexes from the parent process.
         # fork-after-CUDA-init deadlocks worker processes on Linux (the default).
         multiprocessing_context="spawn" if dcfg.num_workers > 0 else None,
