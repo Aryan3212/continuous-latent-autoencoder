@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import math
 import os
@@ -261,20 +260,7 @@ def main() -> None:
     is_dist = world_size > 1
     is_main = rank == 0
     if is_dist:
-        # The default 10-min NCCL collective timeout is too tight for the Kaggle
-        # read-only mount: reading ~1M small mp3s over its FUSE/network FS can
-        # stall one rank for minutes, and when that exceeds the timeout the
-        # watchdog SIGABRTs the rank and takes the whole DDP job down. Raise it
-        # (env NCCL_TIMEOUT_MIN, default 30) so a transient stall is ridden out
-        # instead of being fatal. This does NOT mask a true deadlock — that just
-        # fails later; pair it with an audited manifest that drops files which
-        # hang the decoder outright.
-        dist.init_process_group(
-            backend="nccl",
-            timeout=datetime.timedelta(
-                minutes=int(os.environ.get("NCCL_TIMEOUT_MIN", "30"))
-            ),
-        )
+        dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
@@ -380,24 +366,6 @@ def main() -> None:
         sampler=train_sampler,
         shuffle=(train_sampler is None),
     )
-
-    val_dl = None
-    if dcfg.val_manifest:
-        val_ds = AudioDataset(
-            DatasetConfig(
-                manifest=dcfg.val_manifest,
-                sample_rate=dcfg.sample_rate,
-                segment_seconds=dcfg.segment_seconds,
-                random_crop=False,
-            )
-        )
-        val_dl = torch.utils.data.DataLoader(
-            val_ds,
-            batch_size=cfg.train.batch_size,
-            num_workers=0,
-            collate_fn=collate_fixed,
-            drop_last=True,
-        )
 
     # Model
     mcfg = cfg.model
@@ -548,7 +516,6 @@ def main() -> None:
     max_steps = cfg.train.max_steps
     grad_accum = cfg.train.grad_accum_steps
     grad_clip = cfg.optim.grad_clip
-    val_batches = cfg.train.val_batches
 
     jcfg = cfg.loss.jepa
     jepa_w = jcfg.weight
@@ -570,25 +537,6 @@ def main() -> None:
     # V-JEPA 2.1 context-loss weight: relative weight of L_context vs L_predict
     # in the Dense Predictive Loss. Paper uses ~1.0 with distance weighting.
     lam_context_w = jcfg.context_weight
-
-    def _validate_one() -> Dict[str, float]:
-        if val_dl is None:
-            return {}
-        model.eval()
-        sums = {"val_stft": torch.tensor(0.0, device=device)}
-        n = 0
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
-            for vb in val_dl:
-                vw = vb["wav"].to(device)
-                z = _unwrap(model["encoder"])(_unwrap(model["frontend"])(vw))
-                xh = _unwrap(model["decoder"])(z, target_len=vw.size(-1))
-                v_stft, _ = stft(xh, vw)
-                sums["val_stft"] += v_stft.detach()
-                n += 1
-                if val_batches is not None and n >= val_batches:
-                    break
-        model.train()
-        return {k: (v / max(1, n)).item() for k, v in sums.items()}
 
     def _extra_state(**extra: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"scheduler": scheduler.state_dict()}
@@ -930,14 +878,6 @@ def main() -> None:
                 scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
             )
             shutil.copyfile(step_ckpt, ckpt_dir / "last.pt")
-
-        if is_main and step % cfg.train.eval_interval_steps == 0:
-            v = _validate_one()
-            if v:
-                row = {"step": step, **v}
-                jsonl.log(row)
-                if wb is not None:
-                    wb.log(row, step=step)
 
         if prof is not None:
             prof.step()

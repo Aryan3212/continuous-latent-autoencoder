@@ -158,7 +158,7 @@ fi
 # --- 4. train (crash-safe: publish last.pt on ANY exit) --------------------- #
 # An EXIT trap publishes the checkpoint whether training finishes, hits the
 # --max_hours budget, or crashes (OOM etc.), so a 12h session's progress is
-# never lost. This is fault tolerance for a flaky environment, not paranoia:
+# never lost:
 #   - train.py writes last.pt atomically (tmp -> rename), so we never upload a
 #     half-written file;
 #   - `local rc=$?` is captured first and re-raised, so a training failure still

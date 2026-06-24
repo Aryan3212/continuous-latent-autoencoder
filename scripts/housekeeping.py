@@ -883,22 +883,11 @@ def get_adapter(name: str) -> DatasetAdapter:
 
 
 def _audit_one(args: tuple[int, dict[str, Any], float, float]) -> dict[str, Any]:
-    """Worker: probe one audio file with ``torchaudio.load`` — training's path.
-
-    Validity is checked by actually opening the file with ``torchaudio.load``
-    (a 1-frame slice, so the decoder is created but the file isn't fully
-    decoded). That is the SAME call training makes, so a ``corrupt`` verdict
-    here is exactly the file that raises ``Failed to create AudioDecoder``
-    mid-training. We must NOT use ``torchaudio.info``: in several torchaudio
-    builds (incl. Kaggle's) ``info`` raises on mp3 even when ``load`` works,
-    which would mis-flag every clip as corrupt.
-
-    Duration is a best-effort extra from ``info`` and never causes a drop on
-    its own failure — so an ``info`` quirk can't decimate the manifest.
-
-    Returns a dict with at least ``index`` and ``status``. ``status`` is one of
-    ``ok``, ``missing``, ``too_short``, ``too_long``, ``corrupt``. On ``ok`` the
-    dict carries ``duration`` (seconds) when it could be determined.
+    """Worker: probe one audio file. Validity = ``torchaudio.load(num_frames=1)``
+    (the call training makes; ``info`` is unreliable on mp3). Duration is a
+    best-effort extra from ``info`` that never drops a loadable file on its own
+    failure. Returns ``{index, status, ...}`` with ``status`` one of ``ok``,
+    ``missing``, ``too_short``, ``too_long``, ``corrupt``.
     """
     import torchaudio
 
@@ -1184,8 +1173,6 @@ def pack_to_dir(
         raw_dir = adapter.download(download_root)
         print(f"[pack] iterating records for {adapter.name} from {raw_dir}")
         recs = list(adapter.iter_records(Path(raw_dir)))
-        for r in recs:
-            r["dataset"] = adapter.name  # belt-and-suspenders
         raw_counts[adapter.name] = len(recs)
         all_records.extend(recs)
         print(f"[pack]   {adapter.name}: {len(recs)} raw records")
@@ -1320,13 +1307,6 @@ def build_manifests_only(
             )
         print(f"[manifest] {adapter.name}: iterating records from {raw_dir}")
         recs = list(adapter.iter_records(raw_dir))
-        for r in recs:
-            r["dataset"] = adapter.name  # belt-and-suspenders
-            # iter_records emits absolute paths; absolutize defensively so the
-            # manifest is portable regardless of cwd at train time.
-            p = r.get("audio_filepath")
-            if p and not os.path.isabs(p):
-                r["audio_filepath"] = str((raw_dir / p).resolve())
         raw_counts[adapter.name] = len(recs)
         all_records.extend(recs)
         print(f"[manifest]   {adapter.name}: {len(recs)} records")
