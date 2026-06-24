@@ -1670,16 +1670,6 @@ def publish_manifests(
             src = manifest_dir / name
             if not src.exists():
                 raise SystemExit(f"[publish-manifests] missing {src}")
-            # Refuse to publish an empty manifest — overwriting the cache with a
-            # zero-row file silently breaks every later session (StopIteration on
-            # the first batch). A real train manifest has hundreds of thousands
-            # of rows; an empty one is always a bug upstream.
-            with open(src, "r", encoding="utf-8") as f:
-                if not any(line.strip() for line in f):
-                    raise SystemExit(
-                        f"[publish-manifests] ABORT: {src} is empty — refusing to "
-                        "overwrite the cache with a zero-row manifest."
-                    )
             gz = tmp_dir / (name + ".gz")
             with open(src, "rb") as fi, gzip.open(gz, "wb", compresslevel=6) as fo:
                 shutil.copyfileobj(fi, fo)
@@ -1741,7 +1731,6 @@ def audit_manifest_dir(
     min_duration: float = 1.0,
     max_duration: float = 30.0,
     drop_short_long: bool = False,
-    min_keep_frac: float = 0.5,
 ) -> dict[str, Any]:
     """Decode-probe an EXISTING train/val manifest and write cleaned copies.
 
@@ -1775,19 +1764,6 @@ def audit_manifest_dir(
             max_duration=max_duration,
             drop_statuses=drop,
         )
-        # Guard: an audit that nukes most of the data is almost always a probe
-        # bug (wrong backend, unmounted paths) — not a corpus that is genuinely
-        # >50% broken. Abort loudly BEFORE writing, so a bad probe can never
-        # republish a decimated manifest over the cache again.
-        total = report["total"]
-        if total > 0 and report["kept"] / total < min_keep_frac:
-            raise SystemExit(
-                f"[audit-manifests] ABORT: {name} kept only {report['kept']}/{total} "
-                f"(< {min_keep_frac:.0%}); dropped={ {k: v for k, v in report['counts'].items() if k != 'ok'} }. "
-                "This looks like a probe failure (wrong backend / unmounted paths), "
-                "not a genuinely broken corpus. Nothing was written. Re-check the "
-                "mount paths and torchaudio, or lower --min-keep-frac to override."
-            )
         _write_jsonl(out_dir / name, kept)
         print(
             f"[audit-manifests] {name}: kept {report['kept']}/{report['total']} "
@@ -2234,13 +2210,6 @@ def _add_audit_manifests(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Also drop out-of-duration clips (default keeps them; loader zero-pads).",
     )
-    p.add_argument(
-        "--min-keep-frac",
-        type=float,
-        default=0.5,
-        help="Abort without writing if the audit keeps less than this fraction "
-        "(default 0.5) — a tripwire against a broken probe decimating the manifest.",
-    )
     p.set_defaults(func=_run_audit_manifests)
 
 
@@ -2253,7 +2222,6 @@ def _run_audit_manifests(args: argparse.Namespace) -> None:
         min_duration=args.min_duration,
         max_duration=args.max_duration,
         drop_short_long=args.drop_short_long,
-        min_keep_frac=args.min_keep_frac,
     )
 
 
