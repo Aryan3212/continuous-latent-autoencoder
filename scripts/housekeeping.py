@@ -883,25 +883,35 @@ def get_adapter(name: str) -> DatasetAdapter:
 
 
 def _audit_one(args: tuple[int, dict[str, Any], float, float]) -> dict[str, Any]:
-    """Worker: probe one audio file with soundfile.info.
+    """Worker: probe one audio file with ``torchaudio.info``.
+
+    Uses the SAME backend training decodes with (torchaudio's FFmpeg/TorchCodec
+    ``AudioDecoder``), so a ``corrupt`` verdict here means exactly the file that
+    raises ``Failed to create AudioDecoder`` mid-training — which is the whole
+    point of auditing: drop the truncated/empty/malformed clips the full
+    Common Voice ``clips/`` enumeration sweeps in. A soundfile probe would use a
+    different backend (libsndfile) and miss / mis-flag those. ``info`` is
+    header-only, so it's fast and doesn't fully decode.
 
     Returns a dict with at least ``index`` and ``status``. ``status`` is one of
     ``ok``, ``missing``, ``too_short``, ``too_long``, ``empty``, ``corrupt``.
-    On ``ok`` the dict also carries ``duration`` (seconds, from sf.info).
+    On ``ok`` the dict also carries ``duration`` (seconds).
     """
-    import soundfile as sf
+    import torchaudio
 
     idx, rec, min_duration, max_duration = args
     path = rec.get("audio_filepath")
     if not path or not Path(path).exists():
         return {"index": idx, "status": "missing", "path": path}
     try:
-        info = sf.info(path)
+        info = torchaudio.info(path)
+        frames, sr = int(info.num_frames), int(info.sample_rate)
     except Exception as e:
+        # Exactly the training-time failure mode — drop it.
         return {"index": idx, "status": "corrupt", "path": path, "error": str(e)}
-    if info.frames == 0:
+    if sr <= 0 or frames == 0:
         return {"index": idx, "status": "empty", "path": path}
-    dur = float(info.duration)
+    dur = frames / float(sr)
     if dur < min_duration:
         return {"index": idx, "status": "too_short", "path": path, "duration": dur}
     if dur > max_duration:
@@ -909,18 +919,28 @@ def _audit_one(args: tuple[int, dict[str, Any], float, float]) -> dict[str, Any]
     return {"index": idx, "status": "ok", "path": path, "duration": dur}
 
 
+_ALL_BAD_STATUSES = frozenset({"missing", "corrupt", "empty", "too_short", "too_long"})
+
+
 def audit_records(
     records: Iterable[Record],
     num_workers: int = 4,
     min_duration: float = 1.0,
     max_duration: float = 30.0,
+    drop_statuses: Optional[Iterable[str]] = None,
 ) -> tuple[list[Record], dict[str, Any]]:
     """Probe every record's audio file in parallel and drop bad rows.
 
-    Returns ``(kept_records, report)``. The kept records have their ``duration``
-    field overwritten with the measured value. The report dict has per-status
-    counts plus the parameters used.
+    ``drop_statuses`` selects which verdicts are dropped; the rest are kept.
+    Default drops everything that isn't ``ok`` (the strict build-time filter).
+    To clean only the truly-broken files while keeping out-of-duration clips
+    (the loader zero-pads short ones), pass ``{"missing", "corrupt", "empty"}``.
+
+    Returns ``(kept_records, report)``. Kept rows get their ``duration`` field
+    overwritten with the measured value when available. The report dict has
+    per-status counts plus the parameters used.
     """
+    drop = frozenset(drop_statuses) if drop_statuses is not None else _ALL_BAD_STATUSES
     from tqdm import tqdm
 
     rec_list: list[Record] = list(records)
@@ -946,10 +966,12 @@ def audit_records(
     for res in results:
         st = res["status"]
         counts[st] = counts.get(st, 0) + 1
-        if st == "ok":
-            rec = rec_list[res["index"]]
+        if st in drop:
+            continue
+        rec = rec_list[res["index"]]
+        if "duration" in res:
             rec["duration"] = res["duration"]
-            kept.append(rec)
+        kept.append(rec)
 
     report = {
         "total": len(rec_list),
@@ -1694,6 +1716,70 @@ def fetch_manifests(repo_id: str, dest_dir: Path) -> bool:
     return True
 
 
+def audit_manifest_dir(
+    in_dir: Path,
+    out_dir: Path,
+    num_workers: int = 4,
+    min_duration: float = 1.0,
+    max_duration: float = 30.0,
+    drop_short_long: bool = False,
+) -> dict[str, Any]:
+    """Decode-probe an EXISTING train/val manifest and write cleaned copies.
+
+    Reuses the manifest you already built/cached instead of re-walking the
+    corpus: only the per-file ``torchaudio.info`` probe (the training backend)
+    is paid, dropping the truncated/empty/malformed clips the full Common Voice
+    ``clips/`` enumeration sweeps in. Output keeps the canonical
+    ``train.jsonl`` / ``val.jsonl`` names so the cleaned set can be published
+    straight over the existing cache (no config or fetch-path change).
+
+    By default only ``missing``/``corrupt``/``empty`` rows are dropped — the
+    loader zero-pads short clips, so out-of-duration rows are kept unless
+    ``drop_short_long`` is set.
+    """
+    in_dir, out_dir = Path(in_dir), Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    drop = None if drop_short_long else {"missing", "corrupt", "empty"}
+
+    summary: dict[str, Any] = {}
+    for name in _MANIFEST_FILES:
+        src = in_dir / name
+        if not src.exists():
+            raise SystemExit(f"[audit-manifests] missing {src}")
+        with open(src, "r", encoding="utf-8") as f:
+            records: list[Record] = [json.loads(line) for line in f if line.strip()]
+        print(f"[audit-manifests] {name}: probing {len(records)} rows ...")
+        kept, report = audit_records(
+            records,
+            num_workers=num_workers,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            drop_statuses=drop,
+        )
+        _write_jsonl(out_dir / name, kept)
+        print(
+            f"[audit-manifests] {name}: kept {report['kept']}/{report['total']} "
+            f"-> {out_dir / name}  (dropped: "
+            f"{ {k: v for k, v in report['counts'].items() if k != 'ok'} })"
+        )
+        summary[name] = report
+
+    # Carry the original build_meta forward, annotated, so the cleaned cache is
+    # self-describing.
+    meta_src = in_dir / "build_meta.yaml"
+    if meta_src.exists():
+        import yaml
+
+        meta = yaml.safe_load(meta_src.read_text()) or {}
+        meta["audited"] = True
+        meta["audit_backend"] = "torchaudio.info"
+        meta["audit"] = {k: v["counts"] for k, v in summary.items()}
+        (out_dir / "build_meta.yaml").write_text(
+            yaml.safe_dump(meta, sort_keys=False), encoding="utf-8"
+        )
+    return summary
+
+
 # =========================================================================== #
 # CLI
 # =========================================================================== #
@@ -2105,6 +2191,32 @@ def _run_publish_manifests(args: argparse.Namespace) -> None:
     )
 
 
+def _add_audit_manifests(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--in-dir", required=True, help="Dir holding train.jsonl/val.jsonl to probe.")
+    p.add_argument("--out-dir", required=True, help="Dir to write cleaned train.jsonl/val.jsonl.")
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--min-duration", type=float, default=1.0)
+    p.add_argument("--max-duration", type=float, default=30.0)
+    p.add_argument(
+        "--drop-short-long",
+        action="store_true",
+        help="Also drop out-of-duration clips (default keeps them; loader zero-pads).",
+    )
+    p.set_defaults(func=_run_audit_manifests)
+
+
+def _run_audit_manifests(args: argparse.Namespace) -> None:
+    print(f"[housekeeping] audit-manifests: {args.in_dir} -> {args.out_dir}")
+    audit_manifest_dir(
+        in_dir=Path(args.in_dir),
+        out_dir=Path(args.out_dir),
+        num_workers=args.num_workers,
+        min_duration=args.min_duration,
+        max_duration=args.max_duration,
+        drop_short_long=args.drop_short_long,
+    )
+
+
 def _add_fetch_manifests(p: argparse.ArgumentParser) -> None:
     p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
     p.add_argument("--dest-dir", required=True, help="Dir to write train.jsonl/val.jsonl into.")
@@ -2164,6 +2276,12 @@ def main() -> None:
         sub.add_parser(
             "fetch-manifests",
             help="Download cached manifests from a HF model repo (exit 3 if absent).",
+        )
+    )
+    _add_audit_manifests(
+        sub.add_parser(
+            "audit-manifests",
+            help="Decode-probe an existing manifest and write a cleaned copy (drops corrupt clips).",
         )
     )
 

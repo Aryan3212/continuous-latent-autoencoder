@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import math
 import os
@@ -260,7 +261,20 @@ def main() -> None:
     is_dist = world_size > 1
     is_main = rank == 0
     if is_dist:
-        dist.init_process_group(backend="nccl")
+        # The default 10-min NCCL collective timeout is too tight for the Kaggle
+        # read-only mount: reading ~1M small mp3s over its FUSE/network FS can
+        # stall one rank for minutes, and when that exceeds the timeout the
+        # watchdog SIGABRTs the rank and takes the whole DDP job down. Raise it
+        # (env NCCL_TIMEOUT_MIN, default 30) so a transient stall is ridden out
+        # instead of being fatal. This does NOT mask a true deadlock — that just
+        # fails later; pair it with an audited manifest that drops files which
+        # hang the decoder outright.
+        dist.init_process_group(
+            backend="nccl",
+            timeout=datetime.timedelta(
+                minutes=int(os.environ.get("NCCL_TIMEOUT_MIN", "30"))
+            ),
+        )
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
