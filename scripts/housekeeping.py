@@ -883,19 +883,22 @@ def get_adapter(name: str) -> DatasetAdapter:
 
 
 def _audit_one(args: tuple[int, dict[str, Any], float, float]) -> dict[str, Any]:
-    """Worker: probe one audio file with ``torchaudio.info``.
+    """Worker: probe one audio file with ``torchaudio.load`` — training's path.
 
-    Uses the SAME backend training decodes with (torchaudio's FFmpeg/TorchCodec
-    ``AudioDecoder``), so a ``corrupt`` verdict here means exactly the file that
-    raises ``Failed to create AudioDecoder`` mid-training — which is the whole
-    point of auditing: drop the truncated/empty/malformed clips the full
-    Common Voice ``clips/`` enumeration sweeps in. A soundfile probe would use a
-    different backend (libsndfile) and miss / mis-flag those. ``info`` is
-    header-only, so it's fast and doesn't fully decode.
+    Validity is checked by actually opening the file with ``torchaudio.load``
+    (a 1-frame slice, so the decoder is created but the file isn't fully
+    decoded). That is the SAME call training makes, so a ``corrupt`` verdict
+    here is exactly the file that raises ``Failed to create AudioDecoder``
+    mid-training. We must NOT use ``torchaudio.info``: in several torchaudio
+    builds (incl. Kaggle's) ``info`` raises on mp3 even when ``load`` works,
+    which would mis-flag every clip as corrupt.
+
+    Duration is a best-effort extra from ``info`` and never causes a drop on
+    its own failure — so an ``info`` quirk can't decimate the manifest.
 
     Returns a dict with at least ``index`` and ``status``. ``status`` is one of
-    ``ok``, ``missing``, ``too_short``, ``too_long``, ``empty``, ``corrupt``.
-    On ``ok`` the dict also carries ``duration`` (seconds).
+    ``ok``, ``missing``, ``too_short``, ``too_long``, ``corrupt``. On ``ok`` the
+    dict carries ``duration`` (seconds) when it could be determined.
     """
     import torchaudio
 
@@ -904,19 +907,24 @@ def _audit_one(args: tuple[int, dict[str, Any], float, float]) -> dict[str, Any]
     if not path or not Path(path).exists():
         return {"index": idx, "status": "missing", "path": path}
     try:
-        info = torchaudio.info(path)
-        frames, sr = int(info.num_frames), int(info.sample_rate)
+        torchaudio.load(path, num_frames=1)
     except Exception as e:
-        # Exactly the training-time failure mode — drop it.
         return {"index": idx, "status": "corrupt", "path": path, "error": str(e)}
-    if sr <= 0 or frames == 0:
-        return {"index": idx, "status": "empty", "path": path}
-    dur = frames / float(sr)
-    if dur < min_duration:
+    dur: Optional[float] = None
+    try:  # best-effort duration; failure here must not drop a loadable file
+        info = torchaudio.info(path)
+        if info.sample_rate > 0 and info.num_frames > 0:
+            dur = info.num_frames / float(info.sample_rate)
+    except Exception:
+        dur = None
+    if dur is not None and dur < min_duration:
         return {"index": idx, "status": "too_short", "path": path, "duration": dur}
-    if dur > max_duration:
+    if dur is not None and dur > max_duration:
         return {"index": idx, "status": "too_long", "path": path, "duration": dur}
-    return {"index": idx, "status": "ok", "path": path, "duration": dur}
+    res = {"index": idx, "status": "ok", "path": path}
+    if dur is not None:
+        res["duration"] = dur
+    return res
 
 
 _ALL_BAD_STATUSES = frozenset({"missing", "corrupt", "empty", "too_short", "too_long"})
@@ -1662,6 +1670,16 @@ def publish_manifests(
             src = manifest_dir / name
             if not src.exists():
                 raise SystemExit(f"[publish-manifests] missing {src}")
+            # Refuse to publish an empty manifest — overwriting the cache with a
+            # zero-row file silently breaks every later session (StopIteration on
+            # the first batch). A real train manifest has hundreds of thousands
+            # of rows; an empty one is always a bug upstream.
+            with open(src, "r", encoding="utf-8") as f:
+                if not any(line.strip() for line in f):
+                    raise SystemExit(
+                        f"[publish-manifests] ABORT: {src} is empty — refusing to "
+                        "overwrite the cache with a zero-row manifest."
+                    )
             gz = tmp_dir / (name + ".gz")
             with open(src, "rb") as fi, gzip.open(gz, "wb", compresslevel=6) as fo:
                 shutil.copyfileobj(fi, fo)
@@ -1723,6 +1741,7 @@ def audit_manifest_dir(
     min_duration: float = 1.0,
     max_duration: float = 30.0,
     drop_short_long: bool = False,
+    min_keep_frac: float = 0.5,
 ) -> dict[str, Any]:
     """Decode-probe an EXISTING train/val manifest and write cleaned copies.
 
@@ -1756,6 +1775,19 @@ def audit_manifest_dir(
             max_duration=max_duration,
             drop_statuses=drop,
         )
+        # Guard: an audit that nukes most of the data is almost always a probe
+        # bug (wrong backend, unmounted paths) — not a corpus that is genuinely
+        # >50% broken. Abort loudly BEFORE writing, so a bad probe can never
+        # republish a decimated manifest over the cache again.
+        total = report["total"]
+        if total > 0 and report["kept"] / total < min_keep_frac:
+            raise SystemExit(
+                f"[audit-manifests] ABORT: {name} kept only {report['kept']}/{total} "
+                f"(< {min_keep_frac:.0%}); dropped={ {k: v for k, v in report['counts'].items() if k != 'ok'} }. "
+                "This looks like a probe failure (wrong backend / unmounted paths), "
+                "not a genuinely broken corpus. Nothing was written. Re-check the "
+                "mount paths and torchaudio, or lower --min-keep-frac to override."
+            )
         _write_jsonl(out_dir / name, kept)
         print(
             f"[audit-manifests] {name}: kept {report['kept']}/{report['total']} "
@@ -2202,6 +2234,13 @@ def _add_audit_manifests(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Also drop out-of-duration clips (default keeps them; loader zero-pads).",
     )
+    p.add_argument(
+        "--min-keep-frac",
+        type=float,
+        default=0.5,
+        help="Abort without writing if the audit keeps less than this fraction "
+        "(default 0.5) — a tripwire against a broken probe decimating the manifest.",
+    )
     p.set_defaults(func=_run_audit_manifests)
 
 
@@ -2214,6 +2253,7 @@ def _run_audit_manifests(args: argparse.Namespace) -> None:
         min_duration=args.min_duration,
         max_duration=args.max_duration,
         drop_short_long=args.drop_short_long,
+        min_keep_frac=args.min_keep_frac,
     )
 
 

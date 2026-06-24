@@ -353,6 +353,16 @@ def main() -> None:
             random_crop=True,
         )
     )
+    # Fail loudly on an empty/too-small manifest instead of a cryptic
+    # StopIteration on the first next(train_it) (an over-aggressive audit that
+    # republished a zero-row manifest is the classic cause).
+    min_rows = cfg.train.batch_size * world_size
+    if len(train_ds) < min_rows:
+        raise ValueError(
+            f"train manifest {dcfg.train_manifest} has {len(train_ds)} usable rows, "
+            f"need >= batch_size*world_size = {min_rows}. The manifest is empty or "
+            "truncated — check the published/cached manifest (e.g. a bad audit)."
+        )
     # DistributedSampler shards the data across ranks under DDP; set_epoch (in the
     # loop) reshuffles each pass. Single-GPU -> sampler None and shuffle=True (unchanged).
     train_sampler = (
