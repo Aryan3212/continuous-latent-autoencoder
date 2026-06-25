@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+import warnings
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -486,19 +487,24 @@ def main() -> None:
         optimizer.load_state_dict(state["optimizer"])
         if state.get("scaler") and scaler.is_enabled():
             scaler.load_state_dict(state["scaler"])
-        if (state.get("extra") or {}).get("scheduler"):
-            scheduler.load_state_dict(state["extra"]["scheduler"])
-            # load_state_dict restores the cosine's T_max from the checkpoint,
-            # silently overriding a changed optim.scheduler.total_steps on resume.
-            # Re-apply it so raising total_steps actually extends the LR horizon.
-            _cosine_inner.T_max = max(1, total_steps - warmup_steps)
+        step = int(state.get("step", 0))
+        # Re-derive the LR schedule by fast-forwarding the freshly-built scheduler
+        # to `step` instead of restoring its state: load_state_dict would bake in
+        # the checkpoint's old T_max AND leave CosineAnnealingLR's recurrent get_lr
+        # anchored to the old curve's amplitude, so a raised total_steps would train
+        # at the wrong LR. The schedule is a pure function of step, so re-stepping
+        # rebuilds the correct curve for the current total_steps. (step() without a
+        # preceding optimizer.step() only warns; it doesn't alter the LR values.)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(step):
+                scheduler.step()
         if disc is not None and state.get("disc") is not None:
             disc.load_state_dict(state["disc"], strict=True)
             if state.get("optimizer_d") is not None:
                 optimizer_d.load_state_dict(state["optimizer_d"])
             if state.get("scaler_d") and scaler_d is not None and scaler_d.is_enabled():
                 scaler_d.load_state_dict(state["scaler_d"])
-        step = int(state.get("step", 0))
 
     # Wrap param-bearing submodules in DDP AFTER any resume-load (so the clean
     # single-GPU checkpoint format loads into the raw modules). `sigreg` has no
