@@ -488,6 +488,10 @@ def main() -> None:
             scaler.load_state_dict(state["scaler"])
         if (state.get("extra") or {}).get("scheduler"):
             scheduler.load_state_dict(state["extra"]["scheduler"])
+            # load_state_dict restores the cosine's T_max from the checkpoint,
+            # silently overriding a changed optim.scheduler.total_steps on resume.
+            # Re-apply it so raising total_steps actually extends the LR horizon.
+            _cosine_inner.T_max = max(1, total_steps - warmup_steps)
         if disc is not None and state.get("disc") is not None:
             disc.load_state_dict(state["disc"], strict=True)
             if state.get("optimizer_d") is not None:
