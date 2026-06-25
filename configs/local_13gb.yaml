@@ -126,7 +126,6 @@ train:
   log_interval_steps: 10
   eval_interval_steps: 10000    # was 5000: in-train probes cost wall clock; the offline ASR probe on saved checkpoints is the primary readout now
   save_interval_steps: 25000    # checkpoints at 25k/50k/.../150k — probe dev CER on each to see the trend
-  probe_interval_steps: 100
   val_batches: null
 
 eval:

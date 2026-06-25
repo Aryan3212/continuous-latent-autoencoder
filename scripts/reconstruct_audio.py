@@ -33,16 +33,19 @@ from config import load_config
 
 
 def _load_audio(path: str, sample_rate: int) -> torch.Tensor:
-    """File -> (1, 1, S) float mono at sample_rate. Mirrors AudioDataset.__getitem__."""
+    """File -> (1, 1, S) float mono at sample_rate. Mirrors AudioDataset.__getitem__.
+
+    Decodes with soundfile (libsndfile: wav/flac/ogg, and mp3 on libsndfile>=1.1)
+    and resamples with torchaudio's functional resampler. Avoids torchaudio.load,
+    which on torchaudio>=2.9 dispatches to torchcodec/ffmpeg.
+    """
+    import soundfile as sf
     import torchaudio
 
-    wav, sr = torchaudio.load(path)
-    if wav.ndim > 1:
-        wav = wav.mean(dim=0)
-    else:
-        wav = wav.flatten()
+    data, sr = sf.read(path, dtype="float32", always_2d=True)  # (S, C)
+    wav = torch.from_numpy(data).mean(dim=1)                    # -> mono (S,)
     if int(sr) != sample_rate:
-        wav = torchaudio.transforms.Resample(int(sr), sample_rate)(wav)
+        wav = torchaudio.functional.resample(wav, int(sr), sample_rate)
     return wav.view(1, 1, -1)
 
 
@@ -71,6 +74,27 @@ def reconstruct(
     return x_hat.reshape(1, 1, -1)[..., :S], (n_chunks * z.size(-1), z.size(1))
 
 
+def load_model(cfg, ckpt_path: str, device: torch.device) -> torch.nn.ModuleDict:
+    """Build frontend+encoder+decoder and load their weights from a checkpoint.
+
+    Only the reconstruction path (wav -> z -> wav_hat) is kept; the projector /
+    discriminator keys in the checkpoint (loss-space only) are dropped.
+    """
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
+    decoder = WaveformDecoder(cfg.model.encoder.d_model, cfg.model.decoder)
+    model = torch.nn.ModuleDict(
+        {"frontend": frontend, "encoder": encoder, "decoder": decoder}
+    ).to(device)
+
+    state = torch.load(ckpt_path, map_location="cpu")
+    filtered = {k: v for k, v in state["model"].items()
+                if k.split(".", 1)[0] in {"frontend", "encoder", "decoder"}}
+    model.load_state_dict(filtered, strict=True)
+    model.eval()
+    return model
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -88,18 +112,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sr = cfg.data.sample_rate
 
-    frontend = ConvFrontend(cfg.model.frontend)
-    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
-    decoder = WaveformDecoder(cfg.model.encoder.d_model, cfg.model.decoder)
-    model = torch.nn.ModuleDict(
-        {"frontend": frontend, "encoder": encoder, "decoder": decoder}
-    ).to(device)
-
-    state = torch.load(args.ckpt, map_location="cpu")
-    filtered = {k: v for k, v in state["model"].items()
-                if k.split(".", 1)[0] in {"frontend", "encoder", "decoder"}}
-    model.load_state_dict(filtered, strict=True)
-    model.eval()
+    model = load_model(cfg, args.ckpt, device)
 
     chunk = args.chunk_seconds if args.chunk_seconds is not None else cfg.data.segment_seconds
     chunk_samples = int(round(chunk * sr)) if chunk > 0 else None
