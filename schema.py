@@ -162,6 +162,13 @@ class AdvCfg(_Base):
     # to the generator. Raise on a bigger GPU.
     disc_channels: List[int] = Field(default_factory=lambda: [16, 64, 128, 256])
     loss_type: str = "lsgan"         # least-squares GAN (stable default)
+    # Adaptive adversarial weight (VQGAN-style). When on, l_adv is rescaled each
+    # step so its gradient at the decoder's last layer matches the reconstruction
+    # gradient there, then multiplied by adv_weight. This keeps the GAN from
+    # overwhelming reconstruction regardless of the raw l_adv magnitude. With it
+    # on, adv_weight becomes a relative-strength knob (1.0 = parity with recon).
+    adaptive: bool = False
+    adaptive_max: float = 1.0e4      # clamp on the adaptive lambda (VQGAN default)
 
 
 class LossCfg(_Base):
@@ -195,7 +202,7 @@ class TrainCfg(_Base):
     log_interval_steps: int = 10
     eval_interval_steps: int = 5000
     save_interval_steps: int = 10000
-    probe_interval_steps: int = 100  # embedding similarity probe (pos/neg MSE on z)
+    probe_interval_steps: int = 1000  # embedding similarity probe (pos/neg MSE on z)
     val_batches: Optional[int] = None
 
 

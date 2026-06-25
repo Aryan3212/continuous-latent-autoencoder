@@ -533,6 +533,8 @@ def main() -> None:
     fm_w = acfg.fm_weight
     adv_start = acfg.adv_start_step
     fm_start = acfg.fm_start_step
+    adaptive_adv = acfg.adaptive
+    adaptive_max = acfg.adaptive_max
 
     # V-JEPA 2.1 context-loss weight: relative weight of L_context vs L_predict
     # in the Dense Predictive Loss. Paper uses ~1.0 with distance weighting.
@@ -596,6 +598,12 @@ def main() -> None:
             optimizer_d.zero_grad(set_to_none=True)
 
         total_loss = torch.tensor(0.0, device=device)
+
+        # Adaptive adversarial weight is computed ONCE per optimizer step (on the
+        # first disc-active microbatch) and reused across the accumulation window:
+        # it's a slowly-varying scalar, and recomputing it every microbatch would
+        # add two extra partial backward passes per microbatch.
+        lam_adv_cached: Optional[torch.Tensor] = None
 
         microbatches = []
         for _ in range(grad_accum):
@@ -717,12 +725,36 @@ def main() -> None:
                     if step >= fm_start:
                         l_fm = feature_matching_loss(fmap_r, fmap_g)
 
+                # ---- Adaptive adversarial weight (VQGAN-style) ----------------
+                # lambda balances the adversarial gradient to parity with the
+                # reconstruction gradient at the decoder's last conv, so adv_w is a
+                # clean relative-strength knob. Computed once per step (cached over
+                # the accumulation window). autograd.grad reads grads w.r.t. last_w
+                # directly without firing DDP's reduce hooks, so the per-rank
+                # reducer still sees only the loss.backward() below. The gs prescale
+                # cancels in the ratio but keeps fp16 grads off the AMP underflow
+                # floor; clamp + eps bound a vanishing-adv-grad blowup (grad_clip
+                # is the final backstop).
+                lam_adv = x_hat.new_ones(())
+                if disc_active and adaptive_adv:
+                    if lam_adv_cached is None:
+                        last_w = _unwrap(model["decoder"]).out_conv.weight
+                        gs = 1.0e3
+                        rec_g = torch.autograd.grad(
+                            gs * (stft_w * l_stft + wav_l1_w * l_wav), last_w, retain_graph=True
+                        )[0]
+                        adv_g = torch.autograd.grad(gs * l_adv, last_w, retain_graph=True)[0]
+                        lam_adv_cached = (
+                            rec_g.float().norm() / (adv_g.float().norm() + 1e-4)
+                        ).clamp(0.0, adaptive_max).detach()
+                    lam_adv = lam_adv_cached
+
                 loss = (
                     stft_w * l_stft
                     + wav_l1_w * l_wav
                     + jepa_w * l_jepa
                     + sig_w * sig_scale * l_sig
-                    + adv_w * l_adv
+                    + adv_w * lam_adv * l_adv
                     + fm_w * l_fm
                 )
                 loss = loss / grad_accum
@@ -753,6 +785,8 @@ def main() -> None:
             if disc is not None:
                 mb_step_stats["l_adv"] = l_adv.detach()
                 mb_step_stats["l_fm"] = l_fm.detach()
+                if disc_active and adaptive_adv:
+                    mb_step_stats["lam_adv"] = lam_adv.detach()
                 if loss_d is not None:
                     mb_step_stats["l_disc"] = loss_d.detach()
             mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})

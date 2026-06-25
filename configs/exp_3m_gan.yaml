@@ -111,7 +111,8 @@ loss:
     n_points: 17
   adv:
     enabled: true
-    adv_weight: 1.0
+    adaptive: true                 # rescale l_adv to gradient-parity with recon at the decoder's last layer
+    adv_weight: 1.0                # with adaptive on, this is a relative-strength knob (1.0 = parity with recon)
     fm_weight: 2.0
     adv_start_step: 20000          # adversarial + feature matching BOTH start at 20k
     fm_start_step: 20000           # (D isn't built/trained before this — fast pre-GAN phase)
@@ -144,7 +145,7 @@ train:
   log_interval_steps: 10
   eval_interval_steps: 5000
   save_interval_steps: 2000        # was 10000: a step-7930 host-RAM OOM lost the whole run (first save wasn't until 10000). Cheap insurance on a crash-prone box.
-  probe_interval_steps: 100
+  probe_interval_steps: 1000
   val_batches: null
 
 eval:
