@@ -168,7 +168,7 @@ class AdvCfg(_Base):
     # overwhelming reconstruction regardless of the raw l_adv magnitude. With it
     # on, adv_weight becomes a relative-strength knob (1.0 = parity with recon).
     adaptive: bool = False
-    adaptive_max: float = 1.0e4      # clamp on the adaptive lambda (VQGAN default)
+    adaptive_max: float = 10      # clamp on the adaptive lambda (VQGAN default)
 
 
 class LossCfg(_Base):

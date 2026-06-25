@@ -112,6 +112,10 @@ loss:
   adv:
     enabled: true
     adaptive: true                 # rescale l_adv to gradient-parity with recon at the decoder's last layer
+    adaptive_max: 1.0              # ceiling on lambda: adv may never exceed recon-parity at the last layer.
+                                   # (VQGAN's 1e4 default assumes a full-batch lambda estimate; we estimate on
+                                   #  one microbatch, so the denominator collapses when D is briefly fooled and
+                                   #  ‖g_rec‖/‖g_adv‖ blows up. Capping at parity = "neither dominates" intent.)
     adv_weight: 1.0                # with adaptive on, this is a relative-strength knob (1.0 = parity with recon)
     fm_weight: 2.0
     adv_start_step: 20000          # adversarial + feature matching BOTH start at 20k
