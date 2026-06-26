@@ -60,9 +60,10 @@ except Exception as e:
 
 if REPO_URL and not pathlib.Path(REPO_ROOT).exists():
     os.system(f"git clone --depth 1 -b {REPO_BRANCH} {REPO_URL} {REPO_ROOT}")
+else:
+    os.system(f"git -C {REPO_ROOT} pull origin {REPO_BRANCH}")
 assert pathlib.Path(REPO_ROOT, "config.py").exists(), f"model code not found at {REPO_ROOT}"
 sys.path.insert(0, REPO_ROOT)
-os.system(f"git pull origin simplification")
 from huggingface_hub import hf_hub_download
 from config import load_config
 from reconstruct_audio import load_model, reconstruct   # ModuleDict{frontend,encoder,decoder}
