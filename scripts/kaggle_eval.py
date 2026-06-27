@@ -161,9 +161,11 @@ def extract_mimi(wavs):
     from transformers import MimiModel, AutoFeatureExtractor
     fe = AutoFeatureExtractor.from_pretrained("kyutai/mimi")
     m = MimiModel.from_pretrained("kyutai/mimi").to(DEVICE).eval()
+    MIMI_SR = 24000                                           # Mimi is a 24kHz codec
     feats = []
     for w in wavs:
-        iv = fe(raw_audio=w, sampling_rate=SR, return_tensors="pt").input_values.to(DEVICE)
+        w24 = librosa.resample(w, orig_sr=SR, target_sr=MIMI_SR)
+        iv = fe(raw_audio=w24, sampling_rate=MIMI_SR, return_tensors="pt").input_values.to(DEVICE)
         codes = m.encode(iv).audio_codes                      # (1, n_q, T)
         emb = m.quantizer.decode(codes)[0]                    # (dim, T) continuous
         feats.append(meanstd_pool_TD(emb.T.cpu().numpy()))
@@ -278,11 +280,14 @@ import soundfile as sf
 def decode_clip(w):
     x = torch.from_numpy(w).view(1, 1, -1).to(DEVICE)
     x_hat, _ = reconstruct(clae, x, CHUNK)
-    return x_hat[0, 0].cpu().numpy()
+    y = x_hat[0, 0].cpu().numpy()
+    peak = np.abs(y).max()                # peak-normalize: MOS predictors expect ~full-scale
+    return (y / peak * 0.95) if peak > 1e-6 else y
 
 dec_dir = pathlib.Path(OUT_DIR, "decoded"); dec_dir.mkdir(exist_ok=True)
 for i, w in enumerate(WAVS[:N_UTMOS]):
     sf.write(str(dec_dir / f"{i:04d}.wav"), decode_clip(w), SR)
+stamp(f"decoded-clip peak (clip 0) ~ {np.abs(decode_clip(WAVS[0])).max():.3f}")
 stamp(f"decoded {min(N_UTMOS, len(WAVS))} clips -> {dec_dir}")
 
 try:
