@@ -5,10 +5,10 @@ import numpy as np
 import pathlib
 import json
 from sklearn.decomposition import PCA
-from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
-from utils.config import load_config
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
+from config import load_config
 
 def main():
     parser = argparse.ArgumentParser()
@@ -22,22 +22,18 @@ def main():
 
     # Load Config & Model
     cfg = load_config(args.config)
-    mcfg = cfg["model"]
     device = torch.device(args.device)
 
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"])).to(device)
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"])).to(device)
+    frontend = ConvFrontend(cfg.model.frontend).to(device)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder).to(device)
 
     # Load Checkpoint
     print(f"Loading checkpoint: {args.ckpt}")
     ckpt = torch.load(args.ckpt, map_location="cpu")
     
-    # Handle state dict prefixes if necessary
     def load_part(model, key):
-        part_dict = {k.replace(f"{key}.", ""): v for k, v in ckpt["model"].items() if k.startswith(f"{key}.")}
-        if not part_dict: # maybe it's not prefixed
-             part_dict = {k: v for k, v in ckpt["model"].items() if k in model.state_dict()}
-        model.load_state_dict(part_dict, strict=False)
+        part_dict = {k[len(key) + 1:]: v for k, v in ckpt["model"].items() if k.startswith(f"{key}.")}
+        model.load_state_dict(part_dict, strict=True)
 
     load_part(frontend, "frontend")
     load_part(encoder, "encoder")
@@ -46,9 +42,8 @@ def main():
     encoder.eval()
 
     # Load Data
-    ds = get_audio_wds(WebDatasetConfig(urls=args.manifest, sample_rate=16000, random_crop=False))
-    ds = ds.batched(32, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None)
+    ds = AudioDataset(DatasetConfig(manifest=args.manifest, sample_rate=16000, random_crop=False))
+    dl = torch.utils.data.DataLoader(ds, batch_size=32, collate_fn=collate_fixed, drop_last=False)
 
     latents = []
     

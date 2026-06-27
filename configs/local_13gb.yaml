@@ -1,0 +1,144 @@
+# Local 13GB-VRAM config (~20M params). Derived from local_6gb.yaml after the
+# 2026-06-11 probe study (30k steps, 6M params): mel-fbank control through the
+# identical CTC probe learns real transcription while encoder AND frontend
+# features stay at chance — phonetic info never enters the learned stack.
+# Diagnosis: ~0.7 epochs of pretraining at 6M params is ~100x below the
+# compute of teacher-free SSL recipes known to induce phonetics (wav2vec2:
+# 95M params, ~100 epochs), compounded by invariance pressure from harsh augs.
+# This config scales the three cheapest levers: capacity (~3x), schedule
+# (5x steps, ~10x audio-hours with the bigger batch), and gentler augs.
+# Watch dev CER from eval/eval_asr.py across the 25k-step checkpoints — the
+# trend toward the mel ceiling is the result, not the endpoint number.
+
+run:
+  run_id: null                # if null, auto-generate
+  out_dir: runs
+  seed: 0
+  amp: true
+  wandb:
+    enabled: true
+    project: "continuous-latent-ae"
+    name: null
+
+data:
+  sample_rate: 16000
+  segment_seconds: 2.5
+  train_manifest: "data/manifests/local_train.jsonl"
+  val_manifest: "data/manifests/local_val.jsonl"
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+aug:
+  wave_aug:
+    enabled: true
+    noise_prob: 0.5
+    noise_snr_min: 10.0         # was 5: JEPA invariance to SNR-5 noise erases low-energy consonant cues the ASR probe needs
+    noise_snr_max: 25.0
+    lowpass_prob: 0.3
+    lowpass_min_freq: 4000.0    # was 2700: fricative/sibilant energy lives at 3-8kHz; invariance to a 2.7kHz lowpass trains phonetics OUT of the representation
+    lowpass_max_freq: 8000.0
+    gain_prob: 0.5
+    gain_min: 0.7
+    gain_max: 1.3
+    clip_prob: 0.1
+    clip_min: 0.5
+  wave_chunk_mask:
+    enabled: true
+    target_ratio: 0.25
+    min_span_frames: 2
+    max_span_frames: 8
+
+model:
+  frontend:
+    channels: [32, 64, 96, 128, 128]  # was [16,32,48,64,64]: frontend probe was as dead as the encoder — capacity must grow where the information enters
+    kernels:  [10, 8, 8, 4, 4]
+    strides:  [5, 4, 4, 4, 4]    # product=1280 -> 12.5Hz at 16k (research premise: Mimi-rate continuous latents; unchanged)
+    groups: 8
+  encoder:
+    d_model: 128                # was 64
+    n_layers: 4                 # was 3
+    num_heads: 4                # was 2 (head_dim stays 32)
+    feedforward_dim: 384        # 3x d_model, same ratio as before
+    dropout: 0.1
+    cnn_module_kernel: 15
+    mhc:
+      enabled: false
+      num_streams: 2
+      start_layer: 2
+      period: 3
+      sinkhorn_iters: 10
+      tau: 0.05
+      dropout: 0.0
+      identity_mix: true
+      alpha_init: 0.01
+  decoder:
+    channels: 128               # was 96: scaled with the latent dim; recon stays an auxiliary signal (stft_weight unchanged)
+    up_strides: [4, 4, 4, 4, 5]
+    up_kernels: [8, 8, 8, 8, 10]
+    res_blocks_per_up: 1
+    res_dilations: [1, 3, 9]
+    film_hidden: 16
+  projector:
+    hidden_dim: 512             # scaled with d_model
+    output_dim: 128             # must be >= d_model (128) — see local_6gb.yaml: a smaller loss-space hides dims from every loss and lets them collapse
+    n_hidden_layers: 1
+
+loss:
+  stft_weight: 0.005
+  stft:
+    fft_sizes: [256, 512, 1024]
+    hop_ratio: 0.25
+    win_ratio: 1.0
+    center: true
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 1.0
+    mag_weight: 1.0
+    logmag_weight: 1.0
+  wav_l1_weight: 0.0
+  jepa:
+    weight: 3.0                 # JEPA is the semantic objective of this research (no teacher/distillation by design) — weighting unchanged
+    num_globals: 2
+    num_locals: 4
+    context_weight: 1.0
+  sigreg:
+    weight: 0.2
+    num_slices: 256
+    t_max: 5.0
+    n_points: 17
+
+optim:
+  lr: 5.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-5
+  scheduler:
+    warmup_steps: 5000          # scaled ~proportionally with the longer schedule
+    min_lr_ratio: 0.0
+  grad_clip: 1.0
+
+train:
+  batch_size: 96                # ~3x model at 1.5x batch on 13GB est. from the 6GB run; if OOM drop to 64 and set grad_accum_steps: 2 (the SIGReg/JEPA batch statistics see the per-step batch, so prefer the real 96 if it fits)
+  grad_accum_steps: 1
+  max_steps: 150000             # 150k x 96 x 2.5s ~= 10,000 audio-hours ~= 5 epochs of 2000h (was 0.67 epochs)
+  log_interval_steps: 10
+  eval_interval_steps: 10000    # was 5000: in-train probes cost wall clock; the offline ASR probe on saved checkpoints is the primary readout now
+  save_interval_steps: 25000    # checkpoints at 25k/50k/.../150k — probe dev CER on each to see the trend
+  val_batches: null
+
+eval:
+  enabled: false
+  emotion:
+    enabled: true
+  gender:
+    enabled: true
+  asr:
+    enabled: false
+    train_manifest: "data/manifests/asr_probe/train_asr.jsonl"
+    dev_manifest: "data/manifests/asr_probe/val_asr.jsonl"
+    text_key: text
+    steps: 8000
+    batch_size: 16
+    segment_seconds: 15.0
+    max_samples: 500

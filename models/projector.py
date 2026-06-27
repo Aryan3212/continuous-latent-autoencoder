@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import List
 
 import torch
 import torch.nn as nn
 
-
-@dataclass
-class ProjectorConfig:
-    hidden_dim: int = 2048
-    output_dim: int = 128
-    n_hidden_layers: int = 2  # number of (Linear -> BN -> GELU) blocks before the final linear
+from schema import ProjectorCfg
 
 
 class Projector(nn.Module):
@@ -21,13 +15,13 @@ class Projector(nn.Module):
     (decoder + downstream probes). Mirrors LeJEPA's
     `MLP(in, [hidden, hidden, out], norm_layer=BatchNorm1d)` recipe and
     LeWM's projector. BatchNorm is required because LayerNorm-style encoder
-    outputs (Zipformer's BiasNorm here) resist being reshaped to N(0, I).
+    outputs (LayerNorm-normalised) resist being reshaped to N(0, I).
 
     Input:  (B, D, T)   encoder output
     Output: (B, P, T)   projected output
     """
 
-    def __init__(self, dim: int, cfg: ProjectorConfig):
+    def __init__(self, dim: int, cfg: ProjectorCfg):
         super().__init__()
         self.dim = dim
         self.cfg = cfg

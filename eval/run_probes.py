@@ -4,14 +4,17 @@ import json
 import pathlib
 import subprocess
 import time
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from schema import Config
 
 
 def run_all_probes(
     *,
     run_dir: str,
     step: int,
-    exp_cfg: Dict[str, Any],
+    exp_cfg: "Config",
     ckpt_path: str,
     python_bin: str = "python",
 ) -> Dict[str, Any]:
@@ -56,76 +59,56 @@ def run_all_probes(
             print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} TIMED OUT after {elapsed:.1f}s", flush=True)
             return False
 
-    eval_cfg = exp_cfg.get("eval") or {}
-    config_path = exp_cfg.get("_resolved_config_path")
+    config_path = exp_cfg.resolved_config_path
     if not config_path:
-        raise ValueError("exp_cfg must include _resolved_config_path")
+        raise ValueError("exp_cfg must have resolved_config_path set before passing to run_all_probes")
 
-    # Emotion
-    emo = (eval_cfg.get("emotion") or {}) if isinstance(eval_cfg.get("emotion"), dict) else {}
-    if emo.get("enabled", False):
-        out = out_dir / "emotion.json"
-        ok = _run(
-            "Emotion Probe",
-            [
-                python_bin,
-                "-m",
-                "eval.eval_emotion",
-                "--config",
-                config_path,
-                "--ckpt",
-                ckpt_path,
-                "--train_manifest",
-                emo["train_manifest"],
-                "--dev_manifest",
-                emo["dev_manifest"],
-                "--label_key",
-                emo.get("label_key", "emotion"),
-                "--steps",
-                str(int(emo.get("steps", 2000))),
-                "--batch_size",
-                str(int(emo.get("batch_size", 64))),
-                "--out",
-                str(out),
-            ]
-        )
+    # Utterance-level probes (gender / emotion).
+    def _run_utt_probe(name: str, pcfg: Any, key: str, hidden: int) -> None:
+        if not pcfg.train_manifest or not pcfg.dev_manifest:
+            print(f"[Eval Step {step}] {name} probe enabled but eval.{key}.train_manifest/"
+                  f"dev_manifest are not set; skipping.", flush=True)
+            return
+        out = out_dir / f"{key}.json"
+        cmd = [
+            python_bin,
+            "-m",
+            "eval.eval_cls_probe",
+            "--config",
+            config_path,
+            "--ckpt",
+            ckpt_path,
+            "--train_manifest",
+            str(pcfg.train_manifest),
+            "--dev_manifest",
+            str(pcfg.dev_manifest),
+            "--label_key",
+            str(pcfg.label_key),
+            "--steps",
+            str(int(pcfg.steps)),
+            "--hidden",
+            str(hidden),
+            "--batch_size",
+            str(int(pcfg.batch_size)),
+            "--out",
+            str(out),
+        ]
+        seg = pcfg.segment_seconds
+        if seg is not None:
+            cmd.extend(["--segment_seconds", str(seg)])
+        ok = _run(f"{name} Probe", cmd)
         if ok and out.exists():
-            results["emotion"] = json.loads(out.read_text())
+            results[key] = json.loads(out.read_text())
 
-    # Gender
-    gen = (eval_cfg.get("gender") or {}) if isinstance(eval_cfg.get("gender"), dict) else {}
-    if gen.get("enabled", False):
-        out = out_dir / "gender.json"
-        ok = _run(
-            "Gender Probe",
-            [
-                python_bin,
-                "-m",
-                "eval.eval_gender",
-                "--config",
-                config_path,
-                "--ckpt",
-                ckpt_path,
-                "--train_manifest",
-                gen["train_manifest"],
-                "--dev_manifest",
-                gen["dev_manifest"],
-                "--label_key",
-                gen.get("label_key", "gender"),
-                "--steps",
-                str(int(gen.get("steps", 1500))),
-                "--batch_size",
-                str(int(gen.get("batch_size", 64))),
-                "--out",
-                str(out),
-            ]
-        )
-        if ok and out.exists():
-            results["gender"] = json.loads(out.read_text())
+    if exp_cfg.eval.emotion.enabled:
+        _run_utt_probe("Emotion", exp_cfg.eval.emotion, "emotion", 256)
+
+    if exp_cfg.eval.gender.enabled:
+        _run_utt_probe("Gender", exp_cfg.eval.gender, "gender", 128)
 
     # ASR
-    asr = (eval_cfg.get("asr") or {}) if isinstance(eval_cfg.get("asr"), dict) else {}
-    if asr.get("enabled", False):
+    if exp_cfg.eval.asr.enabled:
+        asr = exp_cfg.eval.asr
         out = out_dir / "asr.json"
         cmd = [
             python_bin,
@@ -136,31 +119,29 @@ def run_all_probes(
             "--ckpt",
             ckpt_path,
             "--train_manifest",
-            asr["train_manifest"],
+            asr.train_manifest,
             "--dev_manifest",
-            asr["dev_manifest"],
+            asr.dev_manifest,
             "--text_key",
-            asr.get("text_key", "text"),
+            asr.text_key,
             "--steps",
-            str(int(asr.get("steps", 8000))),
+            str(asr.steps),
             "--batch_size",
-            str(int(asr.get("batch_size", 16))),
+            str(asr.batch_size),
+            "--segment_seconds",
+            str(asr.segment_seconds),
             "--out",
             str(out),
         ]
-        if "segment_seconds" in asr:
-            cmd.extend(["--segment_seconds", str(float(asr["segment_seconds"]))])
-        if asr.get("max_samples"):
-            cmd.extend(["--max_samples", str(int(asr["max_samples"]))])
-        if asr.get("use_latent", False):
-            cmd.append("--use_latent")
+        if asr.max_samples:
+            cmd.extend(["--max_samples", str(asr.max_samples)])
         ok = _run("ASR Probe", cmd)
         if ok and out.exists():
             results["asr"] = json.loads(out.read_text())
 
     # Latent Visualization (PCA/UMAP)
     vis_out = out_dir / "latents.png"
-    vis_manifest = eval_cfg.get("vis_manifest") or exp_cfg["data"].get("val_manifest") or exp_cfg["data"]["train_manifest"]
+    vis_manifest = exp_cfg.data.val_manifest or exp_cfg.data.train_manifest
 
     try:
         _run(

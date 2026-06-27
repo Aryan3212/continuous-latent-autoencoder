@@ -1,5 +1,8 @@
 # Data and Artifacts
-data/
+data/manifests/
+datasets/
+staging/
+_hf_upload_tmp/
 runs/
 __pycache__/
 *.pyc
@@ -7,10 +10,16 @@ __pycache__/
 .venv/
 *.egg-info/
 bengaliai-speech.zip
+wandb/
+.cache_ggshield
+.ruff_cache/
 
 # Environment
+# NB: uv.lock is deliberately committed (reproducible env on fresh VMs).
 .env
-uv.lock
+
+# Hardcoded credentials (ship _creds.example.py as template instead).
+clae_data/_creds.py
 
 # Editor
 .vscode/

@@ -1,20 +1,64 @@
 from __future__ import annotations
 
+import math
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 
-from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
-from utils.config import apply_overrides, load_config
+BLANK_IDX = 0
+
+
+def amp_enabled(device: torch.device) -> bool:
+    """Whether to use fp16 autocast for this device.
+
+    AMP only ever applies on CUDA, but can be force-disabled with the env var
+    CLAE_AMP=0. GTX 16-series (Turing, no tensor cores) cards are prone to
+    driver hangs / black-screen lockups under fp16 autocast; set CLAE_AMP=0 to
+    run the eval extractors and CTC probe in fp32.
+    """
+    if device.type != "cuda":
+        return False
+    return os.environ.get("CLAE_AMP", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def build_charset(texts: List[str]) -> List[str]:
+    chars = sorted({c for t in texts for c in t.lower() if c != "\n"})
+    return ["<blank>"] + chars
+
+
+def greedy_decode_ctc(
+    log_probs: torch.Tensor, id2ch: List[str], lens: List[int] | None = None
+) -> List[str]:
+    pred = log_probs.argmax(dim=-1).cpu().tolist()  # (B, T)
+    outs: List[str] = []
+    for bi, seq in enumerate(pred):
+        if lens is not None:
+            seq = seq[: int(lens[bi])]
+        last = None
+        chars: List[str] = []
+        for i in seq:
+            if i == BLANK_IDX:
+                last = i
+                continue
+            if last != i:
+                chars.append(id2ch[i])
+            last = i
+        outs.append("".join(chars))
+    return outs
+
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
+from config import apply_overrides, load_config
+from schema import Config
 
 
 @dataclass
 class LoadedModel:
-    cfg: Dict[str, Any]
+    cfg: Config
     device: torch.device
     frontend: ConvFrontend
     encoder: Encoder
@@ -24,14 +68,13 @@ def load_frozen_encoder(config_path: str, ckpt_path: str, overrides: List[str]) 
     cfg = apply_overrides(load_config(config_path), overrides)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder}).to(device)
 
     state = torch.load(ckpt_path, map_location="cpu")
-    # Using strict=False because older checkpoints might have 'bottleneck' in state_dict.
-    model.load_state_dict(state["model"], strict=False)
+    filtered = {k: v for k, v in state["model"].items() if k.split(".", 1)[0] in {"frontend", "encoder"}}
+    model.load_state_dict(filtered, strict=True)
     model.eval()
 
     for p in model.parameters():
@@ -47,47 +90,6 @@ def _log_progress(name: str, n_samples: int, start_time: float) -> None:
 
 
 @torch.no_grad()
-def iter_embeddings(
-    lm: LoadedModel,
-    manifest_path: str,
-    *,
-    sample_rate: int,
-    segment_seconds: float,
-    batch_size: int,
-    num_workers: int = 0,
-    log_name: str = "",
-) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = get_audio_wds(
-        WebDatasetConfig(
-            urls=manifest_path,
-            sample_rate=sample_rate,
-            segment_seconds=segment_seconds,
-            random_crop=False,
-            resampled=False,
-            shuffle_size=0,
-        )
-    )
-    ds = ds.batched(batch_size, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=num_workers)
-    use_amp = lm.device.type == "cuda"
-    start_t = time.perf_counter()
-    n_samples = 0
-    for i, batch in enumerate(dl):
-        wav = batch["wav"].to(lm.device)
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            h0 = lm.frontend(wav)
-            hE = lm.encoder(h0)
-        z = hE.float()  # (B,d,T')
-        e = torch.cat([z.mean(dim=-1), z.std(dim=-1, unbiased=False)], dim=1)  # (B,2d)
-        n_samples += e.size(0)
-        if log_name and (i + 1) % 50 == 0:
-            _log_progress(log_name, n_samples, start_t)
-        yield e.cpu(), batch["meta"]
-    if log_name:
-        _log_progress(log_name, n_samples, start_t)
-
-
-@torch.no_grad()
 def iter_frame_features(
     lm: LoadedModel,
     manifest_path: str,
@@ -96,33 +98,195 @@ def iter_frame_features(
     segment_seconds: float,
     batch_size: int,
     num_workers: int = 0,
-    use_latent: bool = False, # deprecated
     log_name: str = "",
-) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
-    ds = get_audio_wds(
-        WebDatasetConfig(
-            urls=manifest_path,
+    chunk_seconds: float | None = None,
+    source: str = "encoder",
+    mel_hop: int = 320,
+) -> Iterable[Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]]:
+    """Yield (feats (B,T',D), valid_lens (B,), meta) per batch.
+
+    chunk_seconds: when set and shorter than segment_seconds, the waveform is
+    encoded in independent windows of that length and the frame features are
+    concatenated along time. Pass the PRETRAINING segment length: the encoder
+    has unmasked global attention + BatchNorm and only ever saw segment-length
+    inputs, so a single pass over a longer padded waveform is
+    out-of-distribution and degrades every frame.
+
+    source selects the representation:
+      - "encoder":  frontend + conformer encoder (the model under test)
+      - "frontend": conv frontend only — localizes whether phonetic info
+        exists before the conformer
+      - "mel":      log-mel filterbank (64 bins, per-utterance CMVN) that
+        bypasses the model entirely — a known-good control for the probe
+        harness itself. mel_hop sets the frame hop in samples: 320 = 50 Hz;
+        1280 = 12.5 Hz, matching the encoder frame rate, to isolate how much
+        of the encoder/mel gap is frame rate vs feature content
+
+    valid_lens counts the frames covered by real audio, from the manifest's
+    `duration`; rows without a usable duration get the full frame count.
+    """
+    if source not in ("encoder", "frontend", "mel"):
+        raise ValueError(f"unknown feature source: {source!r}")
+    ds = AudioDataset(
+        DatasetConfig(
+            manifest=manifest_path,
             sample_rate=sample_rate,
             segment_seconds=segment_seconds,
             random_crop=False,
-            resampled=False,
-            shuffle_size=0,
         )
     )
-    ds = ds.batched(batch_size, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=num_workers)
-    use_amp = lm.device.type == "cuda"
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=batch_size, num_workers=num_workers,
+        collate_fn=collate_fixed, drop_last=False,
+    )
+    melspec = None
+    if source == "mel":
+        import torchaudio
+        # Window must cover the hop at low frame rates (hop 1280 = 80ms).
+        n_fft = 512 if mel_hop <= 512 else 2048
+        melspec = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate, n_fft=n_fft, win_length=n_fft, hop_length=mel_hop, n_mels=64
+        ).to(lm.device)
+
+    def _encode(w: torch.Tensor) -> torch.Tensor:  # (B,1,S) -> (B,D,T')
+        h0 = lm.frontend(w)
+        return h0 if source == "frontend" else lm.encoder(h0)
+
+    use_amp = amp_enabled(lm.device)
+    start_t = time.perf_counter()
+    n_samples = 0
+    for i, batch in enumerate(dl):
+        wav = batch["wav"].to(lm.device)  # (B, 1, S)
+        B, _, S = wav.shape
+        total_samples = S
+        if source == "mel":
+            # fp32 on purpose; per-utterance, per-bin CMVN like standard fbank
+            # frontends. Padding frames contribute a constant to the stats —
+            # acceptable for a control.
+            hE = torch.log(melspec(wav.squeeze(1)) + 1e-5)  # (B, M, Tm)
+            hE = (hE - hE.mean(dim=-1, keepdim=True)) / (hE.std(dim=-1, keepdim=True) + 1e-5)
+        else:
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                if chunk_seconds is not None and int(round(chunk_seconds * sample_rate)) < S:
+                    cs = int(round(chunk_seconds * sample_rate))
+                    n_chunks = math.ceil(S / cs)
+                    total_samples = n_chunks * cs
+                    if total_samples > S:
+                        wav = torch.nn.functional.pad(wav, (0, total_samples - S))
+                    hE = _encode(wav.view(B * n_chunks, 1, cs))  # (B*n, D, Tc)
+                    D, Tc = hE.size(1), hE.size(2)
+                    hE = hE.view(B, n_chunks, D, Tc).permute(0, 2, 1, 3).reshape(B, D, n_chunks * Tc)
+                else:
+                    hE = _encode(wav)  # (B,D,T')
+        feats = hE.float()
+        n_frames = feats.size(-1)
+        samples_per_frame = total_samples / n_frames
+        lens: List[int] = []
+        for m in batch["meta"]:
+            dur = m.get("duration")
+            t_valid = n_frames
+            if isinstance(dur, (int, float)) and not isinstance(dur, bool) and dur > 0:
+                t_valid = min(n_frames, max(1, math.ceil(float(dur) * sample_rate / samples_per_frame)))
+            lens.append(t_valid)
+        n_samples += feats.size(0)
+        if log_name and (i + 1) % 50 == 0:
+            _log_progress(log_name, n_samples, start_t)
+        yield feats.transpose(1, 2).cpu(), torch.tensor(lens, dtype=torch.long), batch["meta"]
+    if log_name:
+        _log_progress(log_name, n_samples, start_t)
+
+
+@torch.no_grad()
+def iter_embeddings_masked(
+    lm: LoadedModel,
+    manifest_path: str,
+    *,
+    sample_rate: int,
+    segment_seconds: float,
+    batch_size: int,
+    num_workers: int = 0,
+    log_name: str = "",
+) -> Iterable[Tuple[torch.Tensor, List[Dict[str, Any]]]]:
+    """Pooled mean+std utterance embeddings, excluding zero-padding frames from pooling.
+
+    Utterances shorter than segment_seconds are right-padded with zeros by the
+    dataset; mean+std pooling over those frames dilutes the utterance
+    statistics. When a manifest row carries a 'duration' field (seconds), only
+    the frames covered by real audio enter the pooled mean/std. Rows without
+    'duration' fall back to full-segment pooling. Yields (B, 2d) embeddings
+    plus the batch metadata list.
+    """
+    ds = AudioDataset(
+        DatasetConfig(
+            manifest=manifest_path,
+            sample_rate=sample_rate,
+            segment_seconds=segment_seconds,
+            random_crop=False,
+        )
+    )
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=batch_size, num_workers=num_workers,
+        collate_fn=collate_fixed, drop_last=False,
+    )
+    use_amp = amp_enabled(lm.device)
     start_t = time.perf_counter()
     n_samples = 0
     for i, batch in enumerate(dl):
         wav = batch["wav"].to(lm.device)
         with torch.amp.autocast("cuda", enabled=use_amp):
             h0 = lm.frontend(wav)
-            hE = lm.encoder(h0)  # (B,D,T')
-        feats = hE.float()
-        n_samples += feats.size(0)
+            hE = lm.encoder(h0)
+        z = hE.float()  # (B,d,T')
+        n_frames = z.size(-1)
+        samples_per_frame = wav.size(-1) / n_frames
+        embs: List[torch.Tensor] = []
+        for b, m in enumerate(batch["meta"]):
+            dur = m.get("duration")
+            t_valid = n_frames
+            if dur is not None:
+                t_valid = min(n_frames, max(1, math.ceil(float(dur) * sample_rate / samples_per_frame)))
+            zb = z[b, :, :t_valid]
+            embs.append(torch.cat([zb.mean(dim=-1), zb.std(dim=-1, unbiased=False)], dim=0))
+        e = torch.stack(embs, dim=0)  # (B,2d)
+        n_samples += e.size(0)
         if log_name and (i + 1) % 50 == 0:
             _log_progress(log_name, n_samples, start_t)
-        yield feats.transpose(1, 2).cpu(), batch["meta"]  # (B,T',D)
+        yield e.cpu(), batch["meta"]
     if log_name:
         _log_progress(log_name, n_samples, start_t)
+
+
+def embedding_stats(x: torch.Tensor) -> Dict[str, Any]:
+    """Collapse gauge for pooled utterance embeddings.
+
+    Computes the participation-ratio effective rank (sum(lambda))^2 /
+    sum(lambda^2) of the embedding covariance over samples, with eigenvalues
+    clamped to >= 0. A healthy embedding space has effective rank well above
+    1; utterance-level collapse shows up as a value near 0-1 even when probe
+    accuracy has not moved yet.
+    """
+    x = x.detach().float()
+    n, d = int(x.size(0)), int(x.size(1))
+    stats: Dict[str, Any] = {"embed_dim": d, "embed_num_samples": n}
+    if n < 2:
+        stats["embed_effective_rank"] = 0.0
+        return stats
+    xc = (x - x.mean(dim=0, keepdim=True)).double()
+    cov = (xc.t() @ xc) / (n - 1)
+    eigvals = torch.linalg.eigvalsh(cov).clamp_min(0.0)
+    total = eigvals.sum()
+    if total.item() <= 0.0:
+        stats["embed_effective_rank"] = 0.0
+        return stats
+    stats["embed_effective_rank"] = float((total * total / eigvals.square().sum()).item())
+    return stats
+
+
+def checkpoint_step(ckpt_path: str) -> int | None:
+    """Best-effort read of the training step stored in a checkpoint payload."""
+    try:
+        state = torch.load(ckpt_path, map_location="cpu")
+        step = state.get("step") if isinstance(state, dict) else None
+        return int(step) if step is not None else None
+    except Exception:
+        return None

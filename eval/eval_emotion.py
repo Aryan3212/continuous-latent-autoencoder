@@ -1,122 +1,102 @@
+"""Speech emotion recognition (SER) probe on SUBESCO, across models.
+
+Trains a linear classifier on mean+std-pooled embeddings to predict the 7
+SUBESCO emotions, using **speaker-disjoint** GroupKFold so the score reflects
+emotion decodability rather than speaker leakage. Reports macro-F1 and accuracy
+(mean over folds) per model.
+
+    uv run python -m eval.eval_emotion [--max-utts N] [--models ours,mimi,...] [--folds 5]
+
+Writes ``runs/eval/emotion_probe.json`` and prints a table.
+"""
 from __future__ import annotations
 
 import argparse
 import json
-import pathlib
-import time
-from typing import Any, Dict, List, Tuple
+from typing import List
 
-import torch
-import torch.nn as nn
+import numpy as np
 
-from eval.common import iter_embeddings, load_frozen_encoder
+from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_subesco_utterances
 
 
-def _build_label_map(rows: List[Dict[str, Any]], key: str) -> Dict[str, int]:
-    labels = sorted({r[key] for r in rows})
-    return {lbl: i for i, lbl in enumerate(labels)}
+def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, n_folds: int) -> dict:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.model_selection import GroupKFold
+    from sklearn.preprocessing import StandardScaler
 
+    n_groups = len(np.unique(groups))
+    n_splits = min(n_folds, n_groups)
+    gkf = GroupKFold(n_splits=n_splits)
 
-def _macro_f1(y_true: torch.Tensor, y_pred: torch.Tensor, num_classes: int) -> float:
-    f1s = []
-    for c in range(num_classes):
-        tp = ((y_true == c) & (y_pred == c)).sum().item()
-        fp = ((y_true != c) & (y_pred == c)).sum().item()
-        fn = ((y_true == c) & (y_pred != c)).sum().item()
-        denom = (2 * tp + fp + fn)
-        f1s.append((2 * tp / denom) if denom > 0 else 0.0)
-    return float(sum(f1s) / max(1, len(f1s)))
+    accs: List[float] = []
+    f1s: List[float] = []
+    for tr, te in gkf.split(X, y, groups):
+        scaler = StandardScaler().fit(X[tr])
+        Xtr, Xte = scaler.transform(X[tr]), scaler.transform(X[te])
+        clf = LogisticRegression(max_iter=3000, C=1.0)
+        clf.fit(Xtr, y[tr])
+        pred = clf.predict(Xte)
+        accs.append(accuracy_score(y[te], pred))
+        f1s.append(f1_score(y[te], pred, average="macro"))
 
-
-def _load_embs(
-    lm,
-    manifest: str,
-    label_key: str,
-    batch_size: int,
-    segment_seconds: float,
-    log_name: str = "",
-) -> Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]], Dict[str, int]]:
-    # Single pass: collect embeddings and metadata together
-    xs: List[torch.Tensor] = []
-    metas: List[Dict[str, Any]] = []
-    for emb, meta in iter_embeddings(
-        lm,
-        manifest,
-        sample_rate=int(lm.cfg["data"]["sample_rate"]),
-        segment_seconds=segment_seconds,
-        batch_size=batch_size,
-        log_name=log_name,
-    ):
-        xs.append(emb)
-        metas.extend(meta)
-
-    label_map = _build_label_map(metas, label_key)
-    ys = torch.tensor([label_map[m[label_key]] for m in metas], dtype=torch.long)
-    return torch.cat(xs, dim=0), ys, metas, label_map
+    return {
+        "macro_f1": float(np.mean(f1s)),
+        "macro_f1_std": float(np.std(f1s)),
+        "accuracy": float(np.mean(accs)),
+        "accuracy_std": float(np.std(accs)),
+        "n_splits": int(n_splits),
+        "dim": int(X.shape[1]),
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--train_manifest", required=True)
-    ap.add_argument("--dev_manifest", required=True)
-    ap.add_argument("--label_key", default="emotion")
-    ap.add_argument("--steps", type=int, default=2000)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--segment_seconds", type=float, default=None)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("overrides", nargs="*")
+    ap.add_argument("--max-utts", type=int, default=None, help="Cap clips (default: all 7000).")
+    ap.add_argument("--models", default=",".join(MODEL_ORDER),
+                    help="Comma-separated subset of: " + ",".join(MODEL_ORDER))
+    ap.add_argument("--ckpt", default=None)
+    ap.add_argument("--pool", default="meanstd", choices=["mean", "meanstd"])
+    ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
 
-    lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
-    seg = float(args.segment_seconds if args.segment_seconds is not None else lm.cfg["data"]["segment_seconds"])
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    utts = load_subesco_utterances(max_utts=args.max_utts)
+    y = np.array([u.emotion for u in utts])
+    groups = np.array([u.speaker for u in utts])
+    n_classes = len(np.unique(y))
+    chance = 1.0 / n_classes
 
-    print(f"  [Emotion] Extracting train embeddings...", flush=True)
-    x_tr, y_tr, _, label_map = _load_embs(lm, args.train_manifest, args.label_key, args.batch_size, seg, log_name="Emotion train")
-    print(f"  [Emotion] Extracting dev embeddings...", flush=True)
-    x_de, y_de, _, _ = _load_embs(lm, args.dev_manifest, args.label_key, args.batch_size, seg, log_name="Emotion dev")
+    results = {}
+    for name in models:
+        data = extract(name, utts, ckpt=args.ckpt, pool=args.pool, use_cache=not args.no_cache)
+        results[name] = probe(data["X"], y, groups, args.folds)
 
-    # Free frozen encoder
-    del lm
-    torch.cuda.empty_cache()
+    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    out = EVAL_DIR / "emotion_probe.json"
+    payload = {
+        "dataset": "SUBESCO",
+        "n_utts": len(utts),
+        "n_speakers": int(len(np.unique(groups))),
+        "n_classes": n_classes,
+        "chance": chance,
+        "pool": args.pool,
+        "results": results,
+    }
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_tr, y_tr = x_tr.to(device), y_tr.to(device)
-    x_de, y_de = x_de.to(device), y_de.to(device)
-
-    num_classes = len(label_map)
-    print(f"  [Emotion] Train: {x_tr.shape[0]}, Dev: {x_de.shape[0]}, Classes: {num_classes}", flush=True)
-    head = nn.Sequential(nn.Linear(x_tr.size(1), 256), nn.GELU(), nn.Dropout(0.1), nn.Linear(256, num_classes)).to(device)
-    opt = torch.optim.AdamW(head.parameters(), lr=args.lr)
-    loss_fn = nn.CrossEntropyLoss()
-
-    head.train()
-    t0 = time.perf_counter()
-    log_interval = max(1, args.steps // 5)
-    for step_i in range(args.steps):
-        idx = torch.randint(0, x_tr.size(0), (args.batch_size,), device=device)
-        xb, yb = x_tr[idx], y_tr[idx]
-        logits = head(xb)
-        loss = loss_fn(logits, yb)
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
-        if (step_i + 1) % log_interval == 0:
-            elapsed = time.perf_counter() - t0
-            print(f"  [Emotion] step {step_i+1}/{args.steps}  loss={loss.item():.4f}  ({elapsed:.1f}s)", flush=True)
-
-    head.eval()
-    with torch.no_grad():
-        pred = head(x_de).argmax(dim=-1)
-        acc = (pred == y_de).float().mean().item()
-        mf1 = _macro_f1(y_de, pred, num_classes)
-
-    print(f"  [Emotion] Accuracy: {acc:.4f}, Macro-F1: {mf1:.4f}", flush=True)
-    out = {"accuracy": float(acc), "macro_f1": float(mf1), "num_classes": num_classes, "num_train": int(x_tr.size(0)), "num_dev": int(x_de.size(0))}
-    pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
+    print(f"\nSUBESCO emotion recognition  ({len(utts)} utts, {n_classes} emotions, "
+          f"speaker-disjoint {payload['results'][models[0]]['n_splits']}-fold, "
+          f"chance={chance*100:.1f}%, pool={args.pool})")
+    print(f"{'model':<14} {'macro-F1':>14} {'accuracy':>14} {'dim':>6}")
+    print("-" * 52)
+    for name in models:
+        r = results[name]
+        print(f"{name:<14} {r['macro_f1']*100:>7.1f} ±{r['macro_f1_std']*100:>4.1f}  "
+              f"{r['accuracy']*100:>7.1f} ±{r['accuracy_std']*100:>4.1f}  {r['dim']:>6}")
+    print(f"\nwrote {out}")
 
 
 if __name__ == "__main__":

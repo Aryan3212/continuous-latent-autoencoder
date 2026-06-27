@@ -3,16 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-from typing import Any, Dict
+from typing import Dict
 
 import torch
 
-from data.dataset import WebDatasetConfig, get_audio_wds, collate_fixed
-from losses.multires_stft import MultiResSTFTConfig, MultiResSTFTLoss
-from models.decoder_generator import DecoderConfig, WaveformDecoder
-from models.encoder import Encoder, EncoderConfig
-from models.frontend_conv import ConvFrontend, FrontendConfig
-from utils.config import apply_overrides, load_config
+from data_loading import AudioDataset, DatasetConfig, collate_fixed
+from losses import MultiResSTFTLoss
+from models.decoder_generator import WaveformDecoder
+from models.encoder import Encoder
+from models.frontend_conv import ConvFrontend
+from config import apply_overrides, load_config
 
 
 def main() -> None:
@@ -29,41 +29,36 @@ def main() -> None:
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    seg = float(args.segment_seconds if args.segment_seconds is not None else cfg["data"]["segment_seconds"])
+    seg = args.segment_seconds if args.segment_seconds is not None else cfg.data.segment_seconds
 
-    mcfg = cfg["model"]
-    frontend = ConvFrontend(FrontendConfig(**mcfg["frontend"]))
-    encoder = Encoder(frontend.out_channels, EncoderConfig(**mcfg["encoder"]))
-    
-    latent_dim = int(mcfg["encoder"]["d_model"])
-    
-    decoder_cfg = DecoderConfig(**mcfg["decoder"])
-    decoder = WaveformDecoder(latent_dim, decoder_cfg)
-    if decoder_cfg.latent_stats_path:
-        stats = torch.load(decoder_cfg.latent_stats_path, map_location="cpu")
-        decoder.set_latent_stats(stats["mean"], stats["var"])
+    frontend = ConvFrontend(cfg.model.frontend)
+    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
+    latent_dim = cfg.model.encoder.d_model
+    decoder = WaveformDecoder(latent_dim, cfg.model.decoder)
 
     model = torch.nn.ModuleDict(
         {"frontend": frontend, "encoder": encoder, "decoder": decoder}
     ).to(device)
 
     state = torch.load(args.ckpt, map_location="cpu")
-    model.load_state_dict(state["model"], strict=False)
+    filtered = {k: v for k, v in state["model"].items() if k.split(".", 1)[0] in {"frontend", "encoder", "decoder"}}
+    model.load_state_dict(filtered, strict=True)
     model.eval()
 
-    loss_cfg = MultiResSTFTConfig(**cfg["loss"]["stft"])
-    stft = MultiResSTFTLoss(loss_cfg).to(device)
+    stft = MultiResSTFTLoss(cfg.loss.stft).to(device)
 
-    ds = get_audio_wds(
-        WebDatasetConfig(
-            urls=args.manifest,
-            sample_rate=int(cfg["data"]["sample_rate"]),
+    ds = AudioDataset(
+        DatasetConfig(
+            manifest=args.manifest,
+            sample_rate=cfg.data.sample_rate,
             segment_seconds=seg,
             random_crop=False,
         )
     )
-    ds = ds.batched(args.batch_size, collation_fn=collate_fixed)
-    dl = torch.utils.data.DataLoader(ds, batch_size=None, num_workers=0)
+    dl = torch.utils.data.DataLoader(
+        ds, batch_size=args.batch_size, num_workers=0,
+        collate_fn=collate_fixed, drop_last=False,
+    )
 
     sums: Dict[str, float] = {"stft": 0.0, "wav_l1": 0.0}
     n = 0

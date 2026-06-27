@@ -1,24 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-@dataclass
-class DecoderConfig:
-    channels: int = 256
-    up_strides: List[int] = None
-    up_kernels: List[int] = None
-    res_blocks_per_up: int = 2
-    res_dilations: List[int] = None
-    film_hidden: int = 128
-    latent_norm: bool = False
-    latent_norm_eps: float = 1.0e-5
-    latent_stats_path: Optional[str] = None
+from schema import DecoderCfg
 
 
 class FiLM(nn.Module):
@@ -65,12 +53,12 @@ class WaveformDecoder(nn.Module):
       z: (B,d,T') -> x_hat: (B,1,T)
     """
 
-    def __init__(self, latent_dim: int, cfg: DecoderConfig):
+    def __init__(self, latent_dim: int, cfg: DecoderCfg):
         super().__init__()
         self.cfg = cfg
-        up_strides = cfg.up_strides or [4, 4, 4, 4, 5]
-        up_kernels = cfg.up_kernels or [8, 8, 8, 8, 10]
-        res_dilations = cfg.res_dilations or [1, 3, 9]
+        up_strides = cfg.up_strides
+        up_kernels = cfg.up_kernels
+        res_dilations = cfg.res_dilations
         assert len(up_strides) == len(up_kernels)
 
         self.in_conv = nn.Conv1d(latent_dim, cfg.channels, kernel_size=3, padding=1)
@@ -102,23 +90,11 @@ class WaveformDecoder(nn.Module):
         self.out_conv = nn.Conv1d(in_ch, 1, kernel_size=7, padding=3)
         self.up_strides = up_strides
         self.res_blocks_per_up = cfg.res_blocks_per_up
-        self.register_buffer("latent_mean", torch.zeros(1, latent_dim, 1))
-        self.register_buffer("latent_var", torch.ones(1, latent_dim, 1))
-
-    def set_latent_stats(self, mean: torch.Tensor, var: torch.Tensor) -> None:
-        if mean.dim() == 1:
-            mean = mean.view(1, -1, 1)
-        if var.dim() == 1:
-            var = var.view(1, -1, 1)
-        self.latent_mean.copy_(mean.detach())
-        self.latent_var.copy_(var.detach())
 
     def forward(self, z: torch.Tensor, target_len: int | None = None) -> torch.Tensor:
-        if self.cfg.latent_norm:
-            z = (z - self.latent_mean) / torch.sqrt(self.latent_var + self.cfg.latent_norm_eps)
         x = self.in_conv(z)
         rb_i = 0
-        for up_i, up in enumerate(self.ups):
+        for up in self.ups:
             x = F.gelu(up(x))
             for _ in range(self.res_blocks_per_up):
                 x = self.resblocks[rb_i](x, z)

@@ -2,7 +2,6 @@ run:
   run_id: null                # if null, auto-generate
   out_dir: runs
   seed: 0
-  device: auto               # auto | cpu | cuda
   amp: true
   wandb:
     enabled: true
@@ -10,44 +9,42 @@ run:
     name: null
 
 data:
+  # Note: manifests are JSONL files produced by `python scripts/housekeeping.py build`
+  # (or fetched from HF Hub via `make fetch-data`).
   sample_rate: 16000
   segment_seconds: 3.0
-  train_manifest: "data/shards/train/train-{000000..000117}.tar"
-  val_manifest: "data/shards/val/val-000000.tar"
-  shuffle_size: 1000
+  train_manifest: "data/manifests/combined_train.jsonl"
+  val_manifest: "data/manifests/combined_val.jsonl"
   num_workers: 8
   pin_memory: true
   persistent_workers: true
 
 aug:
-  feature_mask:
-    enabled: true
-    time_mask_prob: 1.0
-    time_mask_len: 5            # 5 frames @ 12.5Hz = 400ms; multi-span coverage targets ~49%
   wave_aug:
     enabled: true
     noise_prob: 1.0             # always add noise; intensity sampled per-sample
     noise_snr_min: 0.0          # loud end: noise matches speech
     noise_snr_max: 25.0         # gentle end: barely audible
-    reverb_prob: 0.0            # leave disabled (no RIR data)
     lowpass_prob: 1.0           # always lowpass; cutoff sampled per-sample
-    lowpass_min_freq: 1500.0    # harsh: telephone-band
+    lowpass_min_freq: 2700.0    # was 1500: don't train invariance to the timbre band gender/emotion probes need. NB: pre-2026-06-11 runs used a boxcar filter whose true -3dB point was ~0.44x this value; cutoffs are now accurate (windowed-sinc)
     lowpass_max_freq: 8000.0    # gentle: Nyquist, ≈ identity
     gain_prob: 1.0              # always vary volume
     gain_min: 0.6
     gain_max: 1.5
     clip_prob: 0.3              # keep occasional — clipping is non-linear/destructive
     clip_min: 0.5
-  mix:
-    enabled: false
-    snr_db_min: 3.0
-    snr_db_max: 15.0
-    prob: 0.5
-    swap_prob: 0.5
+  wave_chunk_mask:
+    # Waveform-space chunk masking applied to LOCAL views only (V-JEPA / MAE
+    # tube-masking analogue for 1-D audio). Frame-aligned: spans are sampled
+    # in frame units, then expanded to samples_per_frame contiguous samples.
+    enabled: true
+    target_ratio: 0.25          # mask ~25% of frames per local view
+    min_span_frames: 2          # 2 frames = 160 ms @ 12.5 Hz frame rate
+    max_span_frames: 8          # 8 frames = 640 ms
 
 model:
   frontend:
-    channels: [64, 128, 192, 256, 256]
+    channels: [64, 128, 160, 192, 192]
     kernels:  [10, 8, 8, 4, 4]
     strides:  [5, 4, 4, 4, 4]    # product=1280 -> 12.5Hz at 16k
     groups: 8
@@ -55,14 +52,9 @@ model:
     d_model: 192
     n_layers: 4
     num_heads: 4
-    query_head_dim: 48
-    pos_head_dim: 4
-    value_head_dim: 48
-    feedforward_dim: 768
+    feedforward_dim: 576        # 3x d_model
     dropout: 0.1
     cnn_module_kernel: 31
-    pos_dim: 192
-    warmup_batches: 20000.0
     mhc:
       enabled: true
       num_streams: 2
@@ -74,22 +66,19 @@ model:
       identity_mix: true
       alpha_init: 0.01
   decoder:
-    channels: 512
+    channels: 320
     up_strides: [4, 4, 4, 4, 5]
     up_kernels: [8, 8, 8, 8, 10]
     res_blocks_per_up: 2
     res_dilations: [1, 3, 9]
-    film_hidden: 128
-    latent_norm: false          # retired: RAE latent-stats normalization is a heuristic
-    latent_norm_eps: 1.0e-5
-    latent_stats_path: null
+    film_hidden: 64
   projector:
     # LeJEPA / LeWM projector: encoder out -> JEPA + SIGReg loss space.
     # Decoder and downstream probes still read raw encoder output (hE).
     # BatchNorm is load-bearing — it's what lets SIGReg actually reshape
     # to N(0, I) (LayerNorm-style encoder outputs resist Gaussianisation).
-    hidden_dim: 2048
-    output_dim: 128
+    hidden_dim: 896
+    output_dim: 192             # was 64: must be >= d_model (192) — a narrower projector hides encoder dims from every loss and lets them collapse
     n_hidden_layers: 2
 
 loss:
@@ -106,77 +95,31 @@ loss:
     logmag_weight: 1.0
   wav_l1_weight: 0.0
   jepa:
-    weight: 3.0
-    num_views: 4                # Algorithm 2: V>=2 augmented views, center = mean across views
-    mix_view_weight: 1.0        # legacy; unused with multi-view LeJEPA
-    context_weight: 1.0         # V-JEPA 2.1: relative weight of L_context vs L_predict in dense loss
+    weight: 3.0                 # NB: wandb rank charts before the 2026-06-11 logging fix understate z_rank* by 10x (log_interval dilution); don't retune against the old charts
+    # Asymmetric global/local recipe (DINO-style): globals-only center anchors
+    # the loss; locals get L_predict + L_context against it; L_global enforces
+    # cross-global consistency. Total views = num_globals + num_locals.
+    num_globals: 2              # lightly-augmented anchor views (no waveform chunk mask)
+    num_locals: 4               # heavily-masked views (waveform chunk mask applied)
+    context_weight: 1.0         # V-JEPA 2.1: relative weight of L_context vs L_predict
   sigreg:
-    weight: 0.001                 # LeWM/LeJEPA paper range (was 2.0; combined with utt-pool SIGReg
-                                # this was ~100x the paper's effective ratio and crushed the latent)
+    weight: 0.05                  # LeJEPA paper recommendation (robust across experiments)
     num_slices: 1024
     t_max: 5.0                  # paper default: symmetric [-t_max, t_max]
     n_points: 17
-  mix_recon:
-    enabled: false              # Exp1+: decode from mix -> primary
-    weight: 1.0
-    start_step: 0
-  primary:
-    enabled: false              # retired: InfoNCE head is a heuristic outside Alg. 2
-    weight: 0.1
-    temp: 0.1
-  inline_probe:
-    # Detached CTC probe on encoder output hE. Never backprops into encoder.
-    # Diagnoses latent quality every log_interval steps without waiting for
-    # the offline ASR eval. Treat WER here as a relative trend, not absolute.
-    enabled: true
-    manifest: "data/shards/asr_eval_train/asr_eval_train-{000000..000010}.tar"
-    batch_size: 8
-    segment_seconds: 15.0
-    num_workers: 1
-    shuffle_size: 200
-    step_interval: 1            # train head every N main steps
-    log_interval: 500           # emit probe/{ctc_loss,wer} to W&B every M main steps
-    vocab_bootstrap_samples: 1000
-    lr: 1.0e-3
-
-gan:
-  enabled: false
-  start_step: 15000
-  warmup_steps: 5000
-  periods: [2, 3, 5, 7, 11]
-  msd_scales: 3
-  mpd_channels: 32
-  msd_channels: 16
-  d_lr: 5.0e-5
-  d_betas: [0.8, 0.99]
-  d_weight_decay: 0.0
-
-latent_noise:
-  enabled: false              # retired: RAE noise injection is a heuristic outside Alg. 2
-  kind: uniform
-  warmup_steps: 5000
-  sigma_max: 0.02
+    # z_weight / utt_weight removed 2026-06-11: frame-level SIGReg on p only
+    # (LeJEPA-pure). Collapse monitors: z_rank* and p_rank_utt gauges — if
+    # p_rank_utt sags toward 1-2, reintroduce utterance-level SIGReg.
 
 optim:
-  kind: scaled_adam             # scaled_adam | adamw
-  lr: 1.0e-3
-  betas: [0.9, 0.98]
-  eps: 3.0e-5
-  weight_decay: 1.0e-3
-  clipping_scale: 3.0
-  scalar_lr_scale: 0.1
-  param_min_rms: 1.0e-5
-  param_max_rms: 3.0
-  scalar_max: 10.0
-  size_update_period: 4
-  clipping_update_period: 100
+  lr: 5.0e-4                    # LeJEPA paper range: 5e-4 to 5e-3
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-5          # was 1e-2 (LeJEPA range 1e-1/1e-2/1e-5): at this scale it deletes encoder dims no loss constrains
   scheduler:
-    kind: eden
-    lr_batches: 20000
-    lr_epochs: 4
-    warmup_batches: 10000
-    warmup_start: 0.5
-  grad_clip: 0.5
+    warmup_steps: 2000
+    min_lr_ratio: 0.0
+  grad_clip: 1.0
 
 train:
   batch_size: 50
@@ -185,8 +128,8 @@ train:
   log_interval_steps: 10
   eval_interval_steps: 5000
   save_interval_steps: 10000
+  probe_interval_steps: 100   # embedding similarity probe (clean-vs-aug pos/neg MSE on z)
   val_batches: null       # Evaluate on the entire validation set
-  run_eval_on_save: true
 
 eval:
   enabled: true
@@ -196,11 +139,10 @@ eval:
     enabled: false
   asr:
     enabled: true
-    train_manifest: "data/shards/asr_eval_train/asr_eval_train-{000000..000010}.tar"
-    dev_manifest: "data/shards/asr_eval_val/asr_eval_val-{000000..000001}.tar"
+    train_manifest: "data/manifests/asr_probe_train.jsonl"
+    dev_manifest: "data/manifests/asr_probe_val.jsonl"
     text_key: text
-    steps: 1000
+    steps: 8000                 # was 1000: probe was far from converged, making ASR numbers uninformative
     batch_size: 16
     segment_seconds: 15.0 # Longer segments for CTC: 15s → ~187 frames
     max_samples: 500
-    use_latent: false

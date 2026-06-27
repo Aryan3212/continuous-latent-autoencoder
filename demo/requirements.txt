@@ -1,0 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchaudio
+numpy<2
+soundfile
+pydantic==2.10.6   # NOT >=2: pydantic 2.11 emits bool `additionalProperties`, crashing gradio_client (gradio#10792)
+pyyaml
+# gradio is installed by the Space from `sdk_version` in README.md (5.9.1) — do
+# not pin it here. config.py + models/ are cloned from GitHub at startup (app.py),
+# so this only lists the extra runtime deps the Space image needs.
