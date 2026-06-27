@@ -9,10 +9,12 @@
 # Architecture and loss weights live in exp_3m_gan.yaml — change them THERE, not
 # here, so checkpoints stay loadable across sessions.
 #
-# NOTE: max_steps / scheduler.total_steps stay at the base 30000. That spans the
-# WHOLE run (not one session); the wall-clock budget (--max_hours) ends each
-# session, and the scheduler state is restored on resume. Raise BOTH together to
-# train longer.
+# NOTE: train.max_steps stays at the base 30000 and spans the WHOLE run (not one
+# session); the LR schedule's total_steps now derives from it automatically, so
+# raise train.max_steps ALONE to train longer, e.g.
+#   bash scripts/kaggle_session.sh -- train.max_steps=60000
+# The wall-clock budget (--max_hours) ends each session; scheduler state restores
+# on resume.
 _base_: configs/exp_3m_gan.yaml
 
 run:

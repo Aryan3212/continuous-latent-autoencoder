@@ -182,7 +182,9 @@ class LossCfg(_Base):
 
 class SchedulerCfg(_Base):
     warmup_steps: int = 2000
-    total_steps: int = 200000
+    # None -> derived from train.max_steps at the Config level (they are always
+    # equal in practice). Set explicitly only to decay over a different horizon.
+    total_steps: Optional[int] = None
     min_lr_ratio: float = 0.0
 
 

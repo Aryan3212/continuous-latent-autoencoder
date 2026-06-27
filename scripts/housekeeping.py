@@ -1571,14 +1571,21 @@ def publish_checkpoint(
         config_path = tmp_dir / "config.yaml"
         config_path.write_text(cfg_yaml, encoding="utf-8")
 
-        # Upload ckpt under its canonical name.
-        api.upload_file(
-            path_or_fileobj=str(ckpt_path),
-            path_in_repo="last.pt",
-            repo_id=repo_id,
-            repo_type="model",
-            commit_message=msg,
-        )
+        # Upload the ckpt twice: `last.pt` is the rolling resume target (always
+        # overwritten), `step-<step>.pt` is a permanent stepped snapshot so prior
+        # runs (e.g. step-30320.pt) survive the next session instead of being
+        # overwritten. `step` comes straight from the checkpoint loaded above.
+        ckpt_uploads = ["last.pt"]
+        if isinstance(step, int):
+            ckpt_uploads.append(f"step-{step}.pt")
+        for path_in_repo in ckpt_uploads:
+            api.upload_file(
+                path_or_fileobj=str(ckpt_path),
+                path_in_repo=path_in_repo,
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=msg,
+            )
         api.upload_file(
             path_or_fileobj=str(readme_path),
             path_in_repo="README.md",
@@ -1778,7 +1785,7 @@ def audit_manifest_dir(
 # secrets, so they get sensible literal defaults.
 
 _DEFAULT_HF_REPO = "aryanrahman/clae-bengali"
-_DEFAULT_CKPT_REPO = "aryanrahman/clae-bengali-encoder"
+_DEFAULT_CKPT_REPO = "aryan3212/clae-bengali-encoder"
 
 
 def _data_root(arg: str | None) -> Path:

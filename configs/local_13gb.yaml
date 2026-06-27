@@ -115,7 +115,6 @@ optim:
   weight_decay: 1.0e-5
   scheduler:
     warmup_steps: 5000          # scaled ~proportionally with the longer schedule
-    total_steps: 150000         # match train.max_steps
     min_lr_ratio: 0.0
   grad_clip: 1.0
 

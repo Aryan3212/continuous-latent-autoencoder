@@ -446,7 +446,9 @@ def main() -> None:
 
     scfg = ocfg.scheduler
     warmup_steps = scfg.warmup_steps
-    total_steps = scfg.total_steps
+    # total_steps defaults to the whole run (train.max_steps); pin it in config
+    # only to decay over a different horizon. Raising max_steps alone extends both.
+    total_steps = scfg.total_steps if scfg.total_steps is not None else cfg.train.max_steps
     _cosine_inner = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, total_steps - warmup_steps),

@@ -32,7 +32,7 @@ set -euo pipefail
 
 # --- config knobs (override via env) --------------------------------------- #
 CONFIG="${CONFIG:-configs/kaggle_3m_gan.yaml}"
-CKPT_REPO="${HF_MODEL_REPO:-aryanrahman/clae-bengali-encoder}"
+CKPT_REPO="${HF_MODEL_REPO:-aryan3212/clae-bengali-encoder}"
 MAX_HOURS="${MAX_HOURS:-11.5}"                  # stop before Kaggle's 12h hard kill
 MANIFEST_DIR="${MANIFEST_DIR:-/kaggle/working/manifests}"
 # CKPT (the resume target + publish source) is resolved AFTER CLI parsing from
@@ -165,8 +165,37 @@ fi
 #     surfaces as a non-zero exit instead of being masked.
 # The 12h HARD kill is handled by --max_hours self-stopping FIRST — Kaggle's
 # post-SIGTERM grace window is too short to rely on for a network upload.
+# Periodic snapshot publisher (background): every SNAPSHOT_EVERY_SECS, publish the
+# newest last.pt. publish-checkpoint dual-uploads, so each run drops a permanent
+# step-<step>.pt alongside the rolling last.pt — mid-session insurance beyond the
+# single exit-time publish. Skipped if the checkpoint hasn't changed since last
+# push (no new save_interval write), so an idle interval is a no-op, not a commit.
+SNAPSHOT_EVERY_SECS="${SNAPSHOT_EVERY_SECS:-1800}"   # 30 min; set 0 to disable
+snapshot_loop() {
+  local last_mtime=""
+  while sleep "$SNAPSHOT_EVERY_SECS"; do
+    local ck m
+    ck="$(ls -t "$OUT_DIR"/*/checkpoints/last.pt 2>/dev/null | head -n1 || true)"
+    [[ -n "$ck" && -f "$ck" ]] || continue
+    m="$(stat -c %Y "$ck" 2>/dev/null || stat -f %m "$ck" 2>/dev/null || echo "")"
+    [[ -n "$m" && "$m" == "$last_mtime" ]] && continue
+    last_mtime="$m"
+    echo "[kaggle] periodic snapshot -> $CKPT_REPO ($ck)"
+    python scripts/housekeeping.py publish-checkpoint \
+      --ckpt "$ck" --repo-id "$CKPT_REPO" \
+      --commit-message "periodic snapshot $(date -u +%Y%m%dT%H%M%SZ)" \
+      || echo "[kaggle] periodic snapshot publish failed (continuing)"
+  done
+}
+SNAP_PID=""
+if [[ "$SNAPSHOT_EVERY_SECS" -gt 0 ]] 2>/dev/null; then
+  snapshot_loop & SNAP_PID=$!
+  echo "[kaggle] periodic snapshots every ${SNAPSHOT_EVERY_SECS}s (pid $SNAP_PID)"
+fi
+
 publish_on_exit() {
   local rc=$?
+  [[ -n "$SNAP_PID" ]] && kill "$SNAP_PID" 2>/dev/null || true
   local ckpt="$CKPT"
   # Fall back to the newest last.pt under OUT_DIR if the resolved path is
   # missing (unresolved run_id, or a path drift we didn't anticipate) — better
