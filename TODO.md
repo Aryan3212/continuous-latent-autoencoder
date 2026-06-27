@@ -54,6 +54,13 @@ Speaker verification is the live candidate — ours already beat WavLM/MMS/Mimi 
 - [ ] Secondary candidates if speaker holds: **gender** (cheap, near-ceiling), **age** (Common Voice tags), **accent/dialect** (IndicVoices region labels) — all identity/stationary, our strength.
 - [ ] Avoid leading with emotion/ASR until reconstruction run proves it moved.
 
+## 7b. Deferred eval — Whisper adapter probe (Tier 3, offline)
+Strongest *linguistic-content-of-the-encoder* eval; NOT for the 51-min Kaggle window.
+- [ ] Train a small adapter: `encoder frames (B,d,T @ 12.5Hz) → projection/upsample → Whisper decoder → Bangla text`. Freeze the encoder and Whisper; train only the adapter.
+- [ ] Handle the frame-rate mismatch (12.5Hz → Whisper's expected rate) inside the adapter.
+- [ ] Report WER/CER on a speaker-disjoint Bangla holdout. Threshold of interest: WER < 50% = encoder carries real linguistic content.
+- [ ] Distinct from the decoder-intelligibility oracle (Whisper end-to-end ASR on *decoded audio*) — that tests the decoder, this tests the encoder. Both deferred out of the 51-min run.
+
 ## 8. Eval harness status (done, reusable)
 `eval/repr_bench.py` (shared) + `eval_speaker_eer.py`, `eval_speaker_id.py`,
 `eval_emotion.py`, `eval_emotion_temporal.py`, `eval_emotion_transformer.py`,
