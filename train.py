@@ -751,14 +751,22 @@ def main() -> None:
                 if disc_active and adaptive_adv:
                     if lam_adv_cached is None:
                         last_w = _unwrap(model["decoder"]).out_conv.weight
-                        gs = 1.0e3
+                        # gs lifts grads off the fp16 underflow floor; it cancels in
+                        # the ratio so its value is arbitrary. Kept modest (not 1e3)
+                        # so gs*l_adv can't overflow fp16 to inf -> inf/inf = NaN.
+                        gs = 1.0e1
                         rec_g = torch.autograd.grad(
                             gs * (stft_w * l_stft + wav_l1_w * l_wav), last_w, retain_graph=True
                         )[0]
                         adv_g = torch.autograd.grad(gs * l_adv, last_w, retain_graph=True)[0]
                         lam_adv_cached = (
-                            rec_g.float().norm() / (adv_g.float().norm() + 1e-4)
-                        ).clamp(0.0, adaptive_max).detach()
+                            rec_g.float().norm() / (adv_g.float().norm() + gs * 1e-3)
+                        ).clamp(0.0, adaptive_max)
+                        # clamp bounds inf but passes NaN through (inf/inf at GAN
+                        # onset when adv_g underflows); nan->0 is the load-bearing guard.
+                        lam_adv_cached = torch.nan_to_num(
+                            lam_adv_cached, nan=0.0, posinf=adaptive_max
+                        ).detach()
                     lam_adv = lam_adv_cached
 
                 loss = (
