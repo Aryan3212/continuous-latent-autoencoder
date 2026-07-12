@@ -101,7 +101,7 @@ loss:
     weight: 3.0                 # JEPA is the semantic objective of this research (no teacher/distillation by design) — weighting unchanged
     num_globals: 2
     num_locals: 4
-    context_weight: 1.0
+
   sigreg:
     weight: 0.2
     num_slices: 256

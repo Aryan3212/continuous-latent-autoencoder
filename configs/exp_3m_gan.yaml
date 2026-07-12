@@ -103,7 +103,7 @@ loss:
     weight: 6.0                    # was 3.0: main ASR/representation lever, increased
     num_globals: 2
     num_locals: 4
-    context_weight: 1.0
+
   sigreg:
     weight: 0.05                   # unchanged
     num_slices: 1024

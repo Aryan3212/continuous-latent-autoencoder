@@ -101,7 +101,7 @@ loss:
     # cross-global consistency. Total views = num_globals + num_locals.
     num_globals: 2              # lightly-augmented anchor views (no waveform chunk mask)
     num_locals: 4               # heavily-masked views (waveform chunk mask applied)
-    context_weight: 1.0         # V-JEPA 2.1: relative weight of L_context vs L_predict
+
   sigreg:
     weight: 0.05                  # LeJEPA paper recommendation (robust across experiments)
     num_slices: 1024

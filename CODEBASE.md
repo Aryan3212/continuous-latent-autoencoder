@@ -44,10 +44,9 @@ interfaces use channels-first `(B, D, T)` as noted.
   runs a discriminator update (real vs detached fake) then adds the generator
   adversarial + feature-matching terms with D frozen (grad still flows to the
   decoder, but D grads aren't corrupted under grad accumulation). `L_fm` is
-  additionally gated on `fm_start_step`. `L_jepa` is the V-JEPA global/local
-  dense loss
-  (`l_global` + `l_predict` + `context_weight·l_context`); `l_global ≡ 0` when
-  `num_globals == 1`. `L_sig` is frame-level SIGReg on the projector output.
+  additionally gated on `fm_start_step`. `L_jepa` = MSE(globals, center) + MSE(locals, center)
+  (uniform 1:1, no context weight). `L_sig` is frame-level SIGReg on the
+  projector output.
   Validation computes `val_stft` only; the val dataloader is built once at
   startup.
 - Configs: `configs/exp0.yaml` (cloud, ~6M params, d_model 192),
@@ -78,27 +77,28 @@ Frozen-encoder probes + reconstruction metrics.
 
 ## Data prep + HF I/O (`scripts/housekeeping.py`)
 
-One self-contained file (no package) holding the whole data/artifact pipeline,
-driven by `python scripts/housekeeping.py <cmd>` and the `Makefile`. The adapter
-pattern lives inside it: per-source `DatasetAdapter` subclasses (openslr53,
-common_voice_bn, bengaliai_speech, regspeech12, indicvoices, subak_ko,
-shrutilipi, kathbath — each `download()` + `iter_records()`), registered in the
-`REGISTRY` dict. The
-`pack_to_dir` step writes 16 kHz mono FLAC under `audio/<dataset>/` plus four
-JSONL manifests (train/val/asr_probe_{train,val}); `push_to_hub`/`fetch_dataset`
-move the packed layout to/from HF Hub; `publish_checkpoint` uploads a trained
-`last.pt` + model card. Subcommands: download, build, audit, push, fetch,
-pack-and-push, publish-checkpoint. Credentials are read from the environment at
-point of use (`os.environ["HF_TOKEN"]` etc.) —
-there is no committed creds file. They live in the gitignored `.env` (template:
-`.env.example`); on a fresh GPU VM, `./setup.sh` sources `.env` and runs deps →
-fetch → train in one shot (`--no-train` to stop after the data fetch). Running
-`make` targets standalone (e.g. on a prep instance) requires sourcing `.env`
-first: `set -a && . ./.env && set +a`. Only `HF_TOKEN` is needed for training;
-`KAGGLE_*` (regspeech12, bengaliai_speech) and `MDC_API_KEY` (common_voice_bn)
-only for `make pack-and-push`/`download` on a prep instance. The
-`bengaliai_speech` competition also requires accepting its rules once at
-kaggle.com/competitions/bengaliai-speech.
+One self-contained file (no package) holding the data pipeline + checkpoint
+artifact CLI, driven by `python scripts/housekeeping.py <cmd>` and the
+`Makefile`. The adapter pattern lives inside it: per-source `DatasetAdapter`
+subclasses (openslr53, common_voice_bn, bengaliai_speech, regspeech12,
+indicvoices, subak_ko, shrutilipi, kathbath — each `download()` +
+`iter_records()`), registered in the `REGISTRY` dict.
+
+Subcommands:
+- `download` — fetch raw archives from HF/Kaggle/OpenSLR into `DATA_ROOT`.
+- `make-manifests` — iterate adapter records, split train/val, write JSONL
+  manifests. Accepts `--map NAME=PATH` (Kaggle) or `--data-root` + `--datasets`
+  (local workflow).
+- `publish-checkpoint` — upload `last.pt` + model card + config to HF model repo.
+- `fetch-checkpoint` — download the latest published checkpoint from HF (for
+  multi-session resume).
+
+Credentials are read from the environment at point of use (`os.environ["HF_TOKEN"]`
+etc.) — there is no committed creds file. They live in the gitignored `.env`
+(template: `.env.example`). Only `HF_TOKEN` is needed for training; `KAGGLE_*`
+(regspeech12, bengaliai_speech) and `MDC_API_KEY` (common_voice_bn) only for
+`make download-data` on a prep instance. The `bengaliai_speech` competition also
+requires accepting its rules once at kaggle.com/competitions/bengaliai-speech.
 
 ## Data loading + augmentation
 
