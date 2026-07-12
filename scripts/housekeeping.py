@@ -1,29 +1,3 @@
-"""Combined data + artifact housekeeping utility (one file, no package).
-
-Everything for moving datasets and checkpoints to/from HF Hub, plus the
-per-source dataset adapters, lives here. Run from the repo root:
-
-    python scripts/housekeeping.py <subcommand> [args...]
-
-Subcommands:
-    download             Download raw archives for the given adapters.
-    build                Pack records into a staging dir (audio + manifests).
-    audit                Probe rows in staging manifests (debug; build runs audit too).
-    push                 Upload a staging dir to a HF dataset repo.
-    fetch                Snapshot-download a packed HF dataset repo (train-side pull).
-    pack-and-push        Convenience: build + push in one shot (prep instance).
-    publish-checkpoint   Upload a ``last.pt`` + model card to a HF model repo.
-
-Credentials come straight from the environment (sourced from .env by setup.sh):
-``HF_TOKEN`` (all HF ops), ``KAGGLE_USERNAME``/``KAGGLE_KEY`` (regspeech12,
-bengaliai_speech), ``MDC_API_KEY`` (common_voice_bn). A missing key is a hard
-``KeyError``.
-
-The adapter pattern is preserved: each source is a ``DatasetAdapter`` subclass
-with ``download()`` + ``iter_records()``. Heavy deps (torch/torchaudio/
-soundfile/pandas/pyarrow/huggingface_hub/...) are imported lazily inside the
-functions that need them so the bare CLI stays import-light.
-"""
 from __future__ import annotations
 
 import abc
@@ -40,20 +14,12 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable, Iterator, List, Optional, Sequence, TypedDict
 
-# Allow running directly as `python scripts/housekeeping.py` — put the repo root
-# on sys.path so repo-root imports (schema, config, ...) resolve regardless of cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-
-
-# =========================================================================== #
-# Schema
-# =========================================================================== #
 
 
 class Record(TypedDict, total=False):
@@ -74,11 +40,6 @@ class Record(TypedDict, total=False):
     language: Optional[str]
 
 
-# =========================================================================== #
-# Adapter base
-# =========================================================================== #
-
-
 class DatasetAdapter(abc.ABC):
     """Per-dataset surface: download raw archives, yield unified Records."""
 
@@ -93,14 +54,15 @@ class DatasetAdapter(abc.ABC):
         be a no-op (or only re-fetch missing parts). Returns the raw-data
         directory used as input to ``iter_records``.
         """
+        ...
 
     @abc.abstractmethod
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
         """Yield one ``Record`` per audio clip.
 
-        ``audio_filepath`` should be an absolute path on the prep instance.
-        The pack step is responsible for transcoding and rewriting paths.
+        ``audio_filepath`` should be an absolute path.
         """
+        ...
 
 
 # =========================================================================== #
@@ -291,10 +253,11 @@ class OpenSLR53Adapter(DatasetAdapter):
         out_dir = dest_root / "OpenSLR53"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # utt_spk_text.tsv is a standalone top-level file (not bundled in any
-        # part zip) — fetch it separately, idempotently.
         asr_bengali_dir = out_dir / "asr_bengali"
         asr_bengali_dir.mkdir(parents=True, exist_ok=True)
+
+        # utt_spk_text.tsv is a standalone top-level file (not bundled in any
+        # part zip) — fetch it separately, idempotently.
         tsv_path = asr_bengali_dir / "utt_spk_text.tsv"
         if not tsv_path.exists():
             tsv_url = "https://www.openslr.org/resources/53/utt_spk_text.tsv"
@@ -378,8 +341,7 @@ class CommonVoiceBnAdapter(DatasetAdapter):
     ``cv-corpus-*/bn/clips/*.mp3`` plus ``*.tsv`` manifests. For self-supervised
     pretraining we enumerate the ``clips/`` dir directly (every recorded clip —
     ~1M for bn), attaching transcripts/speaker from the validated/invalidated/
-    other TSVs where present, instead of emitting only the small ``validated.tsv``
-    subset (~44k) the old path was limited to.
+    other TSVs where present.
     """
 
     name = "common_voice_bn"
@@ -426,7 +388,7 @@ class CommonVoiceBnAdapter(DatasetAdapter):
                 resp.raise_for_status()
                 info = resp.json()
                 break
-            except Exception as e:  # noqa: BLE001 — try the next host
+            except Exception as e:
                 last_err = e
                 print(f"[common_voice_bn] {url} failed: {e}")
         if info is None:
@@ -441,6 +403,7 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         tar_path = out_dir / filename
 
         # 2) Stream the presigned URL to disk (already signed — no auth header).
+
         print(f"[common_voice_bn] downloading {filename} (~{size_gb} GB)")
         with requests.get(dl_url, stream=True, timeout=600) as r:
             r.raise_for_status()
@@ -473,8 +436,6 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         direct = raw_dir / "clips"
         if direct.is_dir():
             return direct
-        # Bounded globs first so we never rglob a 1M-file tree on the common
-        # (flat) mount; rglob is only the last-resort fallback.
         for pat in ("*/clips", "*/*/clips", "*/*/*/clips"):
             for p in raw_dir.glob(pat):
                 if p.is_dir():
@@ -496,8 +457,7 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         # invalidated / other (train/dev/test are subsets of validated), so the
         # union of those three carries the metadata for the whole corpus. This
         # is ONLY for metadata — the authoritative clip list is the clips/ dir
-        # below, so self-supervised training sees all ~1M clips rather than the
-        # validated ~4% the old validated.tsv-only path emitted.
+        # below, so self-supervised training sees all ~1M clips.
         meta: dict[str, tuple[Optional[str], Optional[str]]] = {}
         for name in ("validated.tsv", "invalidated.tsv", "other.tsv"):
             tsv = cv_dir / name
@@ -566,8 +526,8 @@ class CommonVoiceBnAdapter(DatasetAdapter):
 def _authenticate_kaggle() -> "object":
     from kaggle.api.kaggle_api_extended import KaggleApi
 
-    # KaggleApi reads KAGGLE_USERNAME / KAGGLE_KEY from the env (set from .env).
-    # Touch them so a missing key fails fast here rather than inside the SDK.
+    # KaggleApi reads KAGGLE_USERNAME / KAGGLE_KEY from the env. Touch them so
+    # a missing key fails fast here rather than inside the SDK.
     _ = os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"]
     api = KaggleApi()
     api.authenticate()
@@ -625,8 +585,8 @@ class RegSpeech12Adapter(DatasetAdapter):
                 print(f"[regspeech12] failed to read {xlsx!s}: {e}")
                 continue
 
-            # Heuristic column resolution; the original script does the same.
             cols = list(df.columns)
+            # Heuristic column resolution; the original script does the same.
             id_candidates = ["id", "file_name", "filename", "audio", "path", cols[0]]
             text_candidates = [
                 "sentence",
@@ -645,7 +605,6 @@ class RegSpeech12Adapter(DatasetAdapter):
                 file_id = str(row[id_col])
                 text = str(row[text_col]) if row[text_col] is not None else None
 
-                # Filename in the sheet may or may not carry an extension.
                 audio_path = audio_root / file_id
                 if not audio_path.exists():
                     found = None
@@ -679,10 +638,9 @@ class BengaliAISpeechAdapter(DatasetAdapter):
     This is a Kaggle *competition* (not a dataset), so you must accept the
     rules once at kaggle.com/competitions/bengaliai-speech before the API
     will serve the files; otherwise the download 403s. Layout after unzip:
-    ``train.csv`` (columns ``id,sentence,split``) + ``train_mp3s/<id>.mp3``
-    (the unlabeled ``test_mp3s/`` is ignored). We emit every labeled row;
-    the competition's own train/valid split is ignored since pack does its
-    own train/val partition.
+    ``train.csv`` (columns ``id,sentence,split``) + ``train_mp3s/<id>.mp3``.
+    We emit every labeled row; the competition's own train/valid split is
+    ignored since pack does its own train/val partition.
     """
 
     name = "bengaliai_speech"
@@ -735,11 +693,12 @@ class BengaliAISpeechAdapter(DatasetAdapter):
             print(f"[bengaliai_speech] unexpected csv columns: {list(df.columns)}")
             return
 
-        for file_id, sentence in zip(df["id"].tolist(), df["sentence"].tolist()):
-            file_id = str(file_id)
+        for _, row in df.iterrows():
+            file_id = str(row["id"])
             audio_path = clips_dir / f"{file_id}.mp3"
             if not audio_path.exists():
                 continue
+            sentence = row["sentence"]
             text = None if sentence is None or pd.isna(sentence) else str(sentence)
             rec: Record = {
                 "audio_filepath": str(audio_path),
@@ -821,12 +780,10 @@ class ShrutilipiAdapter(DatasetAdapter):
 
 
 class KathbathAdapter(DatasetAdapter):
-    """Bengali eval/probe corpus (valid-* shards). pack does NOT special-case
-    kathbath — there is no automatic routing to a probe manifest. To keep it as
-    a held-out eval set, it must be excluded from the pretraining ``--datasets``
-    list; that's why it's left out of the Makefile default. It remains
-    registered here so it can still be downloaded explicitly via
-    ``DATASETS=kathbath``.
+    """Bengali eval/probe corpus (valid-* shards). To keep it as a held-out
+    eval set, exclude it from pretraining ``--datasets``; that's why it's
+    left out of the Makefile default. It remains registered here so it can
+    still be downloaded explicitly via ``DATASETS=kathbath``.
     """
 
     name = "kathbath"
@@ -877,205 +834,6 @@ def get_adapter(name: str) -> DatasetAdapter:
     return REGISTRY[name]()
 
 
-# =========================================================================== #
-# Audit (parallel sanity check over raw audio paths before packing)
-# =========================================================================== #
-
-
-def _audit_one(args: tuple[int, dict[str, Any], float, float]) -> dict[str, Any]:
-    """Worker: probe one audio file. Validity = ``torchaudio.load(num_frames=1)``
-    (the call training makes; ``info`` is unreliable on mp3). Duration is a
-    best-effort extra from ``info`` that never drops a loadable file on its own
-    failure. Returns ``{index, status, ...}`` with ``status`` one of ``ok``,
-    ``missing``, ``too_short``, ``too_long``, ``corrupt``.
-    """
-    import torchaudio
-
-    idx, rec, min_duration, max_duration = args
-    path = rec.get("audio_filepath")
-    if not path or not Path(path).exists():
-        return {"index": idx, "status": "missing", "path": path}
-    try:
-        torchaudio.load(path, num_frames=1)
-    except Exception as e:
-        return {"index": idx, "status": "corrupt", "path": path, "error": str(e)}
-    dur: Optional[float] = None
-    try:  # best-effort duration; failure here must not drop a loadable file
-        info = torchaudio.info(path)
-        if info.sample_rate > 0 and info.num_frames > 0:
-            dur = info.num_frames / float(info.sample_rate)
-    except Exception:
-        dur = None
-    if dur is not None and dur < min_duration:
-        return {"index": idx, "status": "too_short", "path": path, "duration": dur}
-    if dur is not None and dur > max_duration:
-        return {"index": idx, "status": "too_long", "path": path, "duration": dur}
-    res = {"index": idx, "status": "ok", "path": path}
-    if dur is not None:
-        res["duration"] = dur
-    return res
-
-
-_ALL_BAD_STATUSES = frozenset({"missing", "corrupt", "empty", "too_short", "too_long"})
-
-
-def audit_records(
-    records: Iterable[Record],
-    num_workers: int = 4,
-    min_duration: float = 1.0,
-    max_duration: float = 30.0,
-    drop_statuses: Optional[Iterable[str]] = None,
-) -> tuple[list[Record], dict[str, Any]]:
-    """Probe every record's audio file in parallel and drop bad rows.
-
-    ``drop_statuses`` selects which verdicts are dropped; the rest are kept.
-    Default drops everything that isn't ``ok`` (the strict build-time filter).
-    To clean only the truly-broken files while keeping out-of-duration clips
-    (the loader zero-pads short ones), pass ``{"missing", "corrupt", "empty"}``.
-
-    Returns ``(kept_records, report)``. Kept rows get their ``duration`` field
-    overwritten with the measured value when available. The report dict has
-    per-status counts plus the parameters used.
-    """
-    drop = frozenset(drop_statuses) if drop_statuses is not None else _ALL_BAD_STATUSES
-    from tqdm import tqdm
-
-    rec_list: list[Record] = list(records)
-    work = [
-        (i, dict(r), min_duration, max_duration) for i, r in enumerate(rec_list)
-    ]
-
-    results: list[dict[str, Any]] = []
-    if num_workers <= 1:
-        for w in tqdm(work, total=len(work), desc="audit"):
-            results.append(_audit_one(w))
-    else:
-        with ProcessPoolExecutor(max_workers=num_workers) as ex:
-            for res in tqdm(
-                ex.map(_audit_one, work, chunksize=64),
-                total=len(work),
-                desc="audit",
-            ):
-                results.append(res)
-
-    counts: dict[str, int] = {}
-    kept: list[Record] = []
-    for res in results:
-        st = res["status"]
-        counts[st] = counts.get(st, 0) + 1
-        if st in drop:
-            continue
-        rec = rec_list[res["index"]]
-        if "duration" in res:
-            rec["duration"] = res["duration"]
-        kept.append(rec)
-
-    report = {
-        "total": len(rec_list),
-        "kept": len(kept),
-        "counts": counts,
-        "min_duration": min_duration,
-        "max_duration": max_duration,
-    }
-    print("[audit] summary:")
-    for k, v in counts.items():
-        print(f"  {k}: {v}")
-    print(f"[audit] kept {len(kept)} / {len(rec_list)} rows")
-    return kept, report
-
-
-# =========================================================================== #
-# Pack (resample + transcode + split + manifest emission)
-# =========================================================================== #
-
-
-def _safe_id(rec: Record) -> str:
-    """Stable filename stem: prefer ``id``, fall back to a hash of the path."""
-    rid = rec.get("id")
-    if rid:
-        # Sanitize: replace path separators / spaces to keep the filename safe.
-        return str(rid).replace("/", "_").replace("\\", "_").replace(" ", "_")
-    src = rec.get("audio_filepath", "")
-    return hashlib.sha1(src.encode("utf-8")).hexdigest()[:16]
-
-
-def _transcode_one(
-    rec: Record,
-    staging_dir: Path,
-    target_sr: int,
-    min_duration: float,
-    max_duration: float,
-    skip_existing: bool,
-) -> tuple[Record | None, str]:
-    """Validate + transcode one source file in a single read of the file.
-
-    Reads the source once, filters on duration, and writes
-    ``staging_dir/audio/<dataset>/<id>.flac``. Returns ``(record, status)``
-    where ``status`` is one of ``ok``, ``missing``, ``decode_error``,
-    ``too_short``, ``too_long``, ``transcode_error``. The record is ``None``
-    for every non-``ok`` status. This is the only place that drops bad rows —
-    there is no separate pre-pass.
-    """
-    import soundfile as sf
-    import torchaudio
-    import torchaudio.functional as AF
-
-    src = rec.get("audio_filepath")
-    if not src or not Path(src).exists():
-        return None, "missing"
-
-    dataset = rec["dataset"]
-    stem = _safe_id(rec)
-    rel_path = Path("audio") / dataset / f"{stem}.flac"
-    out_path = staging_dir / rel_path
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    new_rec: Record = dict(rec)  # shallow copy; we don't mutate caller's record
-
-    if skip_existing and out_path.exists():
-        # Trust a prior transcode. Refresh duration from the existing file so
-        # the manifest is internally consistent.
-        try:
-            info = sf.info(str(out_path))
-        except Exception:
-            out_path.unlink(missing_ok=True)  # cached file is bad — redo it
-        else:
-            new_rec["audio_filepath"] = rel_path.as_posix()
-            new_rec["duration"] = float(info.duration)
-            new_rec["sample_rate"] = int(info.samplerate)
-            return new_rec, "ok"
-
-    try:
-        wav, sr = torchaudio.load(src)
-    except Exception as e:
-        print(f"[pack] decode failed for {src}: {e}")
-        return None, "decode_error"
-
-    if wav.size(0) > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    duration = wav.size(-1) / float(sr)
-    if duration < min_duration:
-        return None, "too_short"
-    if duration > max_duration:
-        return None, "too_long"
-
-    try:
-        if int(sr) != int(target_sr):
-            wav = AF.resample(wav, int(sr), int(target_sr))
-        samples = wav.squeeze(0).contiguous().cpu().numpy()
-        sf.write(
-            str(out_path), samples, int(target_sr), format="FLAC", subtype="PCM_16"
-        )
-    except Exception as e:
-        print(f"[pack] transcode failed for {src}: {e}")
-        return None, "transcode_error"
-
-    new_rec["audio_filepath"] = rel_path.as_posix()
-    new_rec["sample_rate"] = int(target_sr)
-    new_rec["duration"] = float(samples.shape[-1] / target_sr)
-    return new_rec, "ok"
-
-
 def _per_dataset_split(
     records: list[Record], val_pct: float, rng: random.Random
 ) -> tuple[list[Record], list[Record]]:
@@ -1104,195 +862,17 @@ def _write_jsonl(path: Path, rows: list[Record]) -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
-def _write_readme(staging_dir: Path, build_meta: dict[str, Any]) -> None:
-    sources = ", ".join(build_meta.get("adapters", []))
-    total = build_meta.get("packed_total", 0)
-    body = (
-        "---\n"
-        "language:\n"
-        "- bn\n"
-        "license: other\n"
-        "task_categories:\n"
-        "- automatic-speech-recognition\n"
-        "tags:\n"
-        "- bengali\n"
-        "- audio\n"
-        "- self-supervised\n"
-        "---\n\n"
-        "# Bengali Speech Corpus\n\n"
-        f"Aggregated Bengali speech corpus packed by `scripts/housekeeping.py`.\n\n"
-        f"- Sources: {sources}\n"
-        f"- Total rows (packed): {total}\n"
-        f"- Sample rate: {build_meta.get('target_sr')} Hz mono FLAC\n\n"
-        "Manifests under `manifests/`. Audio paths are relative to the repo root.\n"
-        "License placeholder: each underlying source retains its original license; verify before redistribution.\n"
-    )
-    (staging_dir / "README.md").write_text(body, encoding="utf-8")
-
-
-def _write_build_meta(staging_dir: Path, build_meta: dict[str, Any]) -> None:
-    import yaml
-
-    (staging_dir / "build_meta.yaml").write_text(
-        yaml.safe_dump(build_meta, sort_keys=False), encoding="utf-8"
-    )
-
-
-def pack_to_dir(
-    adapters: list[DatasetAdapter],
-    download_root: Path,
-    staging_dir: Path,
-    target_sr: int = 16000,
-    val_pct: float = 0.05,
-    asr_probe_pct: float = 0.2,
-    seed: int = 42,
-    min_duration: float = 1.0,
-    max_duration: float = 30.0,
-    skip_existing: bool = True,
-    asr_probe_max_rows: int = 50000,
-    asr_probe_val_max_rows: int = 5000,
-) -> dict[str, Any]:
-    """Download (idempotent), transcode to 16k mono FLAC (with inline duration
-    filtering), split, write manifests.
-
-    Returns the build_meta dict (also written to ``staging_dir/build_meta.yaml``).
-    """
-    from tqdm import tqdm
-
-
-    staging_dir = Path(staging_dir)
-    download_root = Path(download_root)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    download_root.mkdir(parents=True, exist_ok=True)
-
-    # 1) Download + iter_records per adapter.
-    raw_counts: dict[str, int] = {}
-    all_records: list[Record] = []
-    for adapter in adapters:
-        print(f"[pack] downloading {adapter.name} -> {download_root}")
-        raw_dir = adapter.download(download_root)
-        print(f"[pack] iterating records for {adapter.name} from {raw_dir}")
-        recs = list(adapter.iter_records(Path(raw_dir)))
-        raw_counts[adapter.name] = len(recs)
-        all_records.extend(recs)
-        print(f"[pack]   {adapter.name}: {len(recs)} raw records")
-
-    # 2) Single validate + transcode pass. Each file is read once: duration
-    # filtering and bad-row dropping happen inside _transcode_one (no separate
-    # audit pre-pass). Serial because torchaudio/soundfile are I/O-bound and
-    # parallel decode adds memory + process-startup overhead that doesn't pay
-    # off until well above 100k files.
-    packed: list[Record] = []
-    status_counts: dict[str, int] = {}
-    for rec in tqdm(all_records, total=len(all_records), desc="transcode"):
-        new_rec, status = _transcode_one(
-            rec, staging_dir, target_sr, min_duration, max_duration, skip_existing
-        )
-        status_counts[status] = status_counts.get(status, 0) + 1
-        if new_rec is not None:
-            packed.append(new_rec)
-
-    print("[pack] transcode summary:")
-    for k, v in sorted(status_counts.items()):
-        print(f"  {k}: {v}")
-    print(f"[pack] kept {len(packed)} / {len(all_records)} rows")
-
-    packed_counts: dict[str, int] = {}
-    for r in packed:
-        packed_counts[r["dataset"]] = packed_counts.get(r["dataset"], 0) + 1
-
-    # 4) Deterministic shuffle.
-    rng = random.Random(seed)
-    rng.shuffle(packed)
-
-    # 5) Per-dataset train/val split.
-    train_rows, val_rows = _per_dataset_split(packed, val_pct, rng)
-    print(f"[pack] split: {len(train_rows)} train / {len(val_rows)} val")
-
-    # 6) Write the four manifests.
-    manifests_dir = staging_dir / "manifests"
-    _write_jsonl(manifests_dir / "train.jsonl", train_rows)
-    _write_jsonl(manifests_dir / "val.jsonl", val_rows)
-
-    train_text = [r for r in train_rows if r.get("text")]
-    val_text = [r for r in val_rows if r.get("text")]
-
-    probe_train_n = min(
-        asr_probe_max_rows, max(0, int(round(len(train_text) * asr_probe_pct)))
-    )
-    probe_val_n = min(asr_probe_val_max_rows, len(val_text))
-
-    # Stable subsample via a dedicated RNG so train.jsonl ordering doesn't leak in.
-    probe_rng = random.Random(seed + 1)
-    probe_train = list(train_text)
-    probe_rng.shuffle(probe_train)
-    probe_train = probe_train[:probe_train_n]
-
-    probe_val = list(val_text)
-    probe_rng.shuffle(probe_val)
-    probe_val = probe_val[:probe_val_n]
-
-    _write_jsonl(manifests_dir / "asr_probe_train.jsonl", probe_train)
-    _write_jsonl(manifests_dir / "asr_probe_val.jsonl", probe_val)
-    print(
-        f"[pack] asr probe: {len(probe_train)} train / {len(probe_val)} val "
-        f"(text-labeled pool: {len(train_text)} train / {len(val_text)} val)"
-    )
-
-    # 7) build_meta.yaml.
-    build_meta: dict[str, Any] = {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
-        "git_hash": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
-        "adapters": [a.name for a in adapters],
-        "target_sr": int(target_sr),
-        "val_pct": float(val_pct),
-        "seed": int(seed),
-        "min_duration": float(min_duration),
-        "max_duration": float(max_duration),
-        "raw_counts": raw_counts,
-        "packed_counts": packed_counts,
-        "transcode_status_counts": status_counts,
-        "train_rows": len(train_rows),
-        "val_rows": len(val_rows),
-        "asr_probe_train_rows": len(probe_train),
-        "asr_probe_val_rows": len(probe_val),
-        "packed_total": len(packed),
-    }
-    _write_build_meta(staging_dir, build_meta)
-
-    # 8) Minimal README dataset card.
-    _write_readme(staging_dir, build_meta)
-
-    print(f"[pack] done. staging dir: {staging_dir}")
-    return build_meta
-
-
-# =========================================================================== #
-# Manifest-only build (no transcode; absolute paths into already-mounted raw
-# datasets, e.g. Kaggle's read-only /kaggle/input/<slug>/). Train directly off
-# the attached sources — the loader resamples + downmixes on the fly — instead
-# of repacking to FLAC (which would blow a tight disk budget).
-# =========================================================================== #
-
-
 def build_manifests_only(
     adapters_with_dirs: list[tuple[DatasetAdapter, Path]],
     out_dir: Path,
     val_pct: float = 0.05,
     seed: int = 42,
-    audit: bool = False,
-    num_workers: int = 4,
-    min_duration: float = 1.0,
-    max_duration: float = 30.0,
 ) -> dict[str, Any]:
     """Walk attached raw datasets and write ``train.jsonl`` / ``val.jsonl`` with
     ABSOLUTE audio paths — no transcode, no copy.
 
     Each adapter's ``iter_records`` runs against its already-mounted raw dir, so
-    the rows point straight at the read-only source. ``audit`` is off by default:
-    the loader tolerates any clip length (short clips are zero-padded) and the
-    adapters already skip missing files, so probing every file (slow, and needs
-    soundfile's mp3 support) is opt-in.
+    the rows point straight at the read-only source.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1307,12 +887,15 @@ def build_manifests_only(
             )
         print(f"[manifest] {adapter.name}: iterating records from {raw_dir}")
         recs = list(adapter.iter_records(raw_dir))
+        for r in recs:
+            r["dataset"] = adapter.name
+            p = r.get("audio_filepath")
+            if p and not os.path.isabs(p):
+                r["audio_filepath"] = str((raw_dir / p).resolve())
         raw_counts[adapter.name] = len(recs)
         all_records.extend(recs)
         print(f"[manifest]   {adapter.name}: {len(recs)} records")
         if not recs:
-            # Loudest, most actionable diagnostic: the #1 failure mode is a wrong
-            # --map path (Kaggle often nests the data one level under the slug).
             listing = (
                 sorted(p.name for p in raw_dir.iterdir())[:25]
                 if raw_dir.is_dir()
@@ -1326,15 +909,6 @@ def build_manifests_only(
     if not all_records:
         raise SystemExit("[manifest] no records from any adapter — check --map paths.")
 
-    if audit:
-        all_records, _ = audit_records(
-            all_records,
-            num_workers=num_workers,
-            min_duration=min_duration,
-            max_duration=max_duration,
-        )
-
-    # Deterministic shuffle + per-dataset split (so both splits see every source).
     rng = random.Random(seed)
     rng.shuffle(all_records)
     train_rows, val_rows = _per_dataset_split(all_records, val_pct, rng)
@@ -1347,445 +921,27 @@ def build_manifests_only(
         "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
         "mode": "manifest_only",
         "sources": {a.name: str(d) for a, d in adapters_with_dirs},
-        "audit": bool(audit),
         "raw_counts": raw_counts,
         "train_rows": len(train_rows),
         "val_rows": len(val_rows),
         "val_pct": float(val_pct),
         "seed": int(seed),
     }
-    _write_build_meta(out_dir, meta)
+    import yaml
+
+    (out_dir / "build_meta.yaml").write_text(
+        yaml.safe_dump(meta, sort_keys=False), encoding="utf-8"
+    )
     print(f"[manifest] done. manifests in: {out_dir}")
     return meta
 
 
 # =========================================================================== #
-# Push (upload a packed staging dir to a HF dataset repo)
-# =========================================================================== #
-
-
-_GITATTRIBUTES = (
-    "*.flac filter=lfs diff=lfs merge=lfs -text\n"
-    "*.wav filter=lfs diff=lfs merge=lfs -text\n"
-    "*.mp3 filter=lfs diff=lfs merge=lfs -text\n"
-)
-
-
-def push_to_hub(
-    staging_dir: Path,
-    repo_id: str,
-    commit_message: str | None = None,
-    private: bool = True,
-) -> str:
-    """Create-or-update a HF dataset repo from ``staging_dir``. Returns the repo URL."""
-    from huggingface_hub import HfApi
-
-
-    staging_dir = Path(staging_dir)
-    tok = os.environ["HF_TOKEN"]
-
-    # Make LFS tracking explicit for the binary audio extensions.
-    gitattributes = staging_dir / ".gitattributes"
-    if not gitattributes.exists():
-        gitattributes.write_text(_GITATTRIBUTES, encoding="utf-8")
-
-    api = HfApi(token=tok)
-    api.create_repo(
-        repo_id=repo_id,
-        repo_type="dataset",
-        exist_ok=True,
-        private=private,
-    )
-
-    git_hash = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-    msg = commit_message or f"pack {git_hash}"
-    print(f"[push] uploading {staging_dir} -> {repo_id} ({msg})")
-    api.upload_folder(
-        folder_path=str(staging_dir),
-        repo_id=repo_id,
-        repo_type="dataset",
-        commit_message=msg,
-    )
-    url = f"https://huggingface.co/datasets/{repo_id}"
-    print(f"[push] done: {url}")
-    return url
-
-
-# =========================================================================== #
-# Fetch (pull a packed HF dataset repo onto local disk for training)
-# =========================================================================== #
-
-
-def fetch_dataset(
-    repo_id: str,
-    dest: Path,
-    allow_patterns: list[str] | None = None,
-) -> Path:
-    """Snapshot-download a packed dataset repo. Returns the local repo root."""
-    from huggingface_hub import snapshot_download
-
-    dest = Path(dest)
-    dest.mkdir(parents=True, exist_ok=True)
-
-    print(f"[fetch] downloading {repo_id} -> {dest}")
-    local_root = snapshot_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        local_dir=str(dest),
-        token=os.environ["HF_TOKEN"],
-        allow_patterns=allow_patterns,
-    )
-    local_root = Path(local_root)
-
-    manifests_dir = local_root / "manifests"
-    if manifests_dir.exists():
-        print("[fetch] resolved manifest paths:")
-        for jp in sorted(manifests_dir.glob("*.jsonl")):
-            print(f"  {jp}")
-    else:
-        print(f"[fetch] note: no manifests/ subdir under {local_root}")
-    return local_root
-
-
-# =========================================================================== #
-# Fetch checkpoint (pull last.pt from a HF model repo, for cross-session resume)
-# =========================================================================== #
-
-
-def fetch_checkpoint(
-    repo_id: str, dest: Path, filename: str = "last.pt"
-) -> Optional[Path]:
-    """Download ``filename`` from a HF model repo to ``dest``.
-
-    Returns the local path, or ``None`` if the repo or file doesn't exist yet
-    (the first session, before any checkpoint has been published) — the caller
-    then starts training fresh instead of resuming.
-    """
-    from huggingface_hub import hf_hub_download
-
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        local = hf_hub_download(
-            repo_id=repo_id,
-            repo_type="model",
-            filename=filename,
-            token=os.environ.get("HF_TOKEN"),
-        )
-    except Exception as e:  # noqa: BLE001 — 404 / missing-repo surface various ways
-        print(f"[fetch-ckpt] {repo_id}:{filename} unavailable ({type(e).__name__}) — starting fresh.")
-        return None
-
-    import shutil
-
-    shutil.copyfile(local, dest)
-    print(f"[fetch-ckpt] {repo_id}:{filename} -> {dest}")
-    return dest
-
-
-# =========================================================================== #
-# Publish checkpoint (upload last.pt + model card to a HF model repo)
-# =========================================================================== #
-
-
-def _render_model_card(repo_id: str, step: object, cfg_yaml: str) -> str:
-    """Compose a minimal HF model card README with YAML front matter."""
-    wandb_project = os.environ.get("WANDB_PROJECT", "")
-    wandb_line = f"- W&B project: `{wandb_project}`\n" if wandb_project else ""
-    return (
-        "---\n"
-        "language:\n"
-        "- bn\n"
-        "license: other\n"
-        "library_name: pytorch\n"
-        "tags:\n"
-        "- audio\n"
-        "- self-supervised\n"
-        "- bengali\n"
-        "- conformer\n"
-        "- lejepa\n"
-        "---\n\n"
-        f"# {repo_id}\n\n"
-        "Continuous latent autoencoder for Bengali speech.\n\n"
-        "## Architecture\n\n"
-        "- Encoder: Conformer\n"
-        "- Self-supervised objective: LeJEPA\n"
-        "- Reconstruction loss: multi-resolution STFT\n\n"
-        "## Training\n\n"
-        f"- Step: `{step}`\n"
-        f"{wandb_line}"
-        "\n"
-        "## Config\n\n"
-        "```yaml\n"
-        f"{cfg_yaml}"
-        "```\n\n"
-        "## How to load\n\n"
-        "```python\n"
-        "import torch\n"
-        "ckpt = torch.load('last.pt', map_location='cpu')\n"
-        "state_dict = ckpt['model']\n"
-        "cfg = ckpt['cfg']\n"
-        "```\n"
-    )
-
-
-def publish_checkpoint(
-    ckpt_path: Path,
-    repo_id: str,
-    extra_files: list[Path] | None = None,
-    commit_message: str | None = None,
-    private: bool = True,
-) -> str:
-    """Push ``last.pt`` + a generated model card + ``config.yaml`` to a HF model repo."""
-    import torch
-    import yaml
-    from huggingface_hub import HfApi
-
-
-    ckpt_path = Path(ckpt_path)
-    tok = os.environ["HF_TOKEN"]
-
-    api = HfApi(token=tok)
-    api.create_repo(
-        repo_id=repo_id,
-        repo_type="model",
-        exist_ok=True,
-        private=private,
-    )
-
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
-    step = ckpt.get("step", "?")
-    cfg = ckpt.get("cfg", {})
-    cfg_yaml = yaml.safe_dump(cfg, sort_keys=False)
-
-    git_hash = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-    msg = commit_message or f"publish step={step} git={git_hash}"
-    print(f"[publish] uploading {ckpt_path} -> {repo_id} ({msg})")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        readme_path = tmp_dir / "README.md"
-        readme_path.write_text(
-            _render_model_card(repo_id, step, cfg_yaml), encoding="utf-8"
-        )
-        config_path = tmp_dir / "config.yaml"
-        config_path.write_text(cfg_yaml, encoding="utf-8")
-
-        # Upload the ckpt twice: `last.pt` is the rolling resume target (always
-        # overwritten), `step-<step>.pt` is a permanent stepped snapshot so prior
-        # runs (e.g. step-30320.pt) survive the next session instead of being
-        # overwritten. `step` comes straight from the checkpoint loaded above.
-        ckpt_uploads = ["last.pt"]
-        if isinstance(step, int):
-            ckpt_uploads.append(f"step-{step}.pt")
-        for path_in_repo in ckpt_uploads:
-            api.upload_file(
-                path_or_fileobj=str(ckpt_path),
-                path_in_repo=path_in_repo,
-                repo_id=repo_id,
-                repo_type="model",
-                commit_message=msg,
-            )
-        api.upload_file(
-            path_or_fileobj=str(readme_path),
-            path_in_repo="README.md",
-            repo_id=repo_id,
-            repo_type="model",
-            commit_message=msg,
-        )
-        api.upload_file(
-            path_or_fileobj=str(config_path),
-            path_in_repo="config.yaml",
-            repo_id=repo_id,
-            repo_type="model",
-            commit_message=msg,
-        )
-        for ef in extra_files or []:
-            ef = Path(ef)
-            api.upload_file(
-                path_or_fileobj=str(ef),
-                path_in_repo=ef.name,
-                repo_id=repo_id,
-                repo_type="model",
-                commit_message=msg,
-            )
-
-    url = f"https://huggingface.co/{repo_id}"
-    print(f"[publish] done: {url}")
-    return url
-
-
-# =========================================================================== #
-# Manifest cache (gzip train/val jsonl into a HF model repo, reuse next session)
-# =========================================================================== #
-#
-# The manifest build walks the whole corpus (~1M Common Voice clips: read the
-# TSVs, scandir clips/, shuffle+split) — minutes of work that an ephemeral
-# Kaggle session would otherwise repeat every time. The output is deterministic
-# (fixed seed) and holds ABSOLUTE audio paths into the attached dataset mounts,
-# so it is byte-for-byte reusable as long as the SAME datasets stay attached at
-# the SAME slugs. Cache it under the ``manifests/`` prefix of the model repo and
-# the build becomes a once-ever cost. Change the corpus/slugs -> the cache is
-# stale; delete ``manifests/`` on the Hub (or bypass the fetch) to rebuild.
-
-_MANIFEST_PREFIX = "manifests"
-_MANIFEST_FILES = ("train.jsonl", "val.jsonl")
-
-
-def publish_manifests(
-    manifest_dir: Path,
-    repo_id: str,
-    commit_message: str | None = None,
-    private: bool = True,
-) -> str:
-    """Gzip train/val jsonl (+ build_meta) and upload under ``manifests/``."""
-    import gzip
-    import shutil
-    from huggingface_hub import HfApi
-
-    manifest_dir = Path(manifest_dir)
-    api = HfApi(token=os.environ["HF_TOKEN"])
-    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True, private=private)
-
-    msg = commit_message or f"publish manifests {_dt.datetime.utcnow().isoformat()}Z"
-    print(f"[publish-manifests] {manifest_dir} -> {repo_id}/{_MANIFEST_PREFIX}/")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        uploads: list[tuple[str, str]] = []
-        for name in _MANIFEST_FILES:
-            src = manifest_dir / name
-            if not src.exists():
-                raise SystemExit(f"[publish-manifests] missing {src}")
-            gz = tmp_dir / (name + ".gz")
-            with open(src, "rb") as fi, gzip.open(gz, "wb", compresslevel=6) as fo:
-                shutil.copyfileobj(fi, fo)
-            uploads.append((str(gz), f"{_MANIFEST_PREFIX}/{name}.gz"))
-        meta = manifest_dir / "build_meta.yaml"
-        if meta.exists():
-            uploads.append((str(meta), f"{_MANIFEST_PREFIX}/build_meta.yaml"))
-        for local, path_in_repo in uploads:
-            api.upload_file(
-                path_or_fileobj=local,
-                path_in_repo=path_in_repo,
-                repo_id=repo_id,
-                repo_type="model",
-                commit_message=msg,
-            )
-
-    url = f"https://huggingface.co/{repo_id}/tree/main/{_MANIFEST_PREFIX}"
-    print(f"[publish-manifests] done: {url}")
-    return url
-
-
-def fetch_manifests(repo_id: str, dest_dir: Path) -> bool:
-    """Download + gunzip cached manifests into ``dest_dir``.
-
-    Returns ``True`` if the full set (train + val) was restored, ``False`` if
-    the cache is absent (first session, before any publish) — the caller then
-    builds from the raw corpus instead.
-    """
-    import gzip
-    import shutil
-    from huggingface_hub import hf_hub_download
-
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for name in _MANIFEST_FILES:
-        try:
-            local = hf_hub_download(
-                repo_id=repo_id,
-                repo_type="model",
-                filename=f"{_MANIFEST_PREFIX}/{name}.gz",
-                token=os.environ.get("HF_TOKEN"),
-            )
-        except Exception as e:  # noqa: BLE001 — 404 / missing-repo surface various ways
-            print(
-                f"[fetch-manifests] {repo_id}:{_MANIFEST_PREFIX}/{name}.gz "
-                f"unavailable ({type(e).__name__}) — will build from raw."
-            )
-            return False
-        with gzip.open(local, "rb") as fi, open(dest_dir / name, "wb") as fo:
-            shutil.copyfileobj(fi, fo)
-        print(f"[fetch-manifests] {repo_id}:{_MANIFEST_PREFIX}/{name}.gz -> {dest_dir / name}")
-    return True
-
-
-def audit_manifest_dir(
-    in_dir: Path,
-    out_dir: Path,
-    num_workers: int = 4,
-    min_duration: float = 1.0,
-    max_duration: float = 30.0,
-    drop_short_long: bool = False,
-) -> dict[str, Any]:
-    """Decode-probe an EXISTING train/val manifest and write cleaned copies.
-
-    Reuses the manifest you already built/cached instead of re-walking the
-    corpus: only the per-file ``torchaudio.info`` probe (the training backend)
-    is paid, dropping the truncated/empty/malformed clips the full Common Voice
-    ``clips/`` enumeration sweeps in. Output keeps the canonical
-    ``train.jsonl`` / ``val.jsonl`` names so the cleaned set can be published
-    straight over the existing cache (no config or fetch-path change).
-
-    By default only ``missing``/``corrupt``/``empty`` rows are dropped — the
-    loader zero-pads short clips, so out-of-duration rows are kept unless
-    ``drop_short_long`` is set.
-    """
-    in_dir, out_dir = Path(in_dir), Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    drop = None if drop_short_long else {"missing", "corrupt", "empty"}
-
-    summary: dict[str, Any] = {}
-    for name in _MANIFEST_FILES:
-        src = in_dir / name
-        if not src.exists():
-            raise SystemExit(f"[audit-manifests] missing {src}")
-        with open(src, "r", encoding="utf-8") as f:
-            records: list[Record] = [json.loads(line) for line in f if line.strip()]
-        print(f"[audit-manifests] {name}: probing {len(records)} rows ...")
-        kept, report = audit_records(
-            records,
-            num_workers=num_workers,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            drop_statuses=drop,
-        )
-        _write_jsonl(out_dir / name, kept)
-        print(
-            f"[audit-manifests] {name}: kept {report['kept']}/{report['total']} "
-            f"-> {out_dir / name}  (dropped: "
-            f"{ {k: v for k, v in report['counts'].items() if k != 'ok'} })"
-        )
-        summary[name] = report
-
-    # Carry the original build_meta forward, annotated, so the cleaned cache is
-    # self-describing.
-    meta_src = in_dir / "build_meta.yaml"
-    if meta_src.exists():
-        import yaml
-
-        meta = yaml.safe_load(meta_src.read_text()) or {}
-        meta["audited"] = True
-        meta["audit_backend"] = "torchaudio.info"
-        meta["audit"] = {k: v["counts"] for k, v in summary.items()}
-        (out_dir / "build_meta.yaml").write_text(
-            yaml.safe_dump(meta, sort_keys=False), encoding="utf-8"
-        )
-    return summary
-
-
-# =========================================================================== #
 # CLI
 # =========================================================================== #
-#
-# Tokens and repo/path config come straight from the environment (sourced from
-# .env by setup.sh). Secrets are read at point of use, so a missing one is a
-# hard KeyError, not a silent fallback. Repo IDs and the data root are not
-# secrets, so they get sensible literal defaults.
 
 _DEFAULT_HF_REPO = "aryanrahman/clae-bengali"
-_DEFAULT_CKPT_REPO = "aryan3212/clae-bengali-encoder"
+_DEFAULT_CKPT_REPO = "aryanrahman/clae-bengali-encoder"
 
 
 def _data_root(arg: str | None) -> Path:
@@ -1854,248 +1010,6 @@ def _run_download(args: argparse.Namespace) -> None:
         adapter.download(root)
 
 
-# --- audit ----------------------------------------------------------------- #
-
-
-def _add_audit(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--staging-dir",
-        required=True,
-        help="Staging dir containing a manifests/ subdir of JSONL files.",
-    )
-    p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--min-duration", type=float, default=1.0)
-    p.add_argument("--max-duration", type=float, default=30.0)
-    p.set_defaults(func=_run_audit)
-
-
-def _run_audit(args: argparse.Namespace) -> None:
-    """Standalone audit: probe every JSONL under ``<staging-dir>/manifests/``.
-
-    Debug-only. ``pack_to_dir`` validates + filters inline while transcoding, so
-    a normal ``build`` does not need this. Use it to verify a packed manifest
-    after the fact, e.g. on a different machine, without re-running the pack.
-    """
-    staging = Path(args.staging_dir)
-    manifests_dir = staging / "manifests"
-    if not manifests_dir.is_dir():
-        raise SystemExit(f"[housekeeping] no manifests/ under {staging}")
-
-    for jp in sorted(manifests_dir.glob("*.jsonl")):
-        print(f"[housekeeping] audit: {jp}")
-        with open(jp, "r", encoding="utf-8") as f:
-            records: list[Record] = [json.loads(line) for line in f if line.strip()]
-        # Manifests written by pack store paths relative to the staging dir
-        # root. Absolutize so the audit worker's existence check is accurate
-        # regardless of cwd.
-        for r in records:
-            ap = r.get("audio_filepath")
-            if ap and not os.path.isabs(ap):
-                r["audio_filepath"] = str(staging / ap)
-        audit_records(
-            records,
-            num_workers=args.num_workers,
-            min_duration=args.min_duration,
-            max_duration=args.max_duration,
-        )
-
-
-# --- build ----------------------------------------------------------------- #
-
-
-def _add_build(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--datasets", default=None)
-    p.add_argument(
-        "--staging-dir",
-        required=True,
-        help="Output directory: receives audio/, manifests/, README.md, build_meta.yaml.",
-    )
-    p.add_argument(
-        "--data-root",
-        default=None,
-        help="Root used by adapters for raw archives. Default: $DATA_ROOT env.",
-    )
-    p.add_argument("--target-sr", type=int, default=16000)
-    p.add_argument("--val-pct", type=float, default=0.05)
-    p.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Cap rows per adapter (smoke testing). Default: no cap.",
-    )
-    p.add_argument("--min-duration", type=float, default=1.0)
-    p.add_argument("--max-duration", type=float, default=30.0)
-    p.add_argument("--seed", type=int, default=42)
-    p.set_defaults(func=_run_build)
-
-
-def _run_build(args: argparse.Namespace) -> None:
-    names = _parse_datasets(args.datasets)
-    adapters = _build_adapters(names, args.limit)
-    print(f"[housekeeping] build: {names} -> {args.staging_dir}")
-    pack_to_dir(
-        adapters=adapters,
-        download_root=_data_root(args.data_root),
-        staging_dir=Path(args.staging_dir),
-        target_sr=args.target_sr,
-        val_pct=args.val_pct,
-        seed=args.seed,
-        min_duration=args.min_duration,
-        max_duration=args.max_duration,
-    )
-
-
-# --- push ------------------------------------------------------------------ #
-
-
-def _add_push(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--staging-dir", required=True)
-    p.add_argument("--repo-id", default=None, help="Default: $HF_DATASET_REPO env.")
-    p.add_argument(
-        "--public",
-        action="store_true",
-        help="Create the repo as public (default: private).",
-    )
-    p.add_argument("--commit-message", default=None)
-    p.set_defaults(func=_run_push)
-
-
-def _run_push(args: argparse.Namespace) -> None:
-    repo_id = args.repo_id or os.environ.get("HF_DATASET_REPO", _DEFAULT_HF_REPO)
-    staging = Path(args.staging_dir)
-    # Quick row count for the progress message.
-    n_files = sum(1 for _ in staging.rglob("*") if _.is_file())
-    print(f"[housekeeping] push: {n_files:,} files -> {repo_id}")
-    push_to_hub(
-        staging_dir=staging,
-        repo_id=repo_id,
-        commit_message=args.commit_message,
-        private=not args.public,
-    )
-
-
-# --- fetch ----------------------------------------------------------------- #
-
-
-def _add_fetch(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--repo-id", default=None, help="Default: $HF_DATASET_REPO env.")
-    p.add_argument(
-        "--dest",
-        default=None,
-        help="Local destination. Default: $DATA_ROOT env.",
-    )
-    p.set_defaults(func=_run_fetch)
-
-
-def _run_fetch(args: argparse.Namespace) -> None:
-    repo_id = args.repo_id or os.environ.get("HF_DATASET_REPO", _DEFAULT_HF_REPO)
-    dest = _data_root(args.dest)
-    print(f"[housekeeping] fetch: {repo_id} -> {dest}")
-    fetch_dataset(repo_id=repo_id, dest=dest)
-
-
-# --- publish-checkpoint ---------------------------------------------------- #
-
-
-def _add_publish_checkpoint(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--ckpt", required=True, help="Path to last.pt")
-    p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
-    p.add_argument(
-        "--public",
-        action="store_true",
-        help="Create the repo as public (default: private).",
-    )
-    p.add_argument("--commit-message", default=None)
-    p.set_defaults(func=_run_publish_checkpoint)
-
-
-def _run_publish_checkpoint(args: argparse.Namespace) -> None:
-    repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
-    print(f"[housekeeping] publish-checkpoint: {args.ckpt} -> {repo_id}")
-    publish_checkpoint(
-        ckpt_path=Path(args.ckpt),
-        repo_id=repo_id,
-        commit_message=args.commit_message,
-        private=not args.public,
-    )
-
-
-# --- pack-and-push (convenience) ------------------------------------------- #
-
-
-def _add_pack_and_push(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--datasets", default=None)
-    p.add_argument("--repo-id", default=None, help="Default: $HF_DATASET_REPO env.")
-    p.add_argument(
-        "--data-root",
-        default=None,
-        help="Root used by adapters for raw archives. Default: $DATA_ROOT env.",
-    )
-    p.add_argument("--target-sr", type=int, default=16000)
-    p.add_argument("--val-pct", type=float, default=0.05)
-    p.add_argument("--limit", type=int, default=None)
-    p.add_argument("--min-duration", type=float, default=1.0)
-    p.add_argument("--max-duration", type=float, default=30.0)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--staging-dir",
-        default=None,
-        help="If unset, uses a tmp dir. Set this to keep artifacts (implies --keep-staging).",
-    )
-    p.add_argument(
-        "--keep-staging",
-        action="store_true",
-        help="When --staging-dir is unset, do not delete the tmp staging dir on exit.",
-    )
-    p.add_argument(
-        "--public",
-        action="store_true",
-        help="Create the repo as public (default: private).",
-    )
-    p.add_argument("--commit-message", default=None)
-    p.set_defaults(func=_run_pack_and_push)
-
-
-def _run_pack_and_push(args: argparse.Namespace) -> None:
-    names = _parse_datasets(args.datasets)
-    adapters = _build_adapters(names, args.limit)
-    repo_id = args.repo_id or os.environ.get("HF_DATASET_REPO", _DEFAULT_HF_REPO)
-    data_root = _data_root(args.data_root)
-
-    def _do(staging: Path) -> None:
-        print(f"[housekeeping] pack-and-push: build {names} -> {staging}")
-        pack_to_dir(
-            adapters=adapters,
-            download_root=data_root,
-            staging_dir=staging,
-            target_sr=args.target_sr,
-            val_pct=args.val_pct,
-            seed=args.seed,
-            min_duration=args.min_duration,
-            max_duration=args.max_duration,
-        )
-        n_files = sum(1 for _ in staging.rglob("*") if _.is_file())
-        print(f"[housekeeping] pack-and-push: push {n_files:,} files -> {repo_id}")
-        push_to_hub(
-            staging_dir=staging,
-            repo_id=repo_id,
-            commit_message=args.commit_message,
-            private=not args.public,
-        )
-
-    if args.staging_dir:
-        staging = Path(args.staging_dir)
-        staging.mkdir(parents=True, exist_ok=True)
-        _do(staging)
-    elif args.keep_staging:
-        staging = Path(tempfile.mkdtemp(prefix="pack_"))
-        print(f"[housekeeping] pack-and-push: --keep-staging set, using {staging}")
-        _do(staging)
-    else:
-        with tempfile.TemporaryDirectory(prefix="pack_") as tmp:
-            _do(Path(tmp))
-
-
 # --- make-manifests (manifest-only build over attached raw datasets) ------- #
 
 
@@ -2110,52 +1024,93 @@ def _add_make_manifests(p: argparse.ArgumentParser) -> None:
         "--map common_voice_bn=/kaggle/input/common-voice-24-bn",
     )
     p.add_argument(
+        "--data-root",
+        default=None,
+        help="Root for downloaded raw archives (used with --datasets instead of --map).",
+    )
+    p.add_argument(
+        "--datasets",
+        default=None,
+        help="Comma-separated adapter names (used with --data-root). Default: all registered.",
+    )
+    p.add_argument(
         "--out-dir",
         required=True,
         help="Where to write train.jsonl / val.jsonl (e.g. /kaggle/working/manifests).",
     )
     p.add_argument("--val-pct", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--audit",
-        action="store_true",
-        help="Probe every file (fills duration, drops bad/too-short/too-long rows). "
-        "Slow, and needs soundfile mp3 support; off by default.",
-    )
-    p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--min-duration", type=float, default=1.0)
-    p.add_argument("--max-duration", type=float, default=30.0)
     p.set_defaults(func=_run_make_manifests)
 
 
 def _run_make_manifests(args: argparse.Namespace) -> None:
-    if not args.map:
-        raise SystemExit("--map NAME=PATH is required (at least one).")
-    pairs: list[tuple[DatasetAdapter, Path]] = []
-    for m in args.map:
-        if "=" not in m:
-            raise SystemExit(f"--map must be NAME=PATH, got: {m!r}")
-        name, path = m.split("=", 1)
-        pairs.append((get_adapter(name), Path(path)))
+    if args.data_root:
+        names = _parse_datasets(args.datasets)
+        root = Path(args.data_root)
+        pairs: list[tuple[DatasetAdapter, Path]] = []
+        for name in names:
+            adapter = get_adapter(name)
+            raw_dir = adapter.download(root)
+            if not raw_dir.exists():
+                raise SystemExit(f"[manifest] raw dir for {name} does not exist: {raw_dir}")
+            pairs.append((adapter, raw_dir))
+    elif args.map:
+        pairs = []
+        for m in args.map:
+            if "=" not in m:
+                raise SystemExit(f"--map must be NAME=PATH, got: {m!r}")
+            name, path = m.split("=", 1)
+            pairs.append((get_adapter(name), Path(path)))
+    else:
+        raise SystemExit("Either --data-root or --map NAME=PATH is required.")
     print(f"[housekeeping] make-manifests: {[a.name for a, _ in pairs]} -> {args.out_dir}")
     build_manifests_only(
         adapters_with_dirs=pairs,
         out_dir=Path(args.out_dir),
         val_pct=args.val_pct,
         seed=args.seed,
-        audit=args.audit,
-        num_workers=args.num_workers,
-        min_duration=args.min_duration,
-        max_duration=args.max_duration,
     )
 
 
-# --- fetch-checkpoint ------------------------------------------------------- #
+# --- fetch-checkpoint ------------------------------------------------------ #
+
+
+def fetch_checkpoint(
+    repo_id: str, dest: Path, filename: str = "last.pt"
+) -> Optional[Path]:
+    """Download ``filename`` from a HF model repo to ``dest``.
+
+    Returns the local path, or ``None`` if the repo or file doesn't exist yet
+    (the first session, before any checkpoint has been published) — the caller
+    then starts training fresh instead of resuming.
+    """
+    from huggingface_hub import hf_hub_download
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        local = hf_hub_download(
+            repo_id=repo_id,
+            repo_type="model",
+            filename=filename,
+            token=os.environ.get("HF_TOKEN"),
+        )
+    except Exception:
+        print(f"[fetch-ckpt] {repo_id}:{filename} unavailable — starting fresh.")
+        return None
+
+    import shutil
+
+    shutil.copyfile(local, dest)
+    print(f"[fetch-ckpt] {repo_id}:{filename} -> {dest}")
+    return dest
 
 
 def _add_fetch_checkpoint(p: argparse.ArgumentParser) -> None:
     p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
-    p.add_argument("--dest", required=True, help="Local path to write the checkpoint to.")
+    p.add_argument(
+        "--dest", required=True, help="Local path to write the checkpoint to."
+    )
     p.add_argument("--filename", default="last.pt")
     p.set_defaults(func=_run_fetch_checkpoint)
 
@@ -2163,68 +1118,146 @@ def _add_fetch_checkpoint(p: argparse.ArgumentParser) -> None:
 def _run_fetch_checkpoint(args: argparse.Namespace) -> None:
     repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
     print(f"[housekeeping] fetch-checkpoint: {repo_id} -> {args.dest}")
-    fetch_checkpoint(repo_id=repo_id, dest=Path(args.dest), filename=args.filename)
+    fetch_checkpoint(
+        repo_id=repo_id, dest=Path(args.dest), filename=args.filename
+    )
 
 
-# --- publish-manifests / fetch-manifests ----------------------------------- #
+# --- publish-checkpoint ---------------------------------------------------- #
 
 
-def _add_publish_manifests(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--manifest-dir", required=True, help="Dir holding train.jsonl/val.jsonl.")
-    p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
+def _render_model_card(repo_id: str, step: object, cfg_yaml: str) -> str:
+    """Compose a minimal HF model card README with YAML front matter."""
+    wandb_project = os.environ.get("WANDB_PROJECT", "")
+    wandb_line = f"- W&B project: `{wandb_project}`\n" if wandb_project else ""
+    return (
+        "---\n"
+        "language:\n"
+        "- bn\n"
+        "license: other\n"
+        "library_name: pytorch\n"
+        "tags:\n"
+        "- audio\n"
+        "- self-supervised\n"
+        "- bengali\n"
+        "- conformer\n"
+        "- lejepa\n"
+        "---\n\n"
+        f"# {repo_id}\n\n"
+        "Continuous latent autoencoder for Bengali speech.\n\n"
+        "## Architecture\n\n"
+        "- Encoder: Conformer\n"
+        "- Self-supervised objective: LeJEPA\n"
+        "- Reconstruction loss: multi-resolution STFT\n\n"
+        "## Training\n\n"
+        f"- Step: `{step}`\n"
+        f"{wandb_line}"
+        "\n"
+        "## Config\n\n"
+        "```yaml\n"
+        f"{cfg_yaml}"
+        "```\n\n"
+        "## How to load\n\n"
+        "```python\n"
+        "import torch\n"
+        "ckpt = torch.load('last.pt', map_location='cpu')\n"
+        "state_dict = ckpt['model']\n"
+        "cfg = ckpt['cfg']\n"
+        "```\n"
+    )
+
+
+def publish_checkpoint(
+    ckpt_path: Path,
+    repo_id: str,
+    commit_message: str | None = None,
+    private: bool = True,
+) -> str:
+    """Push ``last.pt`` + a generated model card + ``config.yaml`` to a HF model repo."""
+    import torch
+    import yaml
+    from huggingface_hub import HfApi
+
+    ckpt_path = Path(ckpt_path)
+    tok = os.environ["HF_TOKEN"]
+
+    api = HfApi(token=tok)
+    api.create_repo(
+        repo_id=repo_id, repo_type="model", exist_ok=True, private=private
+    )
+
+    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    step = ckpt.get("step", "?")
+    cfg = ckpt.get("cfg", {})
+    cfg_yaml = yaml.safe_dump(cfg, sort_keys=False)
+
+    git_hash = (
+        subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    )
+    msg = commit_message or f"publish step={step} git={git_hash}"
+    print(f"[publish] uploading {ckpt_path} -> {repo_id} ({msg})")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        readme_path = tmp_dir / "README.md"
+        readme_path.write_text(
+            _render_model_card(repo_id, step, cfg_yaml), encoding="utf-8"
+        )
+        config_path = tmp_dir / "config.yaml"
+        config_path.write_text(cfg_yaml, encoding="utf-8")
+
+        api.upload_file(
+            path_or_fileobj=str(ckpt_path),
+            path_in_repo="last.pt",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=msg,
+        )
+        api.upload_file(
+            path_or_fileobj=str(readme_path),
+            path_in_repo="README.md",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=msg,
+        )
+        api.upload_file(
+            path_or_fileobj=str(config_path),
+            path_in_repo="config.yaml",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=msg,
+        )
+
+    url = f"https://huggingface.co/{repo_id}"
+    print(f"[publish] done: {url}")
+    return url
+
+
+def _add_publish_checkpoint(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--ckpt", required=True, help="Path to last.pt")
+    p.add_argument(
+        "--repo-id", default=None, help="Default: $HF_MODEL_REPO env."
+    )
+    p.add_argument(
+        "--public",
+        action="store_true",
+        help="Create the repo as public (default: private).",
+    )
     p.add_argument("--commit-message", default=None)
-    p.set_defaults(func=_run_publish_manifests)
+    p.set_defaults(func=_run_publish_checkpoint)
 
 
-def _run_publish_manifests(args: argparse.Namespace) -> None:
-    repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
-    print(f"[housekeeping] publish-manifests: {args.manifest_dir} -> {repo_id}")
-    publish_manifests(
-        manifest_dir=Path(args.manifest_dir),
+def _run_publish_checkpoint(args: argparse.Namespace) -> None:
+    repo_id = args.repo_id or os.environ.get(
+        "HF_MODEL_REPO", _DEFAULT_CKPT_REPO
+    )
+    print(f"[housekeeping] publish-checkpoint: {args.ckpt} -> {repo_id}")
+    publish_checkpoint(
+        ckpt_path=Path(args.ckpt),
         repo_id=repo_id,
         commit_message=args.commit_message,
+        private=not args.public,
     )
-
-
-def _add_audit_manifests(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--in-dir", required=True, help="Dir holding train.jsonl/val.jsonl to probe.")
-    p.add_argument("--out-dir", required=True, help="Dir to write cleaned train.jsonl/val.jsonl.")
-    p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--min-duration", type=float, default=1.0)
-    p.add_argument("--max-duration", type=float, default=30.0)
-    p.add_argument(
-        "--drop-short-long",
-        action="store_true",
-        help="Also drop out-of-duration clips (default keeps them; loader zero-pads).",
-    )
-    p.set_defaults(func=_run_audit_manifests)
-
-
-def _run_audit_manifests(args: argparse.Namespace) -> None:
-    print(f"[housekeeping] audit-manifests: {args.in_dir} -> {args.out_dir}")
-    audit_manifest_dir(
-        in_dir=Path(args.in_dir),
-        out_dir=Path(args.out_dir),
-        num_workers=args.num_workers,
-        min_duration=args.min_duration,
-        max_duration=args.max_duration,
-        drop_short_long=args.drop_short_long,
-    )
-
-
-def _add_fetch_manifests(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--repo-id", default=None, help="Default: $HF_MODEL_REPO env.")
-    p.add_argument("--dest-dir", required=True, help="Dir to write train.jsonl/val.jsonl into.")
-    p.set_defaults(func=_run_fetch_manifests)
-
-
-def _run_fetch_manifests(args: argparse.Namespace) -> None:
-    repo_id = args.repo_id or os.environ.get("HF_MODEL_REPO", _DEFAULT_CKPT_REPO)
-    print(f"[housekeeping] fetch-manifests: {repo_id} -> {args.dest_dir}")
-    ok = fetch_manifests(repo_id=repo_id, dest_dir=Path(args.dest_dir))
-    # Exit non-zero when the cache is absent so a shell caller can branch on it
-    # (build-from-raw) without parsing stdout.
-    raise SystemExit(0 if ok else 3)
 
 
 # --- dispatch -------------------------------------------------------------- #
@@ -2235,49 +1268,17 @@ def main() -> None:
     sub = ap.add_subparsers(dest="command", required=True)
 
     _add_download(sub.add_parser("download", help="Download raw archives."))
-    _add_audit(
-        sub.add_parser(
-            "audit", help="Probe staging manifests (debug; build runs audit internally)."
-        )
-    )
-    _add_build(sub.add_parser("build", help="Pack records into a staging dir."))
-    _add_push(sub.add_parser("push", help="Upload a staging dir to HF Hub."))
-    _add_fetch(sub.add_parser("fetch", help="Snapshot-download a packed dataset repo."))
-    _add_publish_checkpoint(
-        sub.add_parser("publish-checkpoint", help="Upload a checkpoint to HF Hub.")
-    )
-    _add_pack_and_push(
-        sub.add_parser("pack-and-push", help="Build + push in one shot.")
-    )
     _add_make_manifests(
         sub.add_parser(
             "make-manifests",
             help="Write train/val manifests over attached raw datasets (no transcode).",
         )
     )
+    _add_publish_checkpoint(
+        sub.add_parser("publish-checkpoint", help="Upload a checkpoint to HF Hub.")
+    )
     _add_fetch_checkpoint(
-        sub.add_parser(
-            "fetch-checkpoint",
-            help="Download a checkpoint from a HF model repo (for cross-session resume).",
-        )
-    )
-    _add_publish_manifests(
-        sub.add_parser(
-            "publish-manifests",
-            help="Gzip + upload train/val manifests to a HF model repo (build-once cache).",
-        )
-    )
-    _add_fetch_manifests(
-        sub.add_parser(
-            "fetch-manifests",
-            help="Download cached manifests from a HF model repo (exit 3 if absent).",
-        )
-    )
-    _add_audit_manifests(
-        sub.add_parser(
-            "audit-manifests",
-            help="Decode-probe an existing manifest and write a cleaned copy (drops corrupt clips).",
-        )
+        sub.add_parser("fetch-checkpoint", help="Download a checkpoint from HF Hub.")
     )
 
     args = ap.parse_args()
