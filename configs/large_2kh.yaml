@@ -1,0 +1,141 @@
+# Large-scale config: ~2000h, 50 epochs, ~20M params, simplified JEPA + reconstruction + late GAN
+#
+# Key differences from exp0:
+#   - Simplified JEPA loss: uniform MSE (no masked/visible split)
+#   - wav_l1_weight enabled for stable reconstruction signal
+#   - GAN enabled, very late (step 500k+), light weights
+#   - Larger model, longer scheduler, less aggressive aug (more data diversity)
+#   - Designed for 24GB GPU (RTX 4090, A10G, etc.) with mixed precision
+#
+# Dataset assumptions:
+#   2000 hours @ 16kHz, 3s segments, batch 64 = 37,500 steps/epoch
+#   50 epochs = 1,875,000 steps (rough upper bound; DataLoader droplast reduces it slightly)
+#   Warmup ~1% = 15,000 steps, cosine decay to 0 over the rest
+
+run:
+  seed: 42
+  amp: true
+  wandb:
+    enabled: true
+    project: "continuous-latent-ae"
+    name: "large-2kh-simplified-jepa"
+
+data:
+  sample_rate: 16000
+  segment_seconds: 3.0
+  train_manifest: "data/manifests/train.jsonl"
+  val_manifest: null
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+aug:
+  wave_aug:
+    enabled: true
+    noise_prob: 0.5
+    noise_snr_min: 10.0
+    noise_snr_max: 30.0
+    lowpass_prob: 0.3
+    lowpass_min_freq: 2000.0
+    lowpass_max_freq: 8000.0
+    gain_prob: 0.5
+    gain_min: 0.7
+    gain_max: 1.3
+    clip_prob: 0.1
+    clip_min: 0.5
+  wave_chunk_mask:
+    enabled: true
+    target_ratio: 0.25
+    min_span_frames: 2
+    max_span_frames: 8
+
+model:
+  frontend:
+    channels: [64, 128, 192, 256, 256]
+    kernels: [10, 8, 8, 4, 4]
+    strides: [5, 4, 4, 4, 4]
+    groups: 4
+  encoder:
+    d_model: 256
+    n_layers: 8
+    num_heads: 8
+    feedforward_dim: 1024
+    dropout: 0.1
+    cnn_module_kernel: 31
+    mhc:
+      enabled: true
+      num_streams: 2
+      start_layer: 2
+      period: 3
+      sinkhorn_iters: 10
+      tau: 0.05
+      dropout: 0.0
+      identity_mix: true
+      alpha_init: 0.01
+  decoder:
+    channels: 384
+    up_strides: [4, 4, 4, 4, 5]
+    up_kernels: [8, 8, 8, 8, 10]
+    res_blocks_per_up: 2
+    res_dilations: [1, 3, 9]
+    film_hidden: 192
+  projector:
+    hidden_dim: 1024
+    output_dim: 256
+    n_hidden_layers: 2
+
+loss:
+  stft_weight: 0.003
+  stft:
+    fft_sizes: [256, 512, 1024, 2048]
+    hop_ratio: 0.25
+    win_ratio: 1.0
+    center: true
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 0.1
+    mag_weight: 1.0
+    logmag_weight: 1.0
+  wav_l1_weight: 1.0
+  jepa:
+    weight: 2.0
+    num_globals: 2
+    num_locals: 4
+
+  sigreg:
+    weight: 0.05
+    num_slices: 1024
+    t_max: 5.0
+    n_points: 17
+  adv:
+    enabled: true
+    adv_weight: 0.3
+    fm_weight: 0.5
+    adv_start_step: 500000
+    fm_start_step: 550000
+    lr: 1.0e-4
+    betas: [0.8, 0.99]
+    periods: [2, 3, 5, 7, 11]
+    disc_channels: [32, 128, 256, 512]
+
+optim:
+  lr: 3.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-5
+  scheduler:
+    warmup_steps: 15000
+    total_steps: 1875000
+    min_lr_ratio: 0.0
+  grad_clip: 1.0
+
+train:
+  batch_size: 64
+  grad_accum_steps: 4
+  max_steps: 1875000
+  log_interval_steps: 50
+  eval_interval_steps: 5000
+  save_interval_steps: 20000
+  probe_interval_steps: 500
+  val_batches: 100
