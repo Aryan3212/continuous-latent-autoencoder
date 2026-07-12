@@ -24,140 +24,98 @@ Deterministic continuous-latent speech foundation autoencoder:
 - Joint objectives (Exp0): waveform reconstruction (Multi-Res STFT) + LeJEPA-style predictive loss + SIGReg
 - Decoder is trained to reconstruct waveform and (later) tolerate latent noise
 
-## One-command training on a cloud GPU
+## Workflow
 
-The training pipeline is wrapped behind a `Makefile`, with `setup.sh` as the
-fresh-instance entrypoint. On a newly provisioned cloud-GPU instance with
-`git` and `make` installed:
+The pipeline has two steps:
 
-```bash
-git clone <repo-url>
-cd continuous-latent-autoencoder
-cp .env.example .env && nano .env   # paste HF_TOKEN (+ WANDB_API_KEY)
-tmux new -s train                   # so training outlives the SSH session
-./setup.sh                          # deps -> fetch -> train
-```
+### 1. Manifests
 
-`setup.sh` sources `.env` into the environment (the CLI and `train.py` read
-the vars directly), falls back to offline W&B logging when `WANDB_API_KEY` is
-unset, and accepts `--no-train` to stop after the dataset fetch. Equivalently,
-by hand:
+Point at raw audio data and build `train.jsonl` / `val.jsonl` manifests:
 
 ```bash
-# Put HF_TOKEN in .env (or export it into your shell), then:
-set -a && . ./.env && set +a
-make all
+# Download raw source datasets
+make download-data DATASETS=openslr53,bengaliai_speech
+
+# Build manifests from downloaded data
+make make-manifests DATASETS=openslr53,bengaliai_speech
 ```
 
-`make all` runs four stages back-to-back:
+The `make-manifests` target calls `scripts/housekeeping.py make-manifests --data-root <DATA_ROOT> --datasets <DATASETS> --out-dir staging/manifests`, which iterates each adapter's records (audio path + transcript metadata), shuffles, and performs a per-dataset stratified split into train/val.
 
-1. `prepare` installs Python deps via `uv sync`.
-2. `fetch-data` snapshot-downloads the packed dataset from HF Hub into
-   `$DATA_ROOT/` (default `<repo>/datasets`). Idempotent — re-running
-   skips files already present.
-3. `train` runs `train.py` with the manifests at
-   `$DATA_ROOT/manifests/{train,val}.jsonl`. WandB receives logs;
-   checkpoints land in `runs/<run_id>/checkpoints/`.
-4. `evaluate` runs the offline ASR probe (`eval/eval_asr.py`) against the
-   most recent `last.pt`.
-5. `publish` uploads `last.pt` plus a generated model card to the HF model
-   repo (`$HF_MODEL_REPO`).
-
-Any variable can be overridden on the command line:
+For Kaggle sessions where datasets are pre-mounted at known paths, use `--map` instead:
 
 ```bash
-RUN_NAME=ablation-no-mhc make train
-DATASETS=openslr53 make pack-and-push
-CONFIG=configs/local_6gb.yaml make train
+uv run python scripts/housekeeping.py make-manifests \
+    --map regspeech12=/kaggle/input/regspeech12 \
+    --map common_voice_bn=/kaggle/input/common-voice-24-bn \
+    --out-dir /kaggle/working/manifests
 ```
 
-`make help` lists every target and the current value of every variable. The
-training instance never needs Kaggle credentials — only HF + WandB.
-
-## Dataset preparation (one-time, on a prep instance)
-
-The packed dataset is built once on a separate "prep" instance (any beefy
-box with HF + Kaggle keys configured) and pushed to HF Hub. The training
-instance only consumes it via `make fetch-data`.
+### 2. Train
 
 ```bash
-# On the prep instance:
-# 1) Put HF + Kaggle + MDC keys in .env, then load them into the env:
-set -a && . ./.env && set +a
-make pack-and-push DATASETS=openslr53,bengaliai_speech,regspeech12,indicvoices
+make train CONFIG=configs/exp0.yaml
 ```
 
-What `pack-and-push` does:
-
-- Downloads raw archives from HF Hub, Kaggle, and OpenSLR into
-  `$DATA_ROOT/`. Each adapter is responsible for its own source.
-- Iterates each adapter's records (one per audio clip, with transcript +
-  language + dataset tag).
-- Audits files via `soundfile.info`, dropping clips < 1s, > 30s, or
-  unreadable.
-- Resamples every kept clip to 16 kHz mono FLAC.
-- Writes `audio/<dataset>/<id>.flac` plus four JSONL manifests under
-  `manifests/`: `train.jsonl`, `val.jsonl`, `asr_probe_train.jsonl`, and
-  `asr_probe_val.jsonl`. Paths inside each manifest are relative to the
-  staging root.
-- Uploads the entire packed layout to `$HF_DATASET_REPO` (default
-  `aryanrahman/clae-bengali`) via `huggingface_hub.upload_folder`.
-
-Once pushed, the training instance just runs `make all` — no Kaggle
-credentials needed there.
-
-The packed format is "raw files + JSONL", not parquet shards, because that
-makes incremental growth trivial: adding a new source is just another
-`upload_folder` call plus a versioned `manifests/train_v2.jsonl` — no schema
-migration or download-concatenate-republish cycle.
-
-## Adding a new dataset source
-
-1. Add a `DatasetAdapter` subclass in `scripts/housekeeping.py` (in the
-   "Adapters" section). Two methods are required:
-   - `download(dest)` — idempotent; place raw archives under `dest` and
-     return the path to the raw directory.
-   - `iter_records(raw_dir)` — yield `Record` dicts with at minimum
-     `audio_filepath`, optionally `text`, plus `dataset=<name>` and
-     `language`.
-2. Register the adapter in the `REGISTRY` dict (same file).
-3. On the prep instance, re-run
-   `make pack-and-push DATASETS=...,<name>`. Use a versioned manifest
-   (e.g. `manifests/train_v2.jsonl`) so older runs stay reproducible.
-
-## Quick start (Exp0) with `uv`
-
-For local development (no HF Hub fetch):
-
-1) Create a `uv` environment (recommended Python is 3.11/3.12 for PyTorch wheels):
+This runs `train.py` with the manifests under `staging/manifests/`. Override the manifest path with `MANIFEST_DIR`:
 
 ```bash
-uv venv --python 3.11
+make train MANIFEST_DIR=/custom/path/manifests
 ```
 
-2) Install deps (either):
+Override any config field via trailing dotted args:
 
 ```bash
-uv sync
+CONFIG=configs/local_6gb.yaml make train TRAIN_EXTRA_ARGS="train.max_steps=5000 data.num_workers=4"
 ```
 
-or:
+### Checkpoint resume
 
-```bash
-uv pip install -r requirements.txt
-```
-
-3) Prepare your datasets. For a full pipeline build, use the prep-instance
-workflow above (`make pack-and-push`). For an existing packed layout under
-`$DATA_ROOT/`, the manifests at
-`$DATA_ROOT/manifests/{train,val}.jsonl` are ready to use directly.
-
-4) Run:
+Resume from a saved checkpoint:
 
 ```bash
 uv run python train.py --config configs/exp0.yaml \
-    data.train_manifest=$DATA_ROOT/manifests/train.jsonl \
-    data.val_manifest=$DATA_ROOT/manifests/val.jsonl
+    --resume runs/<run_id>/checkpoints/last.pt \
+    data.train_manifest=... data.val_manifest=...
+```
+
+`--max_hours` stops cleanly after a wall-clock budget (useful for fixed-length sessions):
+
+```bash
+uv run python train.py --config configs/exp0.yaml --max_hours 11.5 \
+    data.train_manifest=... data.val_manifest=...
+```
+
+### Publish to HF Hub
+
+Upload the latest checkpoint to a Hugging Face model repo:
+
+```bash
+uv run python scripts/housekeeping.py publish-checkpoint \
+    --ckpt runs/<run_id>/checkpoints/last.pt \
+    --repo-id your-org/your-model
+```
+
+Pull the latest published checkpoint (e.g. to resume a multi-session training run):
+
+```bash
+uv run python scripts/housekeeping.py fetch-checkpoint \
+    --repo-id your-org/your-model --dest runs/my_run/checkpoints/last.pt
+```
+
+### Kaggle multi-session workflow
+
+See `scripts/kaggle_session.sh` for the production multi-session pattern: build manifests over attached datasets → pull latest checkpoint from HF → train with `--max_hours` → publish checkpoint on any exit. Each 12h Kaggle session resumes where the last left off.
+
+## Quick start with `uv`
+
+For local development with existing manifests:
+
+```bash
+uv sync
+uv run python train.py --config configs/exp0.yaml \
+    data.train_manifest=/path/to/manifests/train.jsonl \
+    data.val_manifest=/path/to/manifests/val.jsonl
 ```
 
 Artifacts:
@@ -165,22 +123,18 @@ Artifacts:
 - Checkpoints in `runs/<run_id>/checkpoints/`
 - Logs in `runs/<run_id>/logs/` (and W&B if enabled)
 
-## Notes
-
-- This repo intentionally starts with a stable, low-compute Exp0 (no GAN, no mixture).
-- Earlier experimental paths (mixture, primary classification, latent-noise decoding, GAN) have been **removed** from the code; they live in git history and can be reintroduced if needed. The current objective is reconstruction + JEPA + SIGReg only.
-
 ## Folder guide
 
 - `configs/`: experiment configs (`exp0.yaml` cloud ~6M, `local_6gb.yaml` local PC)
 - `data_loading.py`: dataset loading (JSONL manifests) + waveform augmentation
-- `datasets/`: gitignored; where housekeeping fetches/builds the data (default `$DATA_ROOT`)
+- `datasets/`: gitignored; where housekeeping fetches raw archives (default `$DATA_ROOT`)
 - `eval/`: probes + evaluation entrypoints (`eval_asr.py`, `eval_cls_probe.py`, `eval_recon.py`, `run_all.py`)
 - `losses.py`: multi-res STFT reconstruction loss (`MultiResSTFTLoss`)
 - `schema.py`: pydantic config schema (single source of truth, `extra="forbid"`)
 - `config.py`: `load_config` / `apply_overrides` (YAML → validated `Config`)
 - `models/`: core model components (frontend, encoder, mHC, projector, decoder, sigreg)
-- `scripts/`: utilities — `housekeeping.py` (data/artifact CLI: adapters → pack → push/fetch + publish-checkpoint), `reconstruct_audio.py`, `visualize_latents.py`, `fill_durations.py`
+- `staging/`: manifests + transcoded audio (output of make-manifests)
+- `scripts/`: utilities — `housekeeping.py` (data/artifact CLI: adapters → download/manifests + publish-checkpoint), `reconstruct_audio.py`, `visualize_latents.py`, `fill_durations.py`
 - `reference-implementations/`: slim in-tree references (single-file impls + notes); full vendored repos live at `../reference-implementations-archive`
 - `runs/`: training outputs (checkpoints/logs)
 
@@ -190,8 +144,8 @@ Train (use `configs/local_6gb.yaml` instead of `exp0.yaml` on the local PC):
 
 ```bash
 uv run python train.py --config configs/exp0.yaml \
-    data.train_manifest=$DATA_ROOT/manifests/train.jsonl \
-    data.val_manifest=$DATA_ROOT/manifests/val.jsonl
+    data.train_manifest=/path/to/manifests/train.jsonl \
+    data.val_manifest=/path/to/manifests/val.jsonl
 ```
 
 Run all eval (reconstruction + all enabled probes in one go):
