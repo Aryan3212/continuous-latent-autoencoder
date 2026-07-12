@@ -133,7 +133,6 @@ class JEPACfg(_Base):
     weight: float = 1.0
     num_globals: int = 2
     num_locals: int = 4
-    context_weight: float = 1.0
 
 
 class SIGRegCfg(_Base):

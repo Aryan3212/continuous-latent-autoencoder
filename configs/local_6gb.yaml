@@ -96,7 +96,7 @@ loss:
     weight: 3.0                 # NB: wandb rank charts before the 2026-06-11 logging fix understate z_rank* by 10x (log_interval dilution). Real ranks at these weights: z_rank ~55/64, z_rank_utt ~22 — healthy; don't retune against the old charts
     num_globals: 2              # lightly-augmented anchor views (no waveform chunk mask)
     num_locals: 4               # heavily-masked views (waveform chunk mask applied)
-    context_weight: 1.0         # V-JEPA 2.1: relative weight of L_context vs L_predict
+
   sigreg:
     weight: 0.2
     num_slices: 256
