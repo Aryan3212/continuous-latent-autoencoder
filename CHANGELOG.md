@@ -2,6 +2,24 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-12
+
+**Makefile/README simplification, checkpoint publish/fetch subcommands**
+
+- **Makefile**: removed `fetch-data`, `build-data`, `pack-and-push`, `publish`,
+  `evaluate`, `all` targets. Kept: `prepare`, `download-data`, `make-manifests`,
+  `train`, `clean-runs`. `train` no longer depends on `fetch-data`;
+  `MANIFEST_DIR` variable controls manifest path (default `staging/manifests/`).
+- **`scripts/housekeeping.py`**: added `--data-root`/`--datasets` support to
+  `make-manifests` subcommand (auto-discovers adapter raw dirs under DATA_ROOT).
+  Restored `publish-checkpoint` and `fetch-checkpoint` subcommands so the
+  Kaggle multi-session workflow can push/pull checkpoints to/from HF Hub.
+- **README.md**: cut cloud-GPU setup, dataset preparation, packed-format, and
+  cloud-flow sections. Kept folder guide (updated paths), quick start,
+  running-things (eval commands), and architecture overview. Added the
+  two-step manifest → train workflow, checkpoint resume, and publish/fetch
+- documentation.
+
 ## 2026-06-22
 
 **Adversarial + feature-matching losses (optional GAN path)**
