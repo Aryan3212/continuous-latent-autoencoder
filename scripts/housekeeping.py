@@ -23,6 +23,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 class Record(TypedDict, total=False):
+    """One audio clip in the unified manifest schema.
+
+    Required at adapter-emit time: ``audio_filepath``, ``dataset``.
+    ``audio_filepath`` is absolute on the prep instance and gets rewritten to
+    a repo-relative path during the pack step.
+    """
+
     audio_filepath: str
     text: Optional[str]
     duration: Optional[float]
@@ -34,15 +41,27 @@ class Record(TypedDict, total=False):
 
 
 class DatasetAdapter(abc.ABC):
+    """Per-dataset surface: download raw archives, yield unified Records."""
+
     name: str
     language: str = "bn"
 
     @abc.abstractmethod
     def download(self, dest_root: Path) -> Path:
+        """Download raw archives under ``dest_root``.
+
+        Must be idempotent: a second call with the same ``dest_root`` should
+        be a no-op (or only re-fetch missing parts). Returns the raw-data
+        directory used as input to ``iter_records``.
+        """
         ...
 
     @abc.abstractmethod
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
+        """Yield one ``Record`` per audio clip.
+
+        ``audio_filepath`` should be an absolute path.
+        """
         ...
 
 
@@ -57,10 +76,20 @@ def hf_snapshot_download(
     dest_dir: Path,
     allow_patterns: Optional[Sequence[str] | str] = None,
 ) -> Path:
+    """Idempotent snapshot_download into ``dest_dir``.
+
+    huggingface_hub already short-circuits on cache hits, so re-running is
+    cheap. We only wrap to consistently pass HF_TOKEN.
+    """
     from huggingface_hub import snapshot_download
 
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    # A `.download.done` marker is written only after snapshot_download returns
+    # cleanly, so its presence means the full snapshot landed. An interrupted
+    # download leaves no marker and the next run refetches. (snapshot_download
+    # already short-circuits per-file on cache hits, so a re-run is cheap even
+    # without the marker — the marker is just an unambiguous "fully done" flag.)
     marker = dest_dir / ".download.done"
     if marker.exists():
         print(f"[hf] {repo_id} already fully downloaded -> {dest_dir!s}")
@@ -85,6 +114,12 @@ def iter_parquet_records(
     extract_subdir: str = "extracted",
     glob_patterns: Sequence[str] = ("**/*.parquet",),
 ) -> Iterator[Record]:
+    """Walk parquet files under ``raw_dir``, extract inline audio, yield Records.
+
+    Recognises the standard HF audio-dataset shape where each row has an
+    ``audio`` (or ``speech``) column containing ``{"bytes": ..., "path": ...}``.
+    Extracted files land in ``<raw_dir>/<extract_subdir>/<id>.<ext>``.
+    """
     import pyarrow.parquet as pq
 
     extract_root = raw_dir / extract_subdir
@@ -93,6 +128,7 @@ def iter_parquet_records(
     parquet_files: list[Path] = []
     for pattern in glob_patterns:
         parquet_files.extend(sorted(raw_dir.glob(pattern)))
+    # De-dupe while preserving order.
     seen: set[Path] = set()
     parquet_files = [p for p in parquet_files if not (p in seen or seen.add(p))]
     if not parquet_files:
@@ -122,6 +158,7 @@ def iter_parquet_records(
         )
 
         n = table.num_rows
+        # Materialise once to avoid per-cell pyarrow scalar overhead.
         audio_data = table[audio_col].to_pylist()
         text_data = table[text_col].to_pylist() if text_col else [None] * n
         id_data = table[id_col].to_pylist() if id_col else [None] * n
@@ -150,6 +187,9 @@ def iter_parquet_records(
             else:
                 file_id = f"{dataset_name}_{counter:09d}"
 
+            # Pick an extension that matches the inline path when known so
+            # downstream torchaudio dispatch isn't confused. Default to .flac
+            # (lossless; safe for unknown payload).
             ext = ".flac"
             if inline_path:
                 guess = Path(inline_path).suffix.lower()
@@ -159,6 +199,8 @@ def iter_parquet_records(
             audio_path = extract_root / f"{file_id}{ext}"
             if not audio_path.exists():
                 if audio_bytes is None:
+                    # Some datasets reference a path-on-disk relative to the
+                    # parquet's directory rather than inlining bytes.
                     if inline_path:
                         candidate = (pf.parent / inline_path).resolve()
                         if candidate.exists():
@@ -198,6 +240,7 @@ def iter_parquet_records(
 # Adapters
 # =========================================================================== #
 
+# OpenSLR-53 is sharded into 10 numeric parts (0-9) plus 6 alphabetic (a-f).
 _OPENSLR53_PARTS: tuple = tuple(list(range(10)) + ["a", "b", "c", "d", "e", "f"])
 _OPENSLR53_BASE_URL = "https://www.openslr.org/resources/53/asr_bengali_{part}.zip"
 
@@ -212,12 +255,20 @@ class OpenSLR53Adapter(DatasetAdapter):
 
         asr_bengali_dir = out_dir / "asr_bengali"
         asr_bengali_dir.mkdir(parents=True, exist_ok=True)
+
+        # utt_spk_text.tsv is a standalone top-level file (not bundled in any
+        # part zip) — fetch it separately, idempotently.
         tsv_path = asr_bengali_dir / "utt_spk_text.tsv"
         if not tsv_path.exists():
             tsv_url = "https://www.openslr.org/resources/53/utt_spk_text.tsv"
             print(f"[openslr53] downloading utt_spk_text.tsv from {tsv_url}")
             urllib.request.urlretrieve(tsv_url, tsv_path)
 
+        # 16 part zips. The zips are deleted after extraction, so their absence
+        # can't signal "already done" — we drop a per-part marker instead so a
+        # re-run skips the multi-GB refetch (the old code re-downloaded every
+        # part on every run). A failed download/extract raises and leaves no
+        # marker, so the next run retries just that part.
         for part in _OPENSLR53_PARTS:
             marker = out_dir / f".part_{part}.done"
             if marker.exists():
@@ -235,10 +286,15 @@ class OpenSLR53Adapter(DatasetAdapter):
         return out_dir
 
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
+        # The upstream zip lays things out as:
+        #   raw_dir/asr_bengali/utt_spk_text.tsv
+        #   raw_dir/asr_bengali/data/<2char>/<utt>.flac
+        # Older instructions used different relative roots; support both.
         base = raw_dir / "asr_bengali"
         tsv = base / "utt_spk_text.tsv"
         data_root = base / "data"
         if not tsv.exists():
+            # Some mirrors flatten one level — try raw_dir directly.
             alt_tsv = raw_dir / "utt_spk_text.tsv"
             alt_data = raw_dir / "data"
             if alt_tsv.exists():
@@ -254,6 +310,7 @@ class OpenSLR53Adapter(DatasetAdapter):
                 if len(parts) < 3:
                     continue
                 utt_id, spk_id, text = parts[0], parts[1], parts[2]
+                # OpenSLR shards utterances into 2-char prefix subfolders.
                 subfolder = utt_id[:2]
                 audio_path = data_root / subfolder / f"{utt_id}.flac"
                 if not audio_path.exists():
@@ -272,10 +329,29 @@ class OpenSLR53Adapter(DatasetAdapter):
 
 
 class CommonVoiceBnAdapter(DatasetAdapter):
+    """Mozilla Common Voice (Scripted Speech) — Bengali.
+
+    Distributed via the Mozilla Data Collective platform (Common Voice left HF
+    in Oct 2025). CC0-licensed, so no per-competition rules acceptance — but you
+    DO have to accept the dataset terms once in the MDC web UI, then it needs an
+    ``MDC_API_KEY``. We use the documented REST flow (no SDK dependency):
+    ``POST /datasets/<id>/download`` with a Bearer token returns a presigned URL
+    (valid 12h; rate-limited to 30 requests/day per org), which we stream to a
+    tar.gz and extract. On disk it's the standard Common Voice layout:
+    ``cv-corpus-*/bn/clips/*.mp3`` plus ``*.tsv`` manifests. For self-supervised
+    pretraining we enumerate the ``clips/`` dir directly (every recorded clip —
+    ~1M for bn), attaching transcripts/speaker from the validated/invalidated/
+    other TSVs where present.
+    """
+
     name = "common_voice_bn"
     language = "bn"
 
+    # Tail of the dataset URL: mozilladatacollective.com/datasets/<id>.
+    # This is "Common Voice Scripted Speech 26.0 - Bengali".
     _DATASET_ID = "cmqim44fo00tinr07mbu70eg7"
+    # API docs live under a `dev.` host; the production API shares the
+    # dataset-page host. We try production first, then dev. Override w/ MDC_API_BASE.
     _API_BASES = (
         "https://mozilladatacollective.com/api",
         "https://dev.mozilladatacollective.com/api",
@@ -285,13 +361,15 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         out_dir = dest_root / "common_voice_bn"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Already extracted? (idempotent re-run) — bail before hitting the API,
+        # which is rate-limited to 30 presigned-URL requests/day per org.
         if self._find_validated_tsv(out_dir) is not None:
             print(f"[common_voice_bn] already extracted under {out_dir!s}")
             return out_dir
 
         import requests
 
-        api_key = os.environ["MDC_API_KEY"]
+        api_key = os.environ["MDC_API_KEY"]  # hard KeyError up front if unset
         headers = {"Authorization": f"Bearer {api_key}"}
         bases = (
             [os.environ["MDC_API_BASE"]]
@@ -299,6 +377,7 @@ class CommonVoiceBnAdapter(DatasetAdapter):
             else list(self._API_BASES)
         )
 
+        # 1) Ask MDC for a presigned download URL (counts against the daily cap).
         info = None
         last_err: Exception | None = None
         for base in bases:
@@ -323,6 +402,8 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         size_gb = int(info.get("sizeBytes") or 0) >> 30
         tar_path = out_dir / filename
 
+        # 2) Stream the presigned URL to disk (already signed — no auth header).
+
         print(f"[common_voice_bn] downloading {filename} (~{size_gb} GB)")
         with requests.get(dl_url, stream=True, timeout=600) as r:
             r.raise_for_status()
@@ -331,14 +412,17 @@ class CommonVoiceBnAdapter(DatasetAdapter):
                     if chunk:
                         f.write(chunk)
 
+        # 3) Extract the Common Voice tar.gz (cv-corpus-*/bn/...).
         print(f"[common_voice_bn] extracting {tar_path.name}")
         with tarfile.open(tar_path, "r:gz") as tf:
             tf.extractall(out_dir)
+        # Keep the archive; deleting risks a re-download against the 30/day cap.
 
         return out_dir
 
     @staticmethod
     def _find_validated_tsv(raw_dir: Path) -> Path | None:
+        # Common Voice nests under cv-corpus-<ver>-<date>/<locale>/; glob for it.
         for name in ("validated.tsv", "train.tsv"):
             hits = sorted(raw_dir.rglob(name))
             if hits:
@@ -347,6 +431,8 @@ class CommonVoiceBnAdapter(DatasetAdapter):
 
     @staticmethod
     def _find_clips_dir(raw_dir: Path) -> Path | None:
+        """Locate the clips/ dir — flat Kaggle mount (``<root>/clips``) or the
+        nested ``cv-corpus-*/<locale>/clips`` layout from the tar extract."""
         direct = raw_dir / "clips"
         if direct.is_dir():
             return direct
@@ -366,6 +452,12 @@ class CommonVoiceBnAdapter(DatasetAdapter):
             return
         cv_dir = clips_dir.parent
 
+        # Transcripts/speakers, built once as a filename -> (sentence, client)
+        # map. Common Voice partitions every recorded clip across validated /
+        # invalidated / other (train/dev/test are subsets of validated), so the
+        # union of those three carries the metadata for the whole corpus. This
+        # is ONLY for metadata — the authoritative clip list is the clips/ dir
+        # below, so self-supervised training sees all ~1M clips.
         meta: dict[str, tuple[Optional[str], Optional[str]]] = {}
         for name in ("validated.tsv", "invalidated.tsv", "other.tsv"):
             tsv = cv_dir / name
@@ -406,6 +498,9 @@ class CommonVoiceBnAdapter(DatasetAdapter):
                 )
                 meta[fname] = (text, spk)
 
+        # Authoritative clip list: every audio file actually present on disk.
+        # scandir avoids a per-row exists() check and never references a clip the
+        # mount doesn't have.
         emitted = 0
         with os.scandir(clips_dir) as it:
             for entry in it:
@@ -431,6 +526,8 @@ class CommonVoiceBnAdapter(DatasetAdapter):
 def _authenticate_kaggle() -> "object":
     from kaggle.api.kaggle_api_extended import KaggleApi
 
+    # KaggleApi reads KAGGLE_USERNAME / KAGGLE_KEY from the env. Touch them so
+    # a missing key fails fast here rather than inside the SDK.
     _ = os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"]
     api = KaggleApi()
     api.authenticate()
@@ -489,6 +586,7 @@ class RegSpeech12Adapter(DatasetAdapter):
                 continue
 
             cols = list(df.columns)
+            # Heuristic column resolution; the original script does the same.
             id_candidates = ["id", "file_name", "filename", "audio", "path", cols[0]]
             text_candidates = [
                 "sentence",
@@ -533,12 +631,26 @@ class RegSpeech12Adapter(DatasetAdapter):
 
 
 class BengaliAISpeechAdapter(DatasetAdapter):
+    """Bengali.AI Speech Recognition — the Kaggle ``bengaliai-speech``
+    competition train set (~1200 h of read + spontaneous Bengali speech,
+    963k mp3 clips, ~26 GB).
+
+    This is a Kaggle *competition* (not a dataset), so you must accept the
+    rules once at kaggle.com/competitions/bengaliai-speech before the API
+    will serve the files; otherwise the download 403s. Layout after unzip:
+    ``train.csv`` (columns ``id,sentence,split``) + ``train_mp3s/<id>.mp3``.
+    We emit every labeled row; the competition's own train/valid split is
+    ignored since pack does its own train/val partition.
+    """
+
     name = "bengaliai_speech"
     language = "bn"
 
     _COMPETITION = "bengaliai-speech"
 
     def download(self, dest_root: Path) -> Path:
+        # Folder matches the competition slug so an existing manual download
+        # (e.g. data/bengaliai-speech) is reused when --data-root points at it.
         out_dir = dest_root / self._COMPETITION
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -613,6 +725,8 @@ class IndicVoicesAdapter(DatasetAdapter):
         return out_dir
 
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
+        # Restrict the parquet glob to the Bengali language subdir so we
+        # don't accidentally pick up unrelated splits if the cache grows.
         yield from iter_parquet_records(
             raw_dir=raw_dir,
             dataset_name=self.name,
@@ -629,6 +743,8 @@ class SubakKoAdapter(DatasetAdapter):
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "subak_ko"
+        # Only fetch the parquet shards we actually use; the repo also has a
+        # large unused zip under `Data/` (23.3 GB) that we don't need.
         hf_snapshot_download(
             self._REPO_ID, out_dir, allow_patterns=["data/*.parquet"]
         )
@@ -650,6 +766,7 @@ class ShrutilipiAdapter(DatasetAdapter):
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "shrutilipi"
+        # Bengali subset lives under `bengali/` as flat train-*.parquet shards.
         hf_snapshot_download(self._REPO_ID, out_dir, allow_patterns="bengali/*")
         return out_dir
 
@@ -663,6 +780,12 @@ class ShrutilipiAdapter(DatasetAdapter):
 
 
 class KathbathAdapter(DatasetAdapter):
+    """Bengali eval/probe corpus (valid-* shards). To keep it as a held-out
+    eval set, exclude it from pretraining ``--datasets``; that's why it's
+    left out of the Makefile default. It remains registered here so it can
+    still be downloaded explicitly via ``DATASETS=kathbath``.
+    """
+
     name = "kathbath"
     language = "bn"
 
@@ -670,6 +793,8 @@ class KathbathAdapter(DatasetAdapter):
 
     def download(self, dest_root: Path) -> Path:
         out_dir = dest_root / "kathbath"
+        # Bengali subset is under `bengali/` as flat shards; no test split
+        # exists, so use valid-* as the held-out probe/eval set.
         hf_snapshot_download(
             self._REPO_ID,
             out_dir,
@@ -688,6 +813,8 @@ class KathbathAdapter(DatasetAdapter):
             ),
         )
 
+
+# --- registry -------------------------------------------------------------- #
 
 REGISTRY: dict[str, type[DatasetAdapter]] = {
     "openslr53": OpenSLR53Adapter,
@@ -710,6 +837,7 @@ def get_adapter(name: str) -> DatasetAdapter:
 def _per_dataset_split(
     records: list[Record], val_pct: float, rng: random.Random
 ) -> tuple[list[Record], list[Record]]:
+    """Split per ``dataset`` so every source contributes to both splits."""
     by_ds: dict[str, list[Record]] = {}
     for r in records:
         by_ds.setdefault(r["dataset"], []).append(r)
@@ -740,6 +868,12 @@ def build_manifests_only(
     val_pct: float = 0.05,
     seed: int = 42,
 ) -> dict[str, Any]:
+    """Walk attached raw datasets and write ``train.jsonl`` / ``val.jsonl`` with
+    ABSOLUTE audio paths — no transcode, no copy.
+
+    Each adapter's ``iter_records`` runs against its already-mounted raw dir, so
+    the rows point straight at the read-only source.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -811,10 +945,12 @@ _DEFAULT_CKPT_REPO = "aryanrahman/clae-bengali-encoder"
 
 
 def _data_root(arg: str | None) -> Path:
+    # Default: a gitignored `datasets/` folder at the repo root, created on demand.
     return Path(arg or os.environ.get("DATA_ROOT") or (_REPO_ROOT / "datasets"))
 
 
 def _parse_datasets(s: str | None) -> List[str]:
+    """Comma-separated list of adapter names; empty/None -> all registered."""
     if not s:
         return sorted(REGISTRY)
     out = [x.strip() for x in s.split(",") if x.strip()]
@@ -825,6 +961,8 @@ def _parse_datasets(s: str | None) -> List[str]:
 
 
 class _LimitedAdapter(DatasetAdapter):
+    """Wrap an adapter to cap ``iter_records`` at ``limit`` rows (smoke testing)."""
+
     def __init__(self, inner: DatasetAdapter, limit: int) -> None:
         self._inner = inner
         self._limit = int(limit)
@@ -940,6 +1078,12 @@ def _run_make_manifests(args: argparse.Namespace) -> None:
 def fetch_checkpoint(
     repo_id: str, dest: Path, filename: str = "last.pt"
 ) -> Optional[Path]:
+    """Download ``filename`` from a HF model repo to ``dest``.
+
+    Returns the local path, or ``None`` if the repo or file doesn't exist yet
+    (the first session, before any checkpoint has been published) — the caller
+    then starts training fresh instead of resuming.
+    """
     from huggingface_hub import hf_hub_download
 
     dest = Path(dest)
@@ -983,6 +1127,7 @@ def _run_fetch_checkpoint(args: argparse.Namespace) -> None:
 
 
 def _render_model_card(repo_id: str, step: object, cfg_yaml: str) -> str:
+    """Compose a minimal HF model card README with YAML front matter."""
     wandb_project = os.environ.get("WANDB_PROJECT", "")
     wandb_line = f"- W&B project: `{wandb_project}`\n" if wandb_project else ""
     return (
@@ -1028,6 +1173,7 @@ def publish_checkpoint(
     commit_message: str | None = None,
     private: bool = True,
 ) -> str:
+    """Push ``last.pt`` + a generated model card + ``config.yaml`` to a HF model repo."""
     import torch
     import yaml
     from huggingface_hub import HfApi
