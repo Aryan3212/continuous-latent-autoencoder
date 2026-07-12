@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import warnings
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import yaml
@@ -38,7 +38,7 @@ from models.decoder_generator import WaveformDecoder
 from models.discriminator import MultiPeriodDiscriminator
 from models.encoder import Encoder
 from models.frontend_conv import ConvFrontend
-from models.mhc import sinkhorn_log
+
 from models.projector import Projector
 from models.sigreg import SIGReg
 from config import apply_overrides, load_config
@@ -147,26 +147,17 @@ def save_checkpoint(
 
 def _global_local_jepa_loss(
     p_cat: torch.Tensor,
-    local_mask_cat: torch.Tensor,
     num_globals: int,
     num_locals: int,
-    lam_context: float = 1.0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """V-JEPA 2.1 dense loss with asymmetric global/local recipe (DINO-style).
+) -> torch.Tensor:
+    """Simplified JEPA loss: uniform MSE on all frames.
 
-    The per-frame center is computed from *globals only* — this is the "anchor".
-    Heavily-masked local views don't pull the center toward zero. Then:
-      L_global  : cross-global per-frame MSE, uniform mean over (g, b, t).
-      L_predict : locals at masked frames, MSE against the global center.
-      L_context : locals at visible frames, MSE weighted 1/sqrt(d_min) by
-                  distance to the nearest masked frame in the same local view.
+    Asymmetric global/local recipe (DINO-style):
+      - The per-frame center is computed from globals only (anchor).
+      - All local frames are pulled toward this center uniformly.
 
-    p_cat:           (V*B, P, T'), V = num_globals + num_locals.
-                     First num_globals*B rows are globals, rest are locals.
-    local_mask_cat:  (num_locals*B, 1, T'), 1 at masked frames (waveform-derived).
-
-    Returns (loss, l_global, l_predict, l_context) where the last three are
-    detached scalars for logging.
+    p_cat: (V*B, P, T'), V = num_globals + num_locals.
+           First num_globals*B rows are globals, rest are locals.
     """
     G = int(num_globals)
     L = int(num_locals)
@@ -175,48 +166,15 @@ def _global_local_jepa_loss(
     B = VB // V
 
     p = p_cat.view(V, B, D, T)
-    p_g = p[:G]                                     # (G, B, D, T)
-    p_l = p[G:]                                     # (L, B, D, T)
+    p_g = p[:G]
+    p_l = p[G:]
 
-    center = p_g.mean(dim=0, keepdim=True)          # (1, B, D, T)  globals-only anchor
+    center = p_g.mean(dim=0, keepdim=True)
 
-    # Cross-global consistency: pull each global to the anchor on every frame.
-    err_g = (p_g - center).pow(2).mean(dim=2)       # (G, B, T)
-    # Identically zero when num_globals == 1: the center IS the single global.
-    l_global = err_g.mean()
+    l_global = (p_g - center).pow(2).mean()
+    l_jepa = (p_l - center).pow(2).mean()
 
-    # Locals: predict + context against the globals-only center.
-    err_l = (p_l - center).pow(2).mean(dim=2)       # (L, B, T)
-    m = local_mask_cat.view(L, B, T).to(p.dtype)    # 1 on masked frames
-    one_minus_m = 1.0 - m
-
-    pred_num = (err_l * m).sum()
-    pred_den = m.sum().clamp_min(1.0)
-    l_predict = pred_num / pred_den
-
-    big = float(T + 1)
-    arange = torch.arange(T, device=err_l.device, dtype=err_l.dtype)  # (T,)
-    is_masked = m > 0.5                                                # (L, B, T)
-    # Forward: nearest masked index t' <= t. Indices outside masked positions are -big
-    # so cummax keeps the most recent masked index; distance = t - that index.
-    idx_fwd = torch.where(is_masked, arange.expand_as(m), torch.full_like(m, -big))
-    recent_fwd = idx_fwd.cummax(dim=-1).values                         # (L, B, T)
-    d_fwd = (arange - recent_fwd).clamp_min(0).clamp_max(big)
-    # Where no masked frame yet seen, recent_fwd is -big and d_fwd would be huge.
-    # clamp_max(big) keeps numerical sanity; downstream takes minimum with d_bwd.
-    # Backward: nearest masked index t' >= t. cummin from the right.
-    idx_bwd = torch.where(is_masked, arange.expand_as(m), torch.full_like(m, 2.0 * big))
-    nearest_right = idx_bwd.flip(-1).cummin(dim=-1).values.flip(-1)    # (L, B, T)
-    d_bwd = (nearest_right - arange).clamp_min(0).clamp_max(big)
-    d_min = torch.minimum(d_fwd, d_bwd).clamp_min(1.0)
-    ctx_w = one_minus_m / d_min.sqrt()
-
-    ctx_num = (err_l * ctx_w).sum()
-    ctx_den = ctx_w.sum().clamp_min(1e-6)
-    l_context = ctx_num / ctx_den
-
-    loss = l_global + l_predict + lam_context * l_context
-    return loss, l_global.detach(), l_predict.detach(), l_context.detach()
+    return l_global + l_jepa
 
 
 def _participation_ratio(x: torch.Tensor) -> torch.Tensor:
@@ -548,9 +506,7 @@ def main() -> None:
     adaptive_adv = acfg.adaptive
     adaptive_max = acfg.adaptive_max
 
-    # V-JEPA 2.1 context-loss weight: relative weight of L_context vs L_predict
-    # in the Dense Predictive Loss. Paper uses ~1.0 with distance weighting.
-    lam_context_w = jcfg.context_weight
+
 
     def _extra_state(**extra: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"scheduler": scheduler.state_dict()}
@@ -659,14 +615,10 @@ def main() -> None:
                 z_cat = model["encoder"](h0_cat)                      # (V*B, D, T')
                 p_cat = model["projector"](z_cat)                     # (V*B, P, T')
 
-                local_mask_cat = local_frame_masks.unsqueeze(1)        # (L*B, 1, T')
-
-                l_jepa, l_jepa_global_dbg, l_jepa_pred_dbg, l_jepa_ctx_dbg = _global_local_jepa_loss(
+                l_jepa = _global_local_jepa_loss(
                     p_cat,
-                    local_mask_cat,
                     num_globals=num_globals,
                     num_locals=num_locals,
-                    lam_context=lam_context_w,
                 )
 
                 # ---- SIGReg (frame-level, on projector output only) ------------
@@ -685,9 +637,6 @@ def main() -> None:
                 l_sig = sigreg(sig_global, step=step)
                 sig_stats = {
                     "l_sig_frm": l_sig.detach(),
-                    "l_jepa_predict": l_jepa_pred_dbg,
-                    "l_jepa_context": l_jepa_ctx_dbg,
-                    "l_jepa_global": l_jepa_global_dbg,
                 }
 
                 # Diagnostic slicing: compare global-0 vs local-0 (clean vs masked signal).
@@ -891,25 +840,6 @@ def main() -> None:
                 # are collapsing and the term should come back.
                 log_stats["p_rank_utt"] = _participation_ratio(p_cat[:B].detach().float().mean(dim=2)).item()
             row = {"step": step, **log_stats}
-
-            encoder_mod = _unwrap(model["encoder"])
-            if hasattr(encoder_mod, "mhc_wrappers"):
-                for wrapper in encoder_mod.mhc_wrappers:
-                    if not hasattr(wrapper, "H_res_alpha_logit"):
-                        continue
-                    l_idx = getattr(wrapper, "layer_index", -1)
-                    with torch.no_grad():
-                        alpha = torch.sigmoid(wrapper.H_res_alpha_logit).item()
-                        row[f"mhc/layer_{l_idx}_alpha"] = alpha
-                        S = sinkhorn_log(
-                            wrapper.H_res_logits,
-                            num_iters=wrapper.mhc_num_iters,
-                            tau=wrapper.mhc_tau,
-                        )
-                        # Row entropy of doubly-stochastic mixing matrix:
-                        # ~0 = identity (no mixing), log(num_streams) = uniform mixing.
-                        row_ent = -(S * (S.clamp_min(1e-12)).log()).sum(dim=-1).mean().item()
-                        row[f"mhc/layer_{l_idx}_S_row_entropy"] = row_ent
 
             jsonl.log(row)
             if wb is not None:
