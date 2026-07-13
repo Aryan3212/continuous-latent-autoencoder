@@ -33,3 +33,6 @@ reference-implementations/UAE/
 reconstructions_latest/
 *.pdf
 XgpRV.gz
+pyproject.toml
+staging/
+datasets/SUBESCO/
