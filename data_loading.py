@@ -9,6 +9,8 @@ the eval probes, and a couple of scripts. Actual datasets live under
 from __future__ import annotations
 
 import json
+import torchaudio
+torchaudio.set_audio_backend("ffmpeg")
 import math
 import os
 import pathlib
