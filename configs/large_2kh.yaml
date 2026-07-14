@@ -112,8 +112,8 @@ loss:
     enabled: true
     adv_weight: 0.3
     fm_weight: 0.5
-    adv_start_step: 500000
-    fm_start_step: 550000
+    adv_start_step: 65000
+    fm_start_step: 65000
     lr: 1.0e-4
     betas: [0.8, 0.99]
     periods: [2, 3, 5, 7, 11]
@@ -126,16 +126,16 @@ optim:
   weight_decay: 1.0e-5
   scheduler:
     warmup_steps: 15000
-    total_steps: 1875000
+    total_steps: 200000
     min_lr_ratio: 0.0
   grad_clip: 1.0
 
 train:
-  batch_size: 64
+  batch_size: 32
   grad_accum_steps: 4
-  max_steps: 1875000
+  max_steps: 200000
   log_interval_steps: 50
   eval_interval_steps: 5000
   save_interval_steps: 20000
-  probe_interval_steps: 500
-  val_batches: 100
+  probe_interval_steps: 5000
+  val_batches: 10

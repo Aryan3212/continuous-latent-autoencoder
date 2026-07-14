@@ -880,7 +880,7 @@ def build_manifests_only(
     raw_counts: dict[str, int] = {}
     all_records: list[Record] = []
     for adapter, raw_dir in adapters_with_dirs:
-        raw_dir = Path(raw_dir)
+        raw_dir = Path(raw_dir).resolve()
         if not raw_dir.exists():
             raise SystemExit(
                 f"[manifest] raw dir for {adapter.name} does not exist: {raw_dir}"
@@ -890,8 +890,8 @@ def build_manifests_only(
         for r in recs:
             r["dataset"] = adapter.name
             p = r.get("audio_filepath")
-            if p and not os.path.isabs(p):
-                r["audio_filepath"] = str((raw_dir / p).resolve())
+            if p:
+                r["audio_filepath"] = str(Path(p).resolve())
         raw_counts[adapter.name] = len(recs)
         all_records.extend(recs)
         print(f"[manifest]   {adapter.name}: {len(recs)} records")
