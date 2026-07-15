@@ -1,14 +1,11 @@
-# Large-scale config: ~2000h, 50 epochs, ~20M params, simplified JEPA + reconstruction + late GAN
+# Large-scale config: ~2000h, 24GB GPU (RTX 4090 / A10G), mixed precision.
 #
-# Key differences from exp0:
-#   - Simplified JEPA loss: uniform MSE (no masked/visible split)
-#   - GAN enabled, very late (step 500k+), light weights
-#   - Larger model, longer scheduler, less aggressive aug (more data diversity)
-#   - Designed for 24GB GPU (RTX 4090, A10G, etc.) with mixed precision
+# Objective: mel reconstruction + JePA + VISReg, FastConformer encoder
+# (Squeeze-and-Excitation + 9-tap conv). GAN is OFF for the real run; flip it
+# on via the smoke-test command overrides to exercise the adversarial path.
 #
 # Dataset assumptions:
 #   2000 hours @ 16kHz, 3s segments, batch 64 = 37,500 steps/epoch
-#   50 epochs = 1,875,000 steps (rough upper bound; DataLoader droplast reduces it slightly)
 #   Warmup ~1% = 15,000 steps, cosine decay to 0 over the rest
 
 run:
@@ -56,20 +53,14 @@ model:
     strides: [5, 4, 4, 4, 4]
     groups: 4
   encoder:
-    # To use FastConformer (Squeeze-and-Excitation + 9-tap conv) instead of the
-    # standard Conformer, set:
-    #   encoder_type: fastconformer
-    #   cnn_module_kernel: 9
-    # (optionally xscaling: true). d_model/n_layers/num_heads/feedforward_dim are
-    # shared, so it is a drop-in swap at the same dimensions. SE adds a small
-    # number of params; set use_se: false to keep the param count closest.
-    encoder_type: conformer
+    # FastConformer: Squeeze-and-Excitation + 9-tap conv (drop-in for Conformer).
+    encoder_type: fastconformer
     d_model: 256
     n_layers: 8
     num_heads: 8
     feedforward_dim: 1024
     dropout: 0.1
-    cnn_module_kernel: 31
+    cnn_module_kernel: 9
     mhc:
       enabled: true
       num_streams: 2
@@ -93,10 +84,10 @@ model:
     n_hidden_layers: 1
 
 loss:
-  recon_type: stft              # "stft" | "mel" — reconstruction loss used for training
+  recon_type: mel              # "stft" | "mel" — reconstruction loss used for training
   recon_weight: 0.003          # weight applied to whichever recon loss is active
-  recon_log_start_step: 1000   # only log the STFT log-mag metric after this many steps
-  reg_type: sigreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
+  recon_log_start_step: 1000   # only log the mel log-mag metric after this many steps
+  reg_type: visreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
     fft_sizes: [256, 512, 1024, 2048]
     hop_ratio: 0.25
@@ -134,7 +125,7 @@ loss:
     weight: 0.05                # mirror sigreg default unless tuned
     num_projections: 256       # VISReg random-projection count (K)
   adv:
-    enabled: true
+    enabled: false             # real run: no GAN. Smoke test overrides enabled=true + early start.
     adv_weight: 0.3
     fm_weight: 0.5
     adv_start_step: 65000
