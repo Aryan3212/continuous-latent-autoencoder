@@ -1,10 +1,16 @@
-"""HiFi-GAN Multi-Period Discriminator (MPD).
+"""HiFi-GAN Multi-Period Discriminator (MPD), adapted to the reconstruction domain.
 
-Operates on the decoder's raw waveform output. Each sub-discriminator reshapes
-the 1-D waveform to a 2-D grid at its period and runs a small 2-D conv stack,
-which is much lighter on VRAM than full-length 1-D multi-scale discriminators —
-the reason MPD-only was chosen for the 6 GB card. Returns per-sub-discriminator
-logits and the intermediate feature maps used by the feature-matching loss.
+The discriminator operates on the SAME representation as the active
+reconstruction loss (mel or STFT magnitude spectrogram), NOT the raw waveform:
+the generator is trained to fool D in the spectrogram domain, so the adversarial
+signal pushes the decoder toward realistic mel/STFT features rather than raw
+samples. Each sub-discriminator reshapes the spectrogram's time axis to a 2-D
+grid at its period and runs a small 2-D conv stack, which is much lighter on
+VRAM than full-length discriminators — the reason MPD-only was chosen for the
+6 GB card. The input is (B, F, T_frames) where F is the number of spectrogram
+bins (n_mels or n_freqs) and is set via `in_channels`. Returns
+per-sub-discriminator logits and the intermediate feature maps used by the
+feature-matching loss.
 
 Reference: Kong et al., "HiFi-GAN" (2020); see
 reference-implementations / standard MPD formulation.
@@ -26,23 +32,26 @@ def _same_pad(kernel_size: int) -> int:
 
 
 class DiscriminatorP(nn.Module):
-    """Single-period sub-discriminator: (B,1,T) -> 2-D grid -> conv stack.
+    """Single-period sub-discriminator: (B,F,T) -> 2-D time-grid -> conv stack.
 
-    `channels` are the hidden widths. The HiFi-GAN default (32,128,512,1024)
-    yields a ~41M-param MPD — far too heavy for a 6 GB card next to a ~3M
-    generator — so a slimmer width is used in practice (see AdvCfg.disc_channels).
+    `channels` are the hidden widths. `in_channels` is the number of spectrogram
+    bins (n_mels or n_freqs) fed as the input "channel" dimension. The HiFi-GAN
+    default (32,128,512,1024) yields a ~41M-param MPD — far too heavy for a 6 GB
+    card next to a ~3M generator — so a slimmer width is used in practice (see
+    AdvCfg.disc_channels).
     """
 
     def __init__(
         self,
         period: int,
         channels: List[int] = (32, 128, 512, 1024),
+        in_channels: int = 1,
         kernel_size: int = 5,
         stride: int = 3,
     ):
         super().__init__()
         self.period = period
-        chans = [1, *channels]
+        chans = [in_channels, *channels]
         self.convs = nn.ModuleList(
             weight_norm(
                 nn.Conv2d(
@@ -71,6 +80,7 @@ class DiscriminatorP(nn.Module):
             n_pad = self.period - (t % self.period)
             x = F.pad(x, (0, n_pad), mode="reflect")
             t = t + n_pad
+        # x: (B, F, T) -> (B, F, T//period, period); convs run over the time-grid.
         x = x.view(b, c, t // self.period, self.period)
 
         for conv in self.convs:
@@ -85,16 +95,21 @@ class DiscriminatorP(nn.Module):
 class MultiPeriodDiscriminator(nn.Module):
     """Bank of per-period sub-discriminators (HiFi-GAN MPD)."""
 
-    def __init__(self, periods: List[int], channels: List[int] = (32, 128, 512, 1024)):
+    def __init__(
+        self,
+        periods: List[int],
+        channels: List[int] = (32, 128, 512, 1024),
+        in_channels: int = 1,
+    ):
         super().__init__()
         self.discriminators = nn.ModuleList(
-            DiscriminatorP(p, channels=channels) for p in periods
+            DiscriminatorP(p, channels=channels, in_channels=in_channels) for p in periods
         )
 
     def forward(
         self, y: torch.Tensor, y_hat: torch.Tensor
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[torch.Tensor]], List[List[torch.Tensor]]]:
-        """y / y_hat: (B,1,T) real / generated waveforms.
+        """y / y_hat: (B,F,T_frames) real / generated spectrograms.
 
         Returns (d_real, d_fake, fmap_real, fmap_fake) — lists over
         sub-discriminators (HiFi-GAN signature).

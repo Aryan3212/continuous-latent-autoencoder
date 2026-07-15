@@ -1,19 +1,41 @@
 from __future__ import annotations
 
 import copy
+import math
 
 import torch
 import torch.nn as nn
 
 from models.conformer import ConformerLayer
+from models.fastconformer import FastConformerLayer
 from models.mhc import MHCWrapper
 from schema import EncoderCfg
 
 
+def _build_encoder_layer(cfg: EncoderCfg) -> nn.Module:
+    """Construct one encoder block. Both ConformerLayer and FastConformerLayer
+    expose the same (B, T, D) -> (B, T, D) interface, so the rest of the
+    Encoder (stack + MHC wrappers) is agnostic to which is used."""
+    common = dict(
+        d_model=cfg.d_model,
+        num_heads=cfg.num_heads,
+        feedforward_dim=cfg.feedforward_dim,
+        cnn_module_kernel=cfg.cnn_module_kernel,
+        dropout=cfg.dropout,
+    )
+    if cfg.encoder_type == "conformer":
+        return ConformerLayer(**common)
+    elif cfg.encoder_type == "fastconformer":
+        return FastConformerLayer(**common, use_se=cfg.use_se)
+    raise ValueError(f"unknown encoder_type={cfg.encoder_type!r} (expected 'conformer'|'fastconformer')")
+
+
 class Encoder(nn.Module):
-    """Conformer-based encoder over low-rate tokens.
+    """Encoder over low-rate tokens.
 
     Input:  h0 (B, C, T')  -> Output: hE (B, D, T').
+    The block type is selected by ``cfg.encoder_type`` ("conformer" /
+    "fastconformer"); see ``_build_encoder_layer``.
     """
 
     def __init__(self, in_channels: int, cfg: EncoderCfg):
@@ -21,13 +43,12 @@ class Encoder(nn.Module):
         self.cfg = cfg
         self.in_proj = nn.Conv1d(in_channels, cfg.d_model, kernel_size=1)
 
-        layer = ConformerLayer(
-            d_model=cfg.d_model,
-            num_heads=cfg.num_heads,
-            feedforward_dim=cfg.feedforward_dim,
-            cnn_module_kernel=cfg.cnn_module_kernel,
-            dropout=cfg.dropout,
-        )
+        # NeMo FastConformer xscaling: scale input embeddings by sqrt(d_model) once.
+        self.xscaling = cfg.xscaling
+        if cfg.xscaling:
+            self.register_buffer("xscale", torch.tensor(math.sqrt(cfg.d_model)), persistent=False)
+
+        layer = _build_encoder_layer(cfg)
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(cfg.n_layers)])
 
         self.mhc_cfg = cfg.mhc
@@ -62,6 +83,8 @@ class Encoder(nn.Module):
         if h0.dim() != 3:
             raise ValueError(f"Expected h0 as (B,C,T'), got {tuple(h0.shape)}")
         x = self.in_proj(h0).transpose(1, 2)                 # (B, T', D)
+        if self.xscaling:
+            x = x * self.xscale
 
         residuals: torch.Tensor = x
 
