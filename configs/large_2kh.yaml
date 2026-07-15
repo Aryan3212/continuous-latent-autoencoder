@@ -85,8 +85,8 @@ model:
 
 loss:
   recon_type: mel              # "stft" | "mel" — reconstruction loss used for training
-  recon_weight: 0.003          # weight applied to whichever recon loss is active
-  recon_log_start_step: 1000   # only log the mel log-mag metric after this many steps
+  recon_weight: 2         # weight applied to whichever recon loss is active
+  recon_log_start_step: 10   # only log the mel log-mag metric after this many steps
   reg_type: visreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
     fft_sizes: [256, 512, 1024, 2048]
@@ -95,9 +95,9 @@ loss:
     center: true
     window: hann
     logmag_eps: 1.0e-3
-    sc_weight: 0.1
-    mag_weight: 1.0
-    logmag_weight: 1.0
+    sc_weight: 0.01
+    mag_weight: 10.0
+    logmag_weight: 10.0
   mel:
     n_mels: 80
     n_fft: 1024
@@ -136,7 +136,7 @@ loss:
     disc_channels: [32, 64, 128, 192]    # ~1.65M params (was [32,128,256,512] / ~11M) -> ~2M target
 
 optim:
-  lr: 3.0e-4
+  lr: 1.0e-3
   betas: [0.9, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-5
@@ -149,7 +149,7 @@ optim:
 train:
   batch_size: 32
   grad_accum_steps: 4
-  max_steps: 200000
+  max_steps: 100000
   log_interval_steps: 50
   eval_interval_steps: 5000
   save_interval_steps: 20000
