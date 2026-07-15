@@ -2,6 +2,16 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-15 (e)
+
+**IndicVoices: skip parquet re-parse on repeated `iter_records` calls**
+
+- **`scripts/housekeeping.py`**: `IndicVoicesAdapter.iter_records` now writes a
+  `.metadata.jsonl` sidecar alongside the extracted audio directory on first run.
+  On subsequent calls it walks the extracted `.wav`/`.flac` files directly and
+  reads text/speaker metadata from the sidecar, avoiding a full re-read of all
+  parquet files (which previously happened on every `make-manifests` call).
+
 ## 2026-07-15 (d)
 
 **FastConformer as a configurable drop-in alternative to the Conformer encoder**

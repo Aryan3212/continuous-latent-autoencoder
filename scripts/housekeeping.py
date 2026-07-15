@@ -725,14 +725,62 @@ class IndicVoicesAdapter(DatasetAdapter):
         return out_dir
 
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
-        # Restrict the parquet glob to the Bengali language subdir so we
-        # don't accidentally pick up unrelated splits if the cache grows.
-        yield from iter_parquet_records(
-            raw_dir=raw_dir,
-            dataset_name=self.name,
-            language=self.language,
-            glob_patterns=("Bengali/**/*.parquet", "**/*.parquet"),
+        extract_dir = raw_dir / "extracted"
+        metadata_file = extract_dir / ".metadata.jsonl"
+
+        if extract_dir.is_dir() and metadata_file.is_file():
+            metadata: dict[str, dict[str, Any]] = {}
+            with open(metadata_file) as f:
+                for line in f:
+                    m = json.loads(line)
+                    metadata[m["id"]] = m
+
+            for ap in sorted(extract_dir.iterdir()):
+                if not ap.is_file():
+                    continue
+                if ap.suffix.lower() not in (".wav", ".flac", ".mp3", ".ogg", ".opus"):
+                    continue
+                file_id = ap.stem
+                m = metadata.get(file_id, {})
+                yield {
+                    "audio_filepath": str(ap),
+                    "text": m.get("text"),
+                    "duration": m.get("duration"),
+                    "sample_rate": m.get("sample_rate"),
+                    "dataset": self.name,
+                    "id": file_id,
+                    "speaker_id": m.get("speaker_id"),
+                    "language": self.language,
+                }
+            return
+
+        recs = list(
+            iter_parquet_records(
+                raw_dir=raw_dir,
+                dataset_name=self.name,
+                language=self.language,
+                glob_patterns=("Bengali/**/*.parquet", "**/*.parquet"),
+            )
         )
+
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with open(metadata_file, "w") as f:
+            for rec in recs:
+                f.write(
+                    json.dumps(
+                        {
+                            "id": rec["id"],
+                            "text": rec["text"],
+                            "speaker_id": rec["speaker_id"],
+                            "duration": rec["duration"],
+                            "sample_rate": rec["sample_rate"],
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+        yield from recs
 
 
 class SubakKoAdapter(DatasetAdapter):

@@ -119,7 +119,10 @@ Subcommands:
 - `download` — fetch raw archives from HF/Kaggle/OpenSLR into `DATA_ROOT`.
 - `make-manifests` — iterate adapter records, split train/val, write JSONL
   manifests. Accepts `--map NAME=PATH` (Kaggle) or `--data-root` + `--datasets`
-  (local workflow).
+  (local workflow). On first run, parquet-based adapters (indicvoices, subak_ko,
+  shrutilipi, kathbath) extract inline audio bytes to an `extracted/` subdir;
+  subsequent runs of indicvoices walk `extracted/` + a `.metadata.jsonl` sidecar
+  instead of re-parsing the parquet files.
 - `publish-checkpoint` — upload `last.pt` + model card + config to HF model repo.
 - `fetch-checkpoint` — download the latest published checkpoint from HF (for
   multi-session resume).
