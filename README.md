@@ -9,9 +9,13 @@ Deterministic continuous-latent speech autoencoder (16kHz in → ~12.5 Hz tokens
 ### System dependencies
 
 ```bash
-# FFmpeg (required by torchcodec for audio/video decoding)
+# FFmpeg (required by TorchCodec for audio decoding)
 sudo apt install ffmpeg libavcodec-extra
 ```
+
+TorchCodec is intentionally installed from PyTorch's CPU wheel index: training
+still uses CUDA PyTorch, while dataset audio decode stays on CPU and therefore
+does not require CUDA's NPP runtime libraries.
 
 ### Python dependencies
 

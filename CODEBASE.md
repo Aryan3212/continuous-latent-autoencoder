@@ -140,6 +140,9 @@ One module, `data_loading.py` (repo root, not a package):
 - `AudioDataset` (JSONL manifests; relative `audio_filepath` resolved via
   `resolve_manifest_root`: manifest dir or one level up for the packed
   `<root>/manifests/` layout), `collate_fixed`, `DatasetConfig`.
+  Audio loading uses the CPU-only TorchCodec wheel (via `torchaudio.load`), so
+  CUDA training does not impose a CUDA NPP runtime dependency on dataloader
+  workers.
 - waveform augment (noise/lowpass/gain/clip) and frame/waveform chunk masking
   for JEPA local views (`apply_waveform_augment`, `make_frame_chunk_masks`,
   `apply_waveform_chunk_mask`).

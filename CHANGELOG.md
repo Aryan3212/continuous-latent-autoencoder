@@ -2,6 +2,19 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-15 (f)
+
+**Use CPU-only TorchCodec for dataset audio decoding**
+
+- **`pyproject.toml`**: Torch and TorchAudio remain on the CUDA 12.8 index for
+  training, while TorchCodec is sourced from PyTorch's CPU index. This avoids
+  the CUDA TorchCodec wheel's NPP/NVRTC runtime requirement for an operation
+  that only decodes audio on the CPU. Removed the unused `nvidia-npp-cu12`
+  dependency; `nvidia-nvjpeg-cu12` remains for its separate GPU JPEG use.
+- **`data_loading.py`**: removed the `ctypes.RTLD_GLOBAL` NPP pre-loader. Audio
+  loading now relies on normal package resolution rather than application-level
+  dynamic-linker manipulation.
+
 ## 2026-07-15 (e)
 
 **IndicVoices: skip parquet re-parse on repeated `iter_records` calls**

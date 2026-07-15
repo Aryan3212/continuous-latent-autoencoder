@@ -8,20 +8,10 @@ the eval probes, and a couple of scripts. Actual datasets live under
 """
 from __future__ import annotations
 
-import ctypes
-import glob
 import json
 import math
 import os
 import pathlib
-
-# Pre-load NPP library so torchcodec can find libnppicc.so.12
-# (nvidia-npp-cu12 installs .so files under site-packages/nvidia/npp/lib/)
-for p in __import__("sys").path:
-    if "site-packages" in p:
-        for m in glob.glob(os.path.join(p, "nvidia", "**", "lib", "libnppicc.so.*"), recursive=True):
-            ctypes.CDLL(m, mode=ctypes.RTLD_GLOBAL)
-            break
 
 import torchaudio
 import random
