@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "continuous-latent-autoencoder"
 version = "0.0.0"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.12"
 dependencies = [
   "PyYAML>=6.0",
   "numpy>=1.26",
