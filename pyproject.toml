@@ -12,6 +12,7 @@ dependencies = [
   "wandb>=0.16",
   "torch>=2.2",
   "torchaudio>=2.2",
+  "torchcodec>=0.5",
   "soundfile>=0.12",
   "jiwer>=3.0",
   "matplotlib>=3.10.8",
@@ -48,4 +49,5 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
+torchcodec = { index = "pytorch" }
 utmosv2 = { git = "https://github.com/sarulab-speech/UTMOSv2.git" }
