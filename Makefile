@@ -2,7 +2,7 @@ CONFIG        ?= configs/local_6gb.yaml
 OUTPUT_DIR    ?= runs
 DATA_ROOT     ?= $(CURDIR)/datasets
 MANIFEST_DIR  ?= staging/manifests
-DATASETS      ?= openslr53,bengaliai_speech,regspeech12,indicvoices,subak_ko,shrutilipi
+DATASETS      ?= openslr53,common_voice_bn,regspeech12,indicvoices,subak_ko,shrutilipi,kathbath
 TRAIN_EXTRA_ARGS ?=
 
 export PATH := $(HOME)/.local/bin:$(PATH)
