@@ -7,8 +7,6 @@ TRAIN_EXTRA_ARGS ?=
 
 export PATH := $(HOME)/.local/bin:$(PATH)
 
--include .env
-
 .PHONY: help prepare download-data make-manifests train clean-runs
 
 help:
@@ -33,9 +31,11 @@ prepare:
 	uv sync
 
 download-data: prepare
+	@set -a; [ -f .env ] && . .env; set +a; \
 	uv run python scripts/housekeeping.py download --datasets $(DATASETS) --data-root $(DATA_ROOT)
 
 make-manifests: prepare
+	@set -a; [ -f .env ] && . .env; set +a; \
 	uv run python scripts/housekeeping.py make-manifests \
 	    --data-root $(DATA_ROOT) \
 	    --datasets $(DATASETS) \
