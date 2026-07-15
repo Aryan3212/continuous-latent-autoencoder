@@ -26,33 +26,59 @@ interfaces use channels-first `(B, D, T)` as noted.
   stack with FiLM ResBlocks conditioned on the latent. `(B, D, T')` → `(B, 1, T)`.
 - `models/sigreg.py` — `SIGReg` (Epps–Pulley sliced univariate Gaussianity
   test). `forward` returns a bare scalar. Single-GPU only.
+- `models/visreg.py` — `VISReg` (Vector-ISotropic Gaussianisation,
+  https://haiyuwu.github.io/visreg/). Per-batch center/scale/shape losses driving
+  the projector output to N(0, I). `forward` takes `(N, B, D)` and returns a
+  scalar. Param-free, random projection resampled each call. Selectable in place
+  of SIGReg via `loss.reg_type` (`"sigreg"` default | `"visreg"`).
 - `models/discriminator.py` — `MultiPeriodDiscriminator` (HiFi-GAN MPD) for the
-  optional adversarial loss. Slim channel widths by default (~2.7M params) to fit
-  6 GB; `disc_channels` is configurable. Built only when `loss.adv.enabled`.
+  optional adversarial loss. Operates on the **reconstruction-domain spectrogram**
+  (mel or STFT magnitude, matching `loss.recon_type`) rather than the raw
+  waveform — `in_channels` is set to the spectrogram's bin count. Slim channel
+  widths by default (~2.7M params) to fit 6 GB; `disc_channels` is configurable.
+  Built only when `loss.adv.enabled`.
 - `losses.py` — `MultiResSTFTLoss` (multi-resolution STFT reconstruction:
-  spectral convergence + log-magnitude) plus the HiFi-GAN GAN losses
-  `discriminator_loss` / `generator_adv_loss` / `feature_matching_loss` (LSGAN).
+  spectral convergence + magnitude + log-magnitude) and `MelLoss` (mel-spectrogram
+  reconstruction, interchangeable via `loss.recon_type` for the STFT-vs-mel
+  ablation) plus the HiFi-GAN GAN losses
+  `discriminator_loss` / `generator_adv_loss` / `feature_matching_loss`. The
+  adversarial losses are **mean-normalized across discriminator branches** (so the
+  objective is topology-independent) and support `loss_type` `"lsgan"` (default)
+  or `"hinge"`. `feature_matching_loss` is normalized by total feature-map count.
+  All STFT / complex math (`_stft_mag`, `MelLoss._mel_mag`, `ReconSpectrogram`)
+  casts input + window to **FP32** regardless of autocast, so the most
+  dynamically ranged op stays FP32. The discriminator consumes the same mel/STFT
+  spectrogram as `L_recon` (built via `ReconSpectrogram`), so the GAN adversarially
+  refines the spectrogram domain, not the raw waveform.
 
 ## Training
 
 - `train.py` — single entrypoint and training loop. Objective:
-  `stft_weight·L_stft + jepa_weight·L_jepa + sigreg_weight·L_sig` (+ optional
-  L1 wav term, + optional `adv_weight·L_adv + fm_weight·L_fm` when
-  `loss.adv.enabled`). The GAN path adds a HiFi-GAN MPD discriminator with its
+  `recon_weight·L_recon + jepa_weight·L_jepa + reg_weight·L_reg` (+ optional
+  `adv_weight·L_adv + fm_weight·L_fm` when `loss.adv.enabled`), where `L_reg` is
+  `L_sig` (SIGReg) or `L_vis` (VISReg) chosen by `loss.reg_type`, and `L_recon`
+  is `MultiResSTFTLoss` or `MelLoss` selected by `loss.recon_type` (the two are
+  ablated against each other).   The STFT log-mag metric is logged in BOTH recon
+  modes but only after `loss.recon_log_start_step`. The GAN path adds a HiFi-GAN
+  MPD discriminator with its
   own AdamW optimizer + GradScaler. The whole GAN path is skipped until
   `step >= adv_start_step` (fast pre-GAN phase); once active, per microbatch it
   runs a discriminator update (real vs detached fake) then adds the generator
   adversarial + feature-matching terms with D frozen (grad still flows to the
   decoder, but D grads aren't corrupted under grad accumulation). `L_fm` is
-  additionally gated on `fm_start_step`. `L_jepa` = MSE(globals, center) + MSE(locals, center)
-  (uniform 1:1, no context weight). `L_sig` is frame-level SIGReg on the
-  projector output.
+  additionally gated on `fm_start_step`. The adversarial objective is selected by
+  `loss.adv.loss_type` (`lsgan` default, `hinge` available); it is
+  mean-normalized across MPD branches. `L_jepa` = MSE(globals, center) + MSE(locals, center)
+  (uniform 1:1, no context weight). `L_reg` is frame-level Gaussianisation on the
+  projector output — SIGReg (`L_sig`) or VISReg (`L_vis`), chosen by `loss.reg_type`.
   Validation computes `val_stft` only; the val dataloader is built once at
   startup.
 - Configs: `configs/exp0.yaml` (cloud, ~6M params, d_model 192),
   `configs/exp_3m.yaml` (~3.1M, staging data), `configs/exp_3m_gan.yaml`
-  (small + fast GAN variant: ~2.78M generator + ~0.5M MPD, slight recon, JEPA up,
-  adversarial/FM from step 20k; fp32, batch 10, 30k steps for the 6 GB card), and
+  (small + fast GAN variant: ~2.8M generator + ~0.5M MPD, slight recon, JEPA up,
+  adversarial/FM from `adv_start_step`; AMP **bf16** — `run.amp=true`,
+  `run.amp_dtype=bf16` — to avoid the LSGAN FP16-overflow NaN on Ampere+ like the
+  4090; override `run.amp=false` for fp32 on the 6 GB GTX 1660), and
   `configs/local_6gb.yaml` (tiny). All are valid full configs, not overrides.
 
 ## Config system
@@ -62,6 +88,11 @@ interfaces use channels-first `(B, D, T)` as noted.
 `apply_overrides(cfg, ["a.b=c", ...])` applies dotted CLI overrides. Both
 return the pydantic model; call sites use attribute access. `DatasetConfig`
 in `data_loading.py` is a runtime object, intentionally not YAML-mirrored.
+
+`RunCfg.amp_dtype` selects the AMP autocast precision (`fp16` default, `bf16`
+recommended on Ampere+ like the 4090 — FP32-like exponent range so LSGAN's
+squared logits can't overflow to NaN under AMP). The STFT / complex path is
+always forced to FP32 regardless of `amp_dtype` (precision boundary in `losses.py`).
 
 ## Evaluation
 

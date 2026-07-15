@@ -2,6 +2,121 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-15 (d)
+
+**FastConformer as a configurable drop-in alternative to the Conformer encoder**
+
+- **`models/fastconformer.py`** (new): `FastConformerLayer` (= macaron Conformer
+  block + Squeeze-and-Excitation gate after the conv module) and `SqueezeExcitation`.
+  Reuses `ConformerLayer`'s `MultiHeadSelfAttentionRotary` / `FeedForward` /
+  `ConvModule` (RoPE + SDPA attention unchanged). Same `(B,T,D)` in/out and
+  constructor shape as `ConformerLayer` (plus `use_se`), so it is a drop-in.
+- **`schema.py`**: `EncoderCfg` gains `encoder_type` (`"conformer"` default |
+  `"fastconformer"`), `use_se` (default `true`, FastConformer-only), and
+  `xscaling` (scale input embeddings by `sqrt(d_model)`, NeMo FastConformer).
+- **`models/encoder.py`**: `_build_encoder_layer(cfg)` selects the block by
+  `encoder_type`; the stack + MHC wrappers are type-agnostic. `xscaling` is
+  applied once after `in_proj`. All `Encoder(...)` call sites are unaffected.
+- **`configs/large_2kh.yaml`**: commented example showing the swap
+  (`encoder_type: fastconformer` + `cnn_module_kernel: 9`, optionally
+  `xscaling: true`). SE adds a few params; `use_se: false` keeps param count
+  closest to the standard Conformer.
+
+## 2026-07-15 (c)
+
+**VISReg as a selectable alternative to SIGReg for the Gaussianisation loss**
+
+- **`models/visreg.py`** (new): `VISReg` (Vector-ISotropic Gaussianisation,
+  https://haiyuwu.github.io/visreg/). Paper-faithful implementation: per-batch
+  center / scale / shape losses driving the projector output toward N(0, I). No
+  learnable params; the random projection `W` is resampled each forward pass.
+  Input is `(N, B, D)`.
+- **`schema.py`**: `LossCfg` gains `reg_type` (`"sigreg"` default | `"visreg"`)
+  and a `VISRegCfg` (`weight`, `num_projections`). Selecting a `reg_type` keeps
+  the other block's config inert.
+- **`train.py`**: the Gaussianisation loss is now built/swapped by `reg_type`.
+  Both SIGReg and VISReg are gathered across ranks (the same `_gather_with_grad`
+  + `×world_size` trick restores the single-GPU full-batch gradient). VISReg's
+  global frame pool is fed as `(1, N_total, D)`. The active term is logged under
+  `l_sig` (sigreg) or `l_vis` (visreg) so W&B / jsonl reflect whichever is used.
+- **`configs/*.yaml`**: each loss section now declares `reg_type: sigreg` and a
+  `visreg:` block (kaggle inherits from exp_3m_gan via `_base_`). Flip
+  `loss.reg_type=visreg` (or set `loss.visreg.weight`) to switch.
+
+## 2026-07-15 (b)
+
+**GAN stability: precision boundary + topology-independent adversarial loss (keep LSGAN, no defensive asserts)**
+
+- **`losses.py`**: adversarial `discriminator_loss` / `generator_adv_loss` are now
+  **mean-normalized across discriminator branches** (per-period sub-discriminator)
+  instead of summed, so the objective/gradient magnitude no longer depends on how
+  many MPD periods exist (duplicating a scale can't silently 5x the loss). Added a
+  `loss_type` arg (`"lsgan"` | `"hinge"`); LSGAN remains the default. Hinge is
+  available but not used by default (per preference). `feature_matching_loss` was
+  already normalized by total feature-map count.
+- **`losses.py`**: STFT / complex path (`_stft_mag`, `MelLoss._mel_mag`,
+  `ReconSpectrogram._spec_mag`) now casts input + window to **FP32** before
+  `torch.stft`, regardless of the surrounding AMP autocast dtype. This is the
+  precision boundary: the most dynamically ranged op stays FP32 (BF16/FP16 never
+  reach `torch.stft`), while model params / optimizer states stay FP32 and only
+  conv activations are autocast.
+- **`schema.py`**: `RunCfg` gains `amp_dtype` (`"fp16"` default, `"bf16"`
+  supported). Recommended `"bf16"` on Ampere+ (4090/A100): FP32-like exponent range
+  means LSGAN's squared logits can't overflow to `inf`/NaN under AMP the way they
+  can in FP16 — a root cause of the earlier GAN-NaN-then-everything-NaN failure.
+- **`train.py`**: autocast now uses `dtype=amp_dtype`. GAN loss calls pass
+  `acfg.loss_type`. No finiteness assertions added (per request) — the NaN is
+  prevented at the source (precision + normalization) rather than detected.
+- **`configs/exp_3m_gan.yaml`**: now runs AMP with `run.amp_dtype=bf16` (was
+  `amp:false` fp32 for the GTX 1660). BF16's FP32-like exponent range stops the
+  LSGAN squared-logit overflow that caused the earlier FP16-AMP GAN NaN. 1660
+  users override `run.amp=false` for fp32.
+
+## 2026-07-15
+
+**GAN discriminator operates in the recon domain (mel/STFT), not waveform**
+
+- **`models/discriminator.py`**: `MultiPeriodDiscriminator` / `DiscriminatorP`
+  now take `in_channels` (default 1, backward-compatible) so the discriminator
+  consumes the **mel or STFT magnitude spectrogram** — the same representation as
+  the active reconstruction loss — instead of the raw waveform. Docstrings
+  updated accordingly.
+- **`losses.py`**: added `ReconSpectrogram` — waveform `(B,1,T)` → magnitude
+  spectrogram `(B, F, T_frames)` in the active recon domain (mel via MelLoss's
+  STFT→mel recipe, STFT via the first `fft_sizes` entry). Exposes `n_bins` to
+  size the discriminator's `in_channels`.
+- **`train.py`**: builds `disc_spec = ReconSpectrogram(...)` and passes
+  `in_channels=disc_spec.n_bins` to the MPD. Both discriminator calls feed
+  `disc_spec(wav_a)` / `disc_spec(x_hat)` (and the detached fake), so the
+  adversarial signal pushes the decoder toward realistic mel/STFT features.
+  Startup log now reports the discriminator's input domain + bin count.
+- **`train.py`**: the discriminator/generator spectrograms are now computed ONCE
+  per microbatch (`spec_real`/`spec_fake`) and reused for both the discriminator
+  update and the generator/feature-matching block, instead of calling `disc_spec`
+  twice per step. No wasted STFT/mel compute when the GAN is inactive
+  (`step < adv_start`).
+
+**Mel reconstruction loss + STFT-vs-mel ablation switch**
+
+- **`schema.py`**: added `MelCfg` (mel-spectrogram loss params: n_mels, n_fft,
+  hop/win, sample_rate, fmin/fmax, window, logmag_eps, sc/mag/logmag weights).
+  `LossCfg` gains `recon_type` (`stft`|`mel`), `recon_weight` (renamed from
+  `stft_weight`, now weights whichever recon loss is active), and
+  `recon_log_start_step` (STFT log-mag metric only logged after this many steps,
+  in both recon modes). `STFTCfg.sc_weight` default lowered to 0.1 so mag/logmag
+  dominate for speech.
+- **`losses.py`**: added `MelLoss` (mel-scaled magnitude / log-magnitude
+  comparison, stats prefixed `mel_*`) — interchangeable with `MultiResSTFTLoss`
+  in the training loop for the ablation. Mel loss is weighted toward mag/logmag
+  by construction (SC off by default).
+- **`train.py`**: `recon_fn` is selected by `recon_type`; STFT loss is always
+  built separately so `stft_log` (and the full stft_* breakdown) is logged in
+  BOTH recon modes but only after `recon_log_start_step`. Active recon scalar
+  logged as `l_stft`/`l_mel`; mel mode additionally logs `mel_*` every step.
+- **Configs**: all `loss` blocks renamed `stft_weight`→`recon_weight`, added
+  `recon_type`/`recon_log_start_step` and a `mel` block, and set `sc_weight: 0.1`.
+  `kaggle_3m_gan.yaml` inherits the updated loss via `_base_`.
+
 ## 2026-07-12
 
 **Makefile/README simplification, checkpoint publish/fetch subcommands**

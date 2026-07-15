@@ -70,12 +70,16 @@ clipping (p=0.3); plus JEPA waveform chunk-masking (target ratio 0.25, spans 2�
 
 ## 4. Loss functions
 
-Objective: `0.1·L_stft + 6·L_jepa + 0.05·L_sigreg (+ adv + FM from step 20k)`.
-`wav_l1_weight = 0`.
+Objective: `0.1·L_recon + 6·L_jepa + 0.05·L_sigreg (+ adv + FM from step 20k)`,
+where `L_recon` is `L_stft` or `L_mel` selected by `loss.recon_type` (the two are
+ablated against each other).
 
-- **Multi-resolution STFT** (`L_stft`, w=0.1): spectral convergence + log-magnitude
-  over FFT sizes [256,512,1024,2048]. Deliberately light — reconstruction is a
-  regularizer here, not the primary objective.
+- **Multi-resolution STFT** (`L_stft`, w=0.1): spectral convergence + magnitude +
+  log-magnitude over FFT sizes [256,512,1024,2048]. Deliberately light —
+  reconstruction is a regularizer here, not the primary objective.
+- **Mel-spectrogram** (`L_mel`): mel-scaled magnitude / log-magnitude comparison
+  (`loss.recon_type: mel`). Inherently magnitude/log-magnitude weighted, so it
+  leans toward the speech-relevant part of the spectrum.
 - **V-JEPA** (`L_jepa`, w=6): dense global/local prediction in projector space
   (`l_global + l_predict + context_weight·l_context`). The dominant training signal.
 - **SIGReg** (`L_sigreg`, w=0.05): Epps–Pulley sliced Gaussianity test — anti-collapse

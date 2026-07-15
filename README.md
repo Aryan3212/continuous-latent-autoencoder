@@ -132,7 +132,7 @@ Artifacts:
 - `losses.py`: multi-res STFT reconstruction loss (`MultiResSTFTLoss`)
 - `schema.py`: pydantic config schema (single source of truth, `extra="forbid"`)
 - `config.py`: `load_config` / `apply_overrides` (YAML → validated `Config`)
-- `models/`: core model components (frontend, encoder, mHC, projector, decoder, sigreg)
+- `models/`: core model components (frontend, encoder, mHC, projector, decoder, sigreg, visreg)
 - `staging/`: manifests + transcoded audio (output of make-manifests)
 - `scripts/`: utilities — `housekeeping.py` (data/artifact CLI: adapters → download/manifests + publish-checkpoint), `reconstruct_audio.py`, `visualize_latents.py`, `fill_durations.py`
 - `reference-implementations/`: slim in-tree references (single-file impls + notes); full vendored repos live at `../reference-implementations-archive`
