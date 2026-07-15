@@ -21,7 +21,7 @@ uv sync
 python scripts/housekeeping.py make-manifests --data-root <DATA_ROOT> --datasets openslr53,bengaliai_speech --out-dir data/manifests
 ```
 
-> **GPU tuning:** verify that cuDNN is linked (`torch.backends.cudnn.version()` should return > 90000) and set `data.num_workers` (e.g. 4–8) in your config so the dataloader doesn't bottleneck training.
+> **GPU tuning:** verify that cuDNN is linked (`torch.backends.cudnn.version()` should return > 90000). Set `data.num_workers` in your config to half your CPU cores (e.g. `num_workers: 8` for 16 cores) so the dataloader doesn't bottleneck training.
 
 ## Train (actual run)
 
