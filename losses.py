@@ -138,7 +138,7 @@ class MelLoss(nn.Module):
         fmax = float(cfg.fmax) if cfg.fmax is not None else sr / 2.0
         # (n_freqs, n_mels) mel filterbank; rebuilt on CPU, moved with .to(device).
         fb = torchaudio.functional.melscale_fbanks(
-            n_freqs, cfg.n_mels, sr, cfg.fmin, fmax
+            n_freqs, int(cfg.n_mels), sr, cfg.fmin, fmax
         )
         self.register_buffer("fb", fb, persistent=False)
 
@@ -240,7 +240,7 @@ class ReconSpectrogram(nn.Module):
             win = cfg.mel.win_length
             fmax = float(cfg.mel.fmax) if cfg.mel.fmax is not None else sr / 2.0
             fb = torchaudio.functional.melscale_fbanks(
-                n_fft // 2 + 1, cfg.mel.n_mels, sr, cfg.mel.fmin, fmax
+                n_fft // 2 + 1, int(cfg.mel.n_mels), sr, cfg.mel.fmin, fmax
             )
             self.register_buffer("fb", fb, persistent=False)
             self.n_bins = cfg.mel.n_mels
