@@ -13,6 +13,7 @@ dependencies = [
   "torch>=2.2",
   "torchaudio>=2.2",
   "torchcodec>=0.5",
+  "nvidia-nppicc-cu12",
   "soundfile>=0.12",
   "jiwer>=3.0",
   "matplotlib>=3.10.8",

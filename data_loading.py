@@ -8,13 +8,10 @@ the eval probes, and a couple of scripts. Actual datasets live under
 """
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("TORCHAUDIO_USE_TORCHCODEC", "0")
-
 import json
 import torchaudio
 import math
+import os
 import pathlib
 import random
 from dataclasses import dataclass

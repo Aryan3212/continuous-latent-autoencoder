@@ -6,11 +6,22 @@ Deterministic continuous-latent speech autoencoder (16kHz in → ~12.5 Hz tokens
 
 ## Setup
 
+### System dependencies
+
+```bash
+# FFmpeg (required by torchcodec for audio/video decoding)
+sudo apt install ffmpeg libavcodec-extra
+```
+
+### Python dependencies
+
 ```bash
 uv sync
 # build manifests once (see scripts/housekeeping.py make-manifests --help)
 python scripts/housekeeping.py make-manifests --data-root <DATA_ROOT> --datasets openslr53,bengaliai_speech --out-dir data/manifests
 ```
+
+> **GPU tuning:** verify that cuDNN is linked (`torch.backends.cudnn.version()` should return > 90000) and set `data.num_workers` (e.g. 4–8) in your config so the dataloader doesn't bottleneck training.
 
 ## Train (actual run)
 
