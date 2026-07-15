@@ -73,7 +73,7 @@ model:
       identity_mix: true
       alpha_init: 0.01
   decoder:
-    channels: 128               # was 96: scaled with the latent dim; recon stays an auxiliary signal (stft_weight unchanged)
+    channels: 128               # was 96: scaled with the latent dim; recon stays an auxiliary signal (recon_weight unchanged)
     up_strides: [4, 4, 4, 4, 5]
     up_kernels: [8, 8, 8, 8, 10]
     res_blocks_per_up: 1
@@ -85,7 +85,10 @@ model:
     n_hidden_layers: 1
 
 loss:
-  stft_weight: 0.005
+  recon_type: stft              # "stft" | "mel" — reconstruction loss used for training
+  recon_weight: 0.005          # weight applied to whichever recon loss is active
+  recon_log_start_step: 1000   # only log the STFT log-mag metric after this many steps
+  reg_type: sigreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
     fft_sizes: [256, 512, 1024]
     hop_ratio: 0.25
@@ -93,10 +96,22 @@ loss:
     center: true
     window: hann
     logmag_eps: 1.0e-3
-    sc_weight: 1.0
+    sc_weight: 0.1             # mag/logmag dominate for speech
     mag_weight: 1.0
     logmag_weight: 1.0
-  wav_l1_weight: 0.0
+  mel:
+    n_mels: 80
+    n_fft: 1024
+    hop_length: 256
+    win_length: 1024
+    sample_rate: 16000
+    fmin: 0.0
+    fmax: null                 # null -> sample_rate/2
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 0.0             # mel is log-mag; SC off
+    mag_weight: 1.0
+    logmag_weight: 1.0
   jepa:
     weight: 3.0                 # JEPA is the semantic objective of this research (no teacher/distillation by design) — weighting unchanged
     num_globals: 2
@@ -107,6 +122,9 @@ loss:
     num_slices: 256
     t_max: 5.0
     n_points: 17
+  visreg:
+    weight: 0.05                # mirror sigreg default unless tuned
+    num_projections: 256       # VISReg random-projection count (K)
 
 optim:
   lr: 5.0e-4

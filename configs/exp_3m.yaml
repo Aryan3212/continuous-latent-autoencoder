@@ -1,7 +1,7 @@
 # ~3.1M-param run: strong d_model=128 encoder, small decoder, LeJEPA-style 48-d
-# projector, and the FULL loss suite (JEPA + SIGReg + multi-res STFT + waveform
-# L1). Based on exp0.yaml; changes are the model dims, projector, reconstruction
-# weights, and manifests (point at the housekeeping `build` staging output).
+# projector, and the FULL loss suite (JEPA + SIGReg + multi-res STFT). Based on
+# exp0.yaml; changes are the model dims, projector, reconstruction weights, and
+# manifests (point at the housekeeping `build` staging output).
 
 run:
   run_id: null
@@ -83,8 +83,11 @@ model:
     n_hidden_layers: 2
 
 loss:
-  # Reconstruction ON this run (previous run had stft=0.005, wav_l1=0).
-  stft_weight: 1.0
+  # Reconstruction ON this run (multi-res STFT).
+  recon_type: stft              # "stft" | "mel" — reconstruction loss used for training
+  recon_weight: 1.0            # weight applied to whichever recon loss is active
+  recon_log_start_step: 1000   # only log the STFT log-mag metric after this many steps
+  reg_type: sigreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
     fft_sizes: [256, 512, 1024, 2048]
     hop_ratio: 0.25
@@ -92,10 +95,22 @@ loss:
     center: true
     window: hann
     logmag_eps: 1.0e-3
-    sc_weight: 1.0
+    sc_weight: 0.1             # mag/logmag dominate for speech
     mag_weight: 1.0
     logmag_weight: 1.0
-  wav_l1_weight: 0.1
+  mel:
+    n_mels: 80
+    n_fft: 1024
+    hop_length: 256
+    win_length: 1024
+    sample_rate: 16000
+    fmin: 0.0
+    fmax: null                 # null -> sample_rate/2
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 0.0             # mel is log-mag; SC off
+    mag_weight: 1.0
+    logmag_weight: 1.0
   jepa:
     weight: 3.0
     num_globals: 2
@@ -106,6 +121,9 @@ loss:
     num_slices: 1024
     t_max: 5.0
     n_points: 17
+  visreg:
+    weight: 0.05                # mirror sigreg default unless tuned
+    num_projections: 256       # VISReg random-projection count (K)
 
 optim:
   lr: 5.0e-4

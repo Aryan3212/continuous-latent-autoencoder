@@ -29,7 +29,9 @@ from data_loading import (
 )
 from data_loading import AudioDataset, DatasetConfig, collate_fixed
 from losses import (
+    MelLoss,
     MultiResSTFTLoss,
+    ReconSpectrogram,
     discriminator_loss,
     feature_matching_loss,
     generator_adv_loss,
@@ -41,6 +43,7 @@ from models.frontend_conv import ConvFrontend
 
 from models.projector import Projector
 from models.sigreg import SIGReg
+from models.visreg import VISReg
 from config import apply_overrides, load_config
 from schema import Config
 
@@ -251,6 +254,15 @@ def main() -> None:
     cfg = apply_overrides(load_config(args.config), args.overrides)
     cfg.resolved_config_path = args.config
 
+    # Resolve the AMP autocast precision. STFT / complex math is forced to FP32 in
+    # losses.py regardless; this only selects the autocast dtype for conv networks.
+    _AMP_DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16}
+    if cfg.run.amp_dtype not in _AMP_DTYPES:
+        raise ValueError(
+            f"run.amp_dtype must be 'fp16' or 'bf16'; got {cfg.run.amp_dtype!r}"
+        )
+    amp_dtype = _AMP_DTYPES[cfg.run.amp_dtype]
+
     # Cap per-process VRAM now that cfg is known (must be after set_device, before
     # any large allocation — argparse/config load do none). Raise on a dedicated
     # GPU; leave ~0.9 GiB for the CUDA context + NCCL (outside PyTorch's allocator).
@@ -338,7 +350,18 @@ def main() -> None:
     projector = Projector(latent_dim, mcfg.projector)
     proj_dim = projector.output_dim
 
-    sigreg = SIGReg(proj_dim, cfg.loss.sigreg)
+    # Gaussianisation loss: SIGReg (sliced characteristic-function test) or VISReg
+    # (vector isotropic Gaussianisation). Both are param-free and act frame-level
+    # on the projector output; selected by loss.reg_type. Stored under the
+    # reg_type key so resuming an existing sigreg checkpoint (which saved the
+    # param-free module under "sigreg") still loads under strict=True.
+    reg_type = cfg.loss.reg_type
+    if reg_type == "sigreg":
+        reg = SIGReg(proj_dim, cfg.loss.sigreg)
+    elif reg_type == "visreg":
+        reg = VISReg(cfg.loss.visreg.num_projections)
+    else:
+        raise ValueError(f"loss.reg_type must be 'sigreg' or 'visreg'; got {reg_type!r}")
 
     model = torch.nn.ModuleDict(
         {
@@ -346,14 +369,14 @@ def main() -> None:
             "encoder": encoder,
             "projector": projector,
             "decoder": decoder,
-            "sigreg": sigreg,
+            reg_type: reg,
         }
     ).to(device)
 
     # One-time trainable-parameter breakdown (replaces scripts/get_param_count.py).
     _block_params = {
         name: sum(p.numel() for p in model[name].parameters() if p.requires_grad)
-        for name in ("frontend", "encoder", "projector", "decoder", "sigreg")
+        for name in ("frontend", "encoder", "projector", "decoder", reg_type)
     }
     if is_main:
         print("[train] trainable parameters:")
@@ -361,19 +384,37 @@ def main() -> None:
             print(f"  {_name:<10} {_n:>12,}")
         print(f"  {'total':<10} {sum(_block_params.values()):>12,}")
 
+    # Reconstruction representation (mel or STFT) — also the domain the GAN
+    # discriminator operates in (it sees spectrograms, not raw waveform).
+    recon_type = cfg.loss.recon_type
+    if recon_type not in ("stft", "mel"):
+        raise ValueError(f"loss.recon_type must be 'stft' or 'mel'; got {recon_type!r}")
+    disc_spec = ReconSpectrogram(cfg.loss, dcfg.sample_rate).to(device)
+
     # Adversarial discriminator (HiFi-GAN MPD). Built separately from `model`
     # so the generator optimizer / param breakdown stay clean; trained by its
     # own optimizer below. Disabled -> None and the loop runs exactly as before.
+    # It consumes the recon spectrogram (mel/STFT), so in_channels = its bin count.
     acfg = cfg.loss.adv
     disc = None
     if acfg.enabled:
-        disc = MultiPeriodDiscriminator(acfg.periods, channels=acfg.disc_channels).to(device)
+        disc = MultiPeriodDiscriminator(
+            acfg.periods, channels=acfg.disc_channels, in_channels=disc_spec.n_bins
+        ).to(device)
         _d_params = sum(p.numel() for p in disc.parameters() if p.requires_grad)
         if is_main:
-            print(f"  {'disc(MPD)':<10} {_d_params:>12,}  (adversarial, separate optimizer)")
+            print(f"  {'disc(MPD)':<10} {_d_params:>12,}  (adversarial, separate optimizer; "
+                  f"input = {recon_type} spectrogram, {disc_spec.n_bins} bins)")
 
     # Losses
-    stft = MultiResSTFTLoss(cfg.loss.stft).to(device)
+    # Reconstruction loss is swappable (stft <-> mel) for the ablation; the
+    # STFT loss is always built too so we can log the comparable stft_log metric
+    # in BOTH recon modes (after recon_log_start_step).
+    if recon_type == "mel":
+        recon_fn = MelLoss(cfg.loss.mel, sample_rate=dcfg.sample_rate).to(device)
+    else:
+        recon_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
+    stft_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
     wave_aug_cfg = cfg.aug.wave_aug
     wave_chunk_mask_cfg = cfg.aug.wave_chunk_mask
 
@@ -467,10 +508,11 @@ def main() -> None:
                 scaler_d.load_state_dict(state["scaler_d"])
 
     # Wrap param-bearing submodules in DDP AFTER any resume-load (so the clean
-    # single-GPU checkpoint format loads into the raw modules). `sigreg` has no
-    # learnable params, so it is never wrapped. DDP shares param tensors with the
-    # raw modules, so the optimizer(s) built above stay valid. (If MHC ever leaves
-    # encoder params unused in a forward, add find_unused_parameters=True there.)
+    # single-GPU checkpoint format loads into the raw modules). The Gaussianisation
+    # module (sigreg/visreg) has no learnable params, so it is never wrapped. DDP
+    # shares param tensors with the raw modules, so the optimizer(s) built above
+    # stay valid. (If MHC ever leaves encoder params unused in a forward, add
+    # find_unused_parameters=True there.)
     if is_dist:
         for _name in ("frontend", "encoder", "projector", "decoder"):
             model[_name] = torch.nn.parallel.DistributedDataParallel(
@@ -493,12 +535,13 @@ def main() -> None:
     num_locals = jcfg.num_locals
     if num_globals < 1 or num_locals < 1:
         raise ValueError(f"loss.jepa.num_globals and num_locals must both be >= 1; got G={num_globals}, L={num_locals}")
-    sig_w = cfg.loss.sigreg.weight
-    # SIGReg is gathered across ranks (see loop); DDP averages gradients by 1/W, so
-    # scaling its term by world_size restores the single-GPU full-batch gradient.
-    sig_scale = float(world_size)
-    stft_w = cfg.loss.stft_weight
-    wav_l1_w = cfg.loss.wav_l1_weight
+    reg_w = cfg.loss.sigreg.weight if reg_type == "sigreg" else cfg.loss.visreg.weight
+    # The Gaussianisation loss is gathered across ranks (see loop); DDP averages
+    # gradients by 1/W, so scaling its term by world_size restores the single-GPU
+    # full-batch gradient.
+    reg_scale = float(world_size)
+    recon_w = cfg.loss.recon_weight
+    recon_log_start = cfg.loss.recon_log_start_step
     adv_w = acfg.adv_weight
     fm_w = acfg.fm_weight
     adv_start = acfg.adv_start_step
@@ -590,7 +633,7 @@ def main() -> None:
 
             wav_a = wav_a.to(device, non_blocking=True)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 B = wav_a.size(0)
                 sr = dcfg.sample_rate
 
@@ -621,23 +664,26 @@ def main() -> None:
                     num_locals=num_locals,
                 )
 
-                # ---- SIGReg (frame-level, on projector output only) ------------
-                # Reshape p_cat (V*B, P, T') -> (T'*V*B, P) so
-                # SIGReg treats each (frame, view, sample) triple as an
-                # independent point. Paper N-scaling is left to SIGReg itself;
-                # no extra /N rescaling here.
+                # ---- Gaussianisation loss (frame-level, on projector output) ---
+                # Reshape p_cat (V*B, P, T') -> (T'*V*B, P) so the loss treats
+                # each (frame, view, sample) triple as an independent point.
                 D_lat = p_cat.size(1)
                 sig_input = p_cat.permute(2, 0, 1)                # (T', V*B, P)
                 sig_flat = sig_input.reshape(-1, D_lat)           # (T'*V*B, P)
-                # Gather across ranks so the characteristic-function estimate (and
-                # its ×N scaling) uses the GLOBAL batch, matching single-GPU. Only
-                # the local slot carries grad; DDP + sig_scale (×W) restore the
-                # single-GPU gradient magnitude.
+                # Gather across ranks so the estimate (and its ×N scaling) uses
+                # the GLOBAL batch, matching single-GPU. Only the local slot
+                # carries grad; DDP + reg_scale (×W) restore the single-GPU
+                # gradient magnitude.
                 sig_global = _gather_with_grad(sig_flat, world_size, rank)
-                l_sig = sigreg(sig_global, step=step)
-                sig_stats = {
-                    "l_sig_frm": l_sig.detach(),
-                }
+                if reg_type == "sigreg":
+                    l_reg = reg(sig_global, step=step)
+                    reg_stats = {"l_sig": l_reg.detach()}
+                else:  # visreg
+                    # VISReg expects (N, B, D); treat the whole global batch as a
+                    # single population (N=1, B=T'*V*B) so the Gaussianity target
+                    # uses the largest possible pool of points.
+                    l_reg = reg(sig_global.unsqueeze(0))
+                    reg_stats = {"l_vis": l_reg.detach()}
 
                 # Diagnostic slicing: compare global-0 vs local-0 (clean vs masked signal).
                 z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + diagnostics)
@@ -646,9 +692,11 @@ def main() -> None:
                 # Decode from view-0 to clean wav_a (denoising reconstruction).
                 x_hat = _decode(model, z_a, target_len=wav_a.size(-1))
 
-                l_stft_ps, stft_stats_ps = stft(x_hat, wav_a, return_per_sample=True)
-                l_stft = l_stft_ps.mean()
-                stft_stats = {k: v.mean().detach() for k, v in stft_stats_ps.items()}
+                # Active reconstruction loss (training signal). Returns
+                # stats prefixed stft_* or mel_* depending on recon_type.
+                l_recon_ps, recon_stats_ps = recon_fn(x_hat, wav_a, return_per_sample=True)
+                l_recon = l_recon_ps.mean()
+                recon_stats = {k: v.mean().detach() for k, v in recon_stats_ps.items()}
 
                 l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
                 l_wav = l_wav_ps.mean()
@@ -662,15 +710,20 @@ def main() -> None:
                 disc_active = disc is not None and step >= adv_start
                 loss_d = None
                 if disc_active:
+                    # Spectrograms (real + generated) computed ONCE and reused for
+                    # both the discriminator update and the generator/feature-matching
+                    # block below — avoids recomputing disc_spec twice per step.
                     for p in disc.parameters():
                         p.requires_grad_(True)
-                    d_real, d_fake, _, _ = disc(wav_a, x_hat.detach())
-                    loss_d = discriminator_loss(d_real, d_fake)
+                    spec_real = disc_spec(wav_a)
+                    spec_fake = disc_spec(x_hat)
+                    d_real, d_fake, _, _ = disc(spec_real, spec_fake.detach())
+                    loss_d = discriminator_loss(d_real, d_fake, acfg.loss_type)
 
             if loss_d is not None:
                 scaler_d.scale(loss_d / grad_accum).backward()
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 # ---- Generator adversarial + feature matching ----------------
                 # Freeze D params: gradient still flows THROUGH D into x_hat (the
                 # generator signal), but D grads aren't accumulated, so the G
@@ -681,8 +734,8 @@ def main() -> None:
                 if disc_active:
                     for p in disc.parameters():
                         p.requires_grad_(False)
-                    _, g_fake, fmap_r, fmap_g = _unwrap(disc)(wav_a, x_hat)
-                    l_adv = generator_adv_loss(g_fake)
+                    _, g_fake, fmap_r, fmap_g = _unwrap(disc)(spec_real, spec_fake)
+                    l_adv = generator_adv_loss(g_fake, acfg.loss_type)
                     if step >= fm_start:
                         l_fm = feature_matching_loss(fmap_r, fmap_g)
 
@@ -705,7 +758,7 @@ def main() -> None:
                         # so gs*l_adv can't overflow fp16 to inf -> inf/inf = NaN.
                         gs = 1.0e1
                         rec_g = torch.autograd.grad(
-                            gs * (stft_w * l_stft + wav_l1_w * l_wav), last_w, retain_graph=True
+                            gs * (recon_w * l_recon), last_w, retain_graph=True
                         )[0]
                         adv_g = torch.autograd.grad(gs * l_adv, last_w, retain_graph=True)[0]
                         lam_adv_cached = (
@@ -719,10 +772,9 @@ def main() -> None:
                     lam_adv = lam_adv_cached
 
                 loss = (
-                    stft_w * l_stft
-                    + wav_l1_w * l_wav
+                    recon_w * l_recon
                     + jepa_w * l_jepa
-                    + sig_w * sig_scale * l_sig
+                    + reg_w * reg_scale * l_reg
                     + adv_w * lam_adv * l_adv
                     + fm_w * l_fm
                 )
@@ -745,7 +797,7 @@ def main() -> None:
                 z_to_norm_ratio = z_diff_rms / z_a_rms.clamp_min(1e-6)
 
             mb_step_stats = {
-                "l_stft": l_stft.detach(),
+                ("l_stft" if recon_type == "stft" else "l_mel"): l_recon.detach(),
                 "l_wav": l_wav.detach(),
                 "l_jepa": l_jepa.detach(),
                 "z_diff_rms": z_diff_rms.detach(),
@@ -758,8 +810,22 @@ def main() -> None:
                     mb_step_stats["lam_adv"] = lam_adv.detach()
                 if loss_d is not None:
                     mb_step_stats["l_disc"] = loss_d.detach()
-            mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})
-            mb_step_stats.update({k: v.detach() for k, v in sig_stats.items()})
+
+            # Active recon breakdown (stft_* or mel_*) — primary diagnostic.
+            if recon_type == "mel":
+                mb_step_stats.update({k: v.detach() for k, v in recon_stats.items()})
+
+            # STFT log-magnitude metric (ablation comparison), logged in BOTH recon
+            # modes but only after recon_log_start_step, so early noisy steps stay
+            # out of the curves.
+            if step >= recon_log_start:
+                if recon_type == "mel":
+                    _, stft_ps = stft_fn(x_hat, wav_a, return_per_sample=True)
+                    stft_stats = {k: v.mean().detach() for k, v in stft_ps.items()}
+                else:
+                    stft_stats = recon_stats
+                mb_step_stats.update({k: v.detach() for k, v in stft_stats.items()})
+            mb_step_stats.update({k: v.detach() for k, v in reg_stats.items()})
 
             for k, v in mb_step_stats.items():
                 accum_sums[k] = accum_sums.get(k, torch.zeros((), device=device)) + v.detach()
@@ -794,7 +860,7 @@ def main() -> None:
         # contrast (neg/pos) drifting toward 1 means collapse or aug-sensitivity.
         if is_main and step % cfg.train.probe_interval_steps == 0:
             model.eval()
-            with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 z_clean = _unwrap(model["encoder"])(_unwrap(model["frontend"])(wav_a)).float()
                 z_aug = _unwrap(model["encoder"])(
                     _unwrap(model["frontend"])(apply_waveform_augment(wav_a, dcfg.sample_rate, wave_aug_cfg))

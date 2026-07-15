@@ -2,7 +2,6 @@
 #
 # Key differences from exp0:
 #   - Simplified JEPA loss: uniform MSE (no masked/visible split)
-#   - wav_l1_weight enabled for stable reconstruction signal
 #   - GAN enabled, very late (step 500k+), light weights
 #   - Larger model, longer scheduler, less aggressive aug (more data diversity)
 #   - Designed for 24GB GPU (RTX 4090, A10G, etc.) with mixed precision
@@ -57,6 +56,14 @@ model:
     strides: [5, 4, 4, 4, 4]
     groups: 4
   encoder:
+    # To use FastConformer (Squeeze-and-Excitation + 9-tap conv) instead of the
+    # standard Conformer, set:
+    #   encoder_type: fastconformer
+    #   cnn_module_kernel: 9
+    # (optionally xscaling: true). d_model/n_layers/num_heads/feedforward_dim are
+    # shared, so it is a drop-in swap at the same dimensions. SE adds a small
+    # number of params; set use_se: false to keep the param count closest.
+    encoder_type: conformer
     d_model: 256
     n_layers: 8
     num_heads: 8
@@ -74,8 +81,8 @@ model:
       identity_mix: true
       alpha_init: 0.01
   decoder:
-    channels: 384
-    up_strides: [4, 4, 4, 4, 5]
+    channels: 768                  # ~7.5M params (was 384 / ~2.2M) -> closer to 8M target
+    up_strides: [4, 4, 4, 4, 5]    # exact reverse of frontend.strides -> Mimi-style conv mirror
     up_kernels: [8, 8, 8, 8, 10]
     res_blocks_per_up: 2
     res_dilations: [1, 3, 9]
@@ -86,7 +93,10 @@ model:
     n_hidden_layers: 1
 
 loss:
-  stft_weight: 0.003
+  recon_type: stft              # "stft" | "mel" — reconstruction loss used for training
+  recon_weight: 0.003          # weight applied to whichever recon loss is active
+  recon_log_start_step: 1000   # only log the STFT log-mag metric after this many steps
+  reg_type: sigreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
     fft_sizes: [256, 512, 1024, 2048]
     hop_ratio: 0.25
@@ -97,7 +107,19 @@ loss:
     sc_weight: 0.1
     mag_weight: 1.0
     logmag_weight: 1.0
-  wav_l1_weight: 1.0
+  mel:
+    n_mels: 80
+    n_fft: 1024
+    hop_length: 256
+    win_length: 1024
+    sample_rate: 16000
+    fmin: 0.0
+    fmax: null                 # null -> sample_rate/2
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 0.0             # mel is log-mag; SC off
+    mag_weight: 1.0
+    logmag_weight: 1.0
   jepa:
     weight: 2.0
     num_globals: 2
@@ -108,6 +130,9 @@ loss:
     num_slices: 1024
     t_max: 5.0
     n_points: 17
+  visreg:
+    weight: 0.05                # mirror sigreg default unless tuned
+    num_projections: 256       # VISReg random-projection count (K)
   adv:
     enabled: true
     adv_weight: 0.3
@@ -117,7 +142,7 @@ loss:
     lr: 1.0e-4
     betas: [0.8, 0.99]
     periods: [2, 3, 5, 7, 11]
-    disc_channels: [32, 128, 256, 512]
+    disc_channels: [32, 64, 128, 192]    # ~1.65M params (was [32,128,256,512] / ~11M) -> ~2M target
 
 optim:
   lr: 3.0e-4

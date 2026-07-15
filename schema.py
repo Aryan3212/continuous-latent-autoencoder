@@ -21,6 +21,12 @@ class RunCfg(_Base):
     out_dir: str = "runs"
     seed: int = 0
     amp: bool = True
+    # Precision used by the AMP autocast region. "fp16" preserves the old default
+    # (good exponent range is NOT guaranteed); "bf16" is recommended on Ampere+
+    # hardware (4090 / A100): it keeps an FP32-like exponent range through the
+    # dynamically ranged parts of the network while preserving AMP throughput.
+    # The STFT / complex path is always forced to FP32 regardless of this setting.
+    amp_dtype: str = "fp16"
     # Per-process VRAM cap for PyTorch's allocator. Note the CUDA context + NCCL
     # (~0.9 GiB) live OUTSIDE this cap, so fraction*total + that must stay under
     # the card; back off if you OOM right at the cap.
@@ -86,12 +92,18 @@ class MHCCfg(_Base):
 
 
 class EncoderCfg(_Base):
+    # Selects the per-layer block. "conformer" = macaron Conformer;
+    # "fastconformer" = same block + Squeeze-and-Excitation (and typically a
+    # smaller cnn_module_kernel, e.g. 9). Both share d_model/n_layers/heads/ffn.
+    encoder_type: str = "conformer"   # "conformer" | "fastconformer"
     d_model: int = 256
     n_layers: int = 4
     num_heads: int = 4
     feedforward_dim: int = 768
     dropout: float = 0.1
     cnn_module_kernel: int = 31
+    use_se: bool = True                # FastConformer SE gate (only used when encoder_type=="fastconformer")
+    xscaling: bool = False             # scale input embeddings by sqrt(d_model) (NeMo FastConformer)
     mhc: MHCCfg = Field(default_factory=MHCCfg)
 
 
@@ -124,7 +136,31 @@ class STFTCfg(_Base):
     center: bool = True
     window: str = "hann"
     logmag_eps: float = 1.0e-3
-    sc_weight: float = 1.0
+    # Speech recon is carried mostly by magnitude / log-magnitude terms; spectral
+    # convergence (sc) is deliberately down-weighted so it doesn't dominate.
+    sc_weight: float = 0.1
+    mag_weight: float = 1.0
+    logmag_weight: float = 1.0
+
+
+class MelCfg(_Base):
+    """Mel-spectrogram reconstruction loss config.
+
+    The mel loss operates on mel-scaled magnitudes, which are inherently
+    magnitude / log-magnitude quantities — so it is weighted toward mag / log_mag
+    by construction (spectral convergence is off by default via sc_weight=0.0).
+    Shares the sc/mag/logmag weighting scheme with STFTCfg for a clean ablation.
+    """
+    n_mels: int = 80
+    n_fft: int = 1024
+    hop_length: int = 256
+    win_length: int = 1024
+    sample_rate: int = 16000
+    fmin: float = 0.0
+    fmax: Optional[float] = None       # None -> sample_rate / 2
+    window: str = "hann"
+    logmag_eps: float = 1.0e-3
+    sc_weight: float = 0.0            # mel is log-mag; SC off by default
     mag_weight: float = 1.0
     logmag_weight: float = 1.0
 
@@ -140,6 +176,18 @@ class SIGRegCfg(_Base):
     num_slices: int = 1024
     t_max: float = 5.0
     n_points: int = 17
+
+
+class VISRegCfg(_Base):
+    """VISReg (Vector-ISotropic Gaussianisation), https://haiyuwu.github.io/visreg/.
+
+    Frame-level Gaussianisation on the projector output, mirroring SIGReg's role
+    (the two are mutually exclusive; select via ``LossCfg.reg_type``). No
+    learnable params; the random projection is resampled each forward pass.
+    """
+
+    weight: float = 0.05
+    num_projections: int = 256
 
 
 class AdvCfg(_Base):
@@ -160,7 +208,11 @@ class AdvCfg(_Base):
     # discriminator — too heavy for 6 GB; slim default keeps it ~proportionate
     # to the generator. Raise on a bigger GPU.
     disc_channels: List[int] = Field(default_factory=lambda: [16, 64, 128, 256])
-    loss_type: str = "lsgan"         # least-squares GAN (stable default)
+    loss_type: str = "lsgan"         # "lsgan" (least-squares) | "hinge" (margin-based).
+                                      # Pick ONE and keep it for the whole run; do not combine.
+                                      # Hinge is preferred for the multi-discriminator baseline:
+                                      # it does not square growing logits and gives a linear
+                                      # generator objective.
     # Adaptive adversarial weight (VQGAN-style). When on, l_adv is rescaled each
     # step so its gradient at the decoder's last layer matches the reconstruction
     # gradient there, then multiplied by adv_weight. This keeps the GAN from
@@ -171,11 +223,20 @@ class AdvCfg(_Base):
 
 
 class LossCfg(_Base):
-    stft_weight: float = 0.005
+    # Reconstruction loss: swap between "stft" and "mel" for the ablation.
+    recon_type: str = "stft"          # "stft" | "mel" — which recon loss is trained
+    recon_weight: float = 0.005       # weight applied to whichever recon loss is active
+    recon_log_start_step: int = 1000  # only log the STFT log-mag metric after this many steps
+    # Gaussianisation loss: swap between "sigreg" and "visreg" for the ablation.
+    # Both act frame-level on the projector output (gathered across ranks so the
+    # estimate uses the global batch). Whichever is active is logged under
+    # ``l_sig`` / ``l_vis`` respectively.
+    reg_type: str = "sigreg"          # "sigreg" | "visreg" — which Gaussianisation loss is trained
     stft: STFTCfg = Field(default_factory=STFTCfg)
-    wav_l1_weight: float = 0.0
+    mel: MelCfg = Field(default_factory=MelCfg)
     jepa: JEPACfg = Field(default_factory=JEPACfg)
     sigreg: SIGRegCfg = Field(default_factory=SIGRegCfg)
+    visreg: VISRegCfg = Field(default_factory=VISRegCfg)
     adv: AdvCfg = Field(default_factory=AdvCfg)
 
 

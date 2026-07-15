@@ -1,19 +1,24 @@
 # exp_3m + adversarial training, SMALL + FAST variant. ~2.8M generator
 # (encoder ~1.45M, decoder ~0.79M) + ~0.5M MPD discriminator. Loss recipe:
-# SLIGHT reconstruction (stft 1.0 -> 0.1, wav_l1 -> 0), HiFi-GAN adversarial +
-# feature-matching losses (BOTH start at step 20000), JEPA weight up 3 -> 6,
-# SIGReg unchanged (0.05). Fast 30k-step run for a quick is-it-working eval.
+# SLIGHT reconstruction (stft 1.0 -> 0.1), HiFi-GAN adversarial +
+# feature-matching losses, JEPA weight up 3 -> 6, SIGReg unchanged (0.05).
+# Fast run for a quick is-it-working eval.
 #
-# The discriminator isn't built/trained until step 20000, so steps 0-20000 are a
-# fast pure AE+JEPA phase (eval a checkpoint there for a pre-GAN read). Tuned for
-# the 6 GB GTX 1660: fp32 (run.amp=false — AMP unreliable on this card), MPD only,
-# batch 10 x grad_accum 20 (eff 200). If it OOMs, drop batch / raise grad_accum.
+# Precision: AMP ON with BF16 (run.amp_dtype=bf16). BF16 has FP32's exponent
+# range, so LSGAN's squared discriminator logits cannot overflow to inf/NaN the
+# way they did under FP16 AMP (the earlier GAN-NaN crash). The STFT / complex
+# path is forced to FP32 in losses.py regardless. For a 6 GB GTX 1660 (no BF16
+# tensor cores, FP16 AMP hard-locks it) override run.amp=false for fp32.
+#
+# The discriminator isn't built/trained until adv_start_step, so the pre-GAN
+# phase is a fast pure AE+JEPA run (eval a checkpoint there for a pre-GAN read).
 
 run:
   run_id: null
   out_dir: runs
   seed: 0
-  amp: false                     # fp32 on the 1660 (fp16 AMP hard-locks this card)
+  amp: true                      # AMP on; autocast dtype set below (bf16)
+  amp_dtype: bf16                # FP32-like exponent range -> no LSGAN overflow NaN
   wandb:
     enabled: true
     project: "continuous-latent-ae"
@@ -86,8 +91,11 @@ model:
 
 loss:
   # SLIGHT reconstruction: GAN now carries waveform fidelity, so STFT is dialed
-  # back (1.0 -> 0.1) and the wav-L1 term is off.
-  stft_weight: 0.1
+  # back (1.0 -> 0.1).
+  recon_type: stft              # "stft" | "mel" — reconstruction loss used for training
+  recon_weight: 0.1            # weight applied to whichever recon loss is active
+  recon_log_start_step: 1000   # only log the STFT log-mag metric after this many steps
+  reg_type: sigreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
     fft_sizes: [256, 512, 1024, 2048]
     hop_ratio: 0.25
@@ -95,10 +103,22 @@ loss:
     center: true
     window: hann
     logmag_eps: 1.0e-3
-    sc_weight: 1.0
+    sc_weight: 0.1             # mag/logmag dominate for speech
     mag_weight: 1.0
     logmag_weight: 1.0
-  wav_l1_weight: 0.0
+  mel:
+    n_mels: 80
+    n_fft: 1024
+    hop_length: 256
+    win_length: 1024
+    sample_rate: 16000
+    fmin: 0.0
+    fmax: null                 # null -> sample_rate/2
+    window: hann
+    logmag_eps: 1.0e-3
+    sc_weight: 0.0             # mel is log-mag; SC off
+    mag_weight: 1.0
+    logmag_weight: 1.0
   jepa:
     weight: 6.0                    # was 3.0: main ASR/representation lever, increased
     num_globals: 2
@@ -109,6 +129,9 @@ loss:
     num_slices: 1024
     t_max: 5.0
     n_points: 17
+  visreg:
+    weight: 0.05                # mirror sigreg default unless tuned
+    num_projections: 256       # VISReg random-projection count (K)
   adv:
     enabled: true
     adaptive: true                 # rescale l_adv to gradient-parity with recon at the decoder's last layer
@@ -124,6 +147,9 @@ loss:
     betas: [0.8, 0.99]             # HiFi-GAN discriminator betas
     periods: [2, 3, 5, 7, 11]      # MPD periods
     disc_channels: [24, 48, 64, 96]    # ~0.5M-param MPD (HiFi-GAN default 32/128/512/1024 is ~41M, OOMs on 6GB)
+    # Adversarial objective: "lsgan" (least-squares, default) or "hinge" (margin
+    # based, no squaring of growing logits). Pick ONE for the whole run; do not
+    # combine. Keeping lsgan here per preference; hinge is available if needed.
     loss_type: lsgan
 
 optim:
