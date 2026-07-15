@@ -7,6 +7,8 @@ TRAIN_EXTRA_ARGS ?=
 
 export PATH := $(HOME)/.local/bin:$(PATH)
 
+-include .env
+
 .PHONY: help prepare download-data make-manifests train clean-runs
 
 help:
