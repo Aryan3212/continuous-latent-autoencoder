@@ -31,11 +31,11 @@ prepare:
 	uv sync
 
 download-data: prepare
-	@set -a; [ -f .env ] && . .env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; \
 	uv run python scripts/housekeeping.py download --datasets $(DATASETS) --data-root $(DATA_ROOT)
 
 make-manifests: prepare
-	@set -a; [ -f .env ] && . .env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; \
 	uv run python scripts/housekeeping.py make-manifests \
 	    --data-root $(DATA_ROOT) \
 	    --datasets $(DATASETS) \
