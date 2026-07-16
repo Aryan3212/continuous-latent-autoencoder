@@ -105,6 +105,18 @@ directory or its parent for `<root>/manifests/`; multi-manifest lists retain
 separate roots. Audio is loaded/resampled with torchaudio, mixed to mono, then
 cropped and padded to the configured fixed length.
 
+`scripts/housekeeping.py make-manifests` is also the combined data-preparation
+path. It uses bounded thread pools for dataset downloads, OpenSLR shards,
+adapter record collection, and manifest writes. ZIP/TAR files are deleted only
+after verified extraction. HF parquet adapters atomically cache extracted row
+metadata in `extracted/.records.jsonl` before deleting their source shards;
+that cache is the idempotence boundary for later manifest rebuilds.
+
+Both housekeeping and `train.py` load the repo-local `.env` with
+`override=False`, so shell/platform environment variables win. Worker count is
+controlled by `--workers`, `HOUSEKEEPING_WORKERS`, or the Make variable of the
+same name.
+
 ## Entrypoints
 
 - `scripts/housekeeping.py` — download data, make manifests, and publish/fetch checkpoints.

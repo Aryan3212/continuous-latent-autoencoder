@@ -16,7 +16,11 @@ from typing import Any
 
 import numpy as np
 import yaml
+from dotenv import load_dotenv
 
+# Direct training commands automatically read local secrets/config. Shell
+# exports still win, which is important on managed training platforms.
+load_dotenv(pathlib.Path(__file__).resolve().parent / ".env", override=False)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch

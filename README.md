@@ -23,7 +23,7 @@ manifests for one of the supported datasets:
 
 ```bash
 cp .env.example .env
-make download-data make-manifests DATASETS=openslr53
+make make-manifests DATASETS=openslr53 HOUSEKEEPING_WORKERS=4
 ```
 
 Start with the low-memory local config:
@@ -51,7 +51,15 @@ The data CLI supports `openslr53`, `common_voice_bn`, `bengaliai_speech`,
 
 The Make targets download data into `datasets/` and write `train.jsonl` and
 `val.jsonl` to `staging/manifests/` by default. Override `DATA_ROOT`,
-`MANIFEST_DIR`, or `DATASETS` when needed.
+`MANIFEST_DIR`, `DATASETS`, or `HOUSEKEEPING_WORKERS` when needed.
+
+`make make-manifests` is the combined preparation path: it downloads missing
+datasets concurrently, materializes records from different sources in
+parallel, and atomically publishes both manifests. Completed ZIP/TAR archives
+are removed after verified extraction. Hugging Face parquet shards are removed
+only after extracted audio and an atomic `.records.jsonl` metadata cache are in
+place, so repeat manifest builds remain fast and do not re-download data.
+Use `make download-data` only when you explicitly want a download-only prefetch.
 
 For datasets that are already mounted, build manifests directly:
 
@@ -146,11 +154,11 @@ use the commands above until that wrapper is repaired.
 
 ## Credentials
 
-The CLIs read credentials from environment variables. `.env.example` lists the
-available keys: Hugging Face and W&B for repository/logging access, and Kaggle
-or Mozilla Data Collective for dataset downloads. The Make data targets load
-`.env`; before training or direct commands, run
-`set -a; source .env; set +a`.
+The data CLI and `train.py` automatically load the repository's gitignored
+`.env`; already-exported environment variables take precedence. `.env.example`
+lists the available keys: `HF_TOKEN`, `WANDB_API_KEY`, `MDC_API_KEY`, and the
+Kaggle credentials. Hugging Face auth is optional for public, ungated datasets
+but required for gated resources and publishing. W&B remains optional.
 
 Never commit real credentials. Any credential-like value that has previously
 been committed should be rotated and removed from Git history before sharing

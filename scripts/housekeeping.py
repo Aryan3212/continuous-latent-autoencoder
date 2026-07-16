@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import argparse
+import concurrent.futures
 import datetime as _dt
 import hashlib
 import itertools
@@ -17,9 +18,26 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Iterator, List, Optional, Sequence, TypedDict
 
+from dotenv import load_dotenv
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+# Direct CLI invocations get the same credentials as Make/setup.sh. Values
+# already exported by the shell take precedence over the local, gitignored file.
+load_dotenv(_REPO_ROOT / ".env", override=False)
+
+
+def _require_env(*keys: str) -> dict[str, str]:
+    missing = [key for key in keys if not os.environ.get(key)]
+    if missing:
+        raise RuntimeError(
+            "Missing credentials: "
+            + ", ".join(missing)
+            + ". Add them to the repo-local .env or export them in the shell."
+        )
+    return {key: os.environ[key] for key in keys}
 
 
 class Record(TypedDict, total=False):
@@ -47,7 +65,7 @@ class DatasetAdapter(abc.ABC):
     language: str = "bn"
 
     @abc.abstractmethod
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         """Download raw archives under ``dest_root``.
 
         Must be idempotent: a second call with the same ``dest_root`` should
@@ -101,7 +119,7 @@ def hf_snapshot_download(
         repo_type="dataset",
         local_dir=str(dest_dir),
         allow_patterns=allow_patterns,
-        token=os.environ["HF_TOKEN"],
+        token=os.environ.get("HF_TOKEN") or None,
     )
     marker.touch()
     return dest_dir
@@ -120,10 +138,26 @@ def iter_parquet_records(
     ``audio`` (or ``speech``) column containing ``{"bytes": ..., "path": ...}``.
     Extracted files land in ``<raw_dir>/<extract_subdir>/<id>.<ext>``.
     """
-    import pyarrow.parquet as pq
-
     extract_root = raw_dir / extract_subdir
     extract_root.mkdir(parents=True, exist_ok=True)
+
+    # Once parquet audio has been materialised, this cache is the durable source
+    # of manifest metadata. It lets us remove the large parquet shards and makes
+    # subsequent manifest builds a cheap JSONL read plus directory walk.
+    records_cache = extract_root / ".records.jsonl"
+    if records_cache.is_file():
+        # The cache is published before cleanup, so leftover shards can only be
+        # remnants of an interruption during unlinking and are safe to remove.
+        for pattern in glob_patterns:
+            for parquet_path in raw_dir.glob(pattern):
+                parquet_path.unlink(missing_ok=True)
+        with open(records_cache, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    yield json.loads(line)
+        return
+
+    import pyarrow.parquet as pq
 
     parquet_files: list[Path] = []
     for pattern in glob_patterns:
@@ -136,104 +170,122 @@ def iter_parquet_records(
         return
 
     counter = 0
-    for pf in parquet_files:
-        try:
-            table = pq.read_table(pf)
-        except Exception as e:
-            print(f"[{dataset_name}] failed to read {pf!s}: {e}")
-            continue
+    emitted = 0
+    cache_tmp = records_cache.with_suffix(".jsonl.tmp")
+    with open(cache_tmp, "w", encoding="utf-8") as cache_file:
+        for pf in parquet_files:
+            try:
+                table = pq.read_table(pf)
+            except Exception as e:
+                raise RuntimeError(f"[{dataset_name}] failed to read {pf!s}: {e}") from e
 
-        cols = table.column_names
-        audio_col = next((c for c in ("audio", "speech", "audio_filepath") if c in cols), None)
-        if audio_col is None:
-            print(f"[{dataset_name}] no audio column in {pf!s}; cols={cols}")
-            continue
-        text_col = next(
-            (c for c in ("text", "sentence", "transcript", "transcription") if c in cols),
-            None,
-        )
-        id_col = next((c for c in ("id", "file", "path", "utt_id") if c in cols), None)
-        spk_col = next(
-            (c for c in ("speaker_id", "speaker", "client_id") if c in cols), None
-        )
+            cols = table.column_names
+            audio_col = next((c for c in ("audio", "speech", "audio_filepath") if c in cols), None)
+            if audio_col is None:
+                raise RuntimeError(f"[{dataset_name}] no audio column in {pf!s}; cols={cols}")
+            text_col = next(
+                (c for c in ("text", "sentence", "transcript", "transcription") if c in cols),
+                None,
+            )
+            id_col = next((c for c in ("id", "file", "path", "utt_id") if c in cols), None)
+            spk_col = next(
+                (c for c in ("speaker_id", "speaker", "client_id") if c in cols), None
+            )
 
-        n = table.num_rows
-        # Materialise once to avoid per-cell pyarrow scalar overhead.
-        audio_data = table[audio_col].to_pylist()
-        text_data = table[text_col].to_pylist() if text_col else [None] * n
-        id_data = table[id_col].to_pylist() if id_col else [None] * n
-        spk_data = table[spk_col].to_pylist() if spk_col else [None] * n
+            n = table.num_rows
+            # Materialise once to avoid per-cell pyarrow scalar overhead.
+            audio_data = table[audio_col].to_pylist()
+            text_data = table[text_col].to_pylist() if text_col else [None] * n
+            id_data = table[id_col].to_pylist() if id_col else [None] * n
+            spk_data = table[spk_col].to_pylist() if spk_col else [None] * n
 
-        for i in range(n):
-            counter += 1
-            audio_field = audio_data[i]
-            audio_bytes: Optional[bytes] = None
-            inline_path: Optional[str] = None
-            if isinstance(audio_field, dict):
-                b = audio_field.get("bytes")
-                if isinstance(b, (bytes, bytearray)):
-                    audio_bytes = bytes(b)
-                p = audio_field.get("path")
-                if isinstance(p, str) and p:
-                    inline_path = p
-            elif isinstance(audio_field, (bytes, bytearray)):
-                audio_bytes = bytes(audio_field)
+            for i in range(n):
+                counter += 1
+                audio_field = audio_data[i]
+                audio_bytes: Optional[bytes] = None
+                inline_path: Optional[str] = None
+                if isinstance(audio_field, dict):
+                    b = audio_field.get("bytes")
+                    if isinstance(b, (bytes, bytearray)):
+                        audio_bytes = bytes(b)
+                    p = audio_field.get("path")
+                    if isinstance(p, str) and p:
+                        inline_path = p
+                elif isinstance(audio_field, (bytes, bytearray)):
+                    audio_bytes = bytes(audio_field)
 
-            file_id_raw = id_data[i]
-            if file_id_raw:
-                file_id = Path(str(file_id_raw)).stem
-            elif inline_path:
-                file_id = Path(inline_path).stem
-            else:
-                file_id = f"{dataset_name}_{counter:09d}"
+                file_id_raw = id_data[i]
+                if file_id_raw:
+                    file_id = Path(str(file_id_raw)).stem
+                elif inline_path:
+                    file_id = Path(inline_path).stem
+                else:
+                    file_id = f"{dataset_name}_{counter:09d}"
 
-            # Pick an extension that matches the inline path when known so
-            # downstream torchaudio dispatch isn't confused. Default to .flac
-            # (lossless; safe for unknown payload).
-            ext = ".flac"
-            if inline_path:
-                guess = Path(inline_path).suffix.lower()
-                if guess in (".flac", ".wav", ".mp3", ".ogg", ".opus"):
-                    ext = guess
+                # Pick an extension that matches the inline path when known so
+                # downstream torchaudio dispatch isn't confused. Default to .flac
+                # (lossless; safe for unknown payload).
+                ext = ".flac"
+                if inline_path:
+                    guess = Path(inline_path).suffix.lower()
+                    if guess in (".flac", ".wav", ".mp3", ".ogg", ".opus"):
+                        ext = guess
 
-            audio_path = extract_root / f"{file_id}{ext}"
-            if not audio_path.exists():
-                if audio_bytes is None:
-                    # Some datasets reference a path-on-disk relative to the
-                    # parquet's directory rather than inlining bytes.
-                    if inline_path:
-                        candidate = (pf.parent / inline_path).resolve()
-                        if candidate.exists():
-                            audio_path = candidate
+                audio_path = extract_root / f"{file_id}{ext}"
+                if not audio_path.exists():
+                    if audio_bytes is None:
+                        # Some datasets reference a path-on-disk relative to the
+                        # parquet's directory rather than inlining bytes.
+                        if inline_path:
+                            candidate = (pf.parent / inline_path).resolve()
+                            if candidate.exists():
+                                audio_path = candidate
+                            else:
+                                continue
                         else:
                             continue
                     else:
-                        continue
+                        with open(audio_path, "wb") as f:
+                            f.write(audio_bytes)
+
+                text_val = text_data[i]
+                text: Optional[str]
+                if text_val is None:
+                    text = None
                 else:
-                    with open(audio_path, "wb") as f:
-                        f.write(audio_bytes)
+                    text = str(text_val) if text_val != "" else ""
 
-            text_val = text_data[i]
-            text: Optional[str]
-            if text_val is None:
-                text = None
-            else:
-                text = str(text_val) if text_val != "" else ""
+                spk_val = spk_data[i]
+                spk: Optional[str] = str(spk_val) if spk_val is not None else None
 
-            spk_val = spk_data[i]
-            spk: Optional[str] = str(spk_val) if spk_val is not None else None
+                rec: Record = {
+                    "audio_filepath": str(audio_path),
+                    "text": text,
+                    "duration": None,
+                    "sample_rate": None,
+                    "dataset": dataset_name,
+                    "id": file_id,
+                    "speaker_id": spk,
+                    "language": language,
+                }
+                cache_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                emitted += 1
+                yield rec
 
-            rec: Record = {
-                "audio_filepath": str(audio_path),
-                "text": text,
-                "duration": None,
-                "sample_rate": None,
-                "dataset": dataset_name,
-                "id": file_id,
-                "speaker_id": spk,
-                "language": language,
-            }
-            yield rec
+    if emitted == 0:
+        cache_tmp.unlink(missing_ok=True)
+        return
+
+    # Publish the cache before deleting source shards. An interruption before
+    # os.replace leaves parquet intact; an interruption after it can recover
+    # entirely from the cache.
+    os.replace(cache_tmp, records_cache)
+    for pf in parquet_files:
+        pf.unlink(missing_ok=True)
+    print(
+        f"[{dataset_name}] materialised {emitted}/{counter} rows; "
+        f"removed {len(parquet_files)} parquet shard(s)"
+    )
 
 
 # =========================================================================== #
@@ -249,7 +301,7 @@ class OpenSLR53Adapter(DatasetAdapter):
     name = "openslr53"
     language = "bn"
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "OpenSLR53"
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -269,11 +321,12 @@ class OpenSLR53Adapter(DatasetAdapter):
         # re-run skips the multi-GB refetch (the old code re-downloaded every
         # part on every run). A failed download/extract raises and leaves no
         # marker, so the next run retries just that part.
-        for part in _OPENSLR53_PARTS:
+        def fetch_part(part: object) -> None:
             marker = out_dir / f".part_{part}.done"
-            if marker.exists():
-                continue
             zip_path = out_dir / f"asr_bengali_{part}.zip"
+            if marker.exists():
+                zip_path.unlink(missing_ok=True)
+                return
             url = _OPENSLR53_BASE_URL.format(part=part)
             print(f"[openslr53] downloading part {part} from {url}")
             urllib.request.urlretrieve(url, zip_path)
@@ -282,6 +335,11 @@ class OpenSLR53Adapter(DatasetAdapter):
                 zf.extractall(out_dir)
             zip_path.unlink(missing_ok=True)
             marker.touch()
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(max(1, workers), len(_OPENSLR53_PARTS))
+        ) as pool:
+            list(pool.map(fetch_part, _OPENSLR53_PARTS))
 
         return out_dir
 
@@ -357,19 +415,25 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         "https://dev.mozilladatacollective.com/api",
     )
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "common_voice_bn"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Already extracted? (idempotent re-run) — bail before hitting the API,
         # which is rate-limited to 30 presigned-URL requests/day per org.
-        if self._find_validated_tsv(out_dir) is not None:
+        if (
+            self._find_validated_tsv(out_dir) is not None
+            and self._find_clips_dir(out_dir) is not None
+        ):
+            for pattern in ("*.tar.gz", "*.tgz", "*.zip"):
+                for archive in out_dir.glob(pattern):
+                    archive.unlink(missing_ok=True)
             print(f"[common_voice_bn] already extracted under {out_dir!s}")
             return out_dir
 
         import requests
 
-        api_key = os.environ["MDC_API_KEY"]  # hard KeyError up front if unset
+        api_key = _require_env("MDC_API_KEY")["MDC_API_KEY"]
         headers = {"Authorization": f"Bearer {api_key}"}
         bases = (
             [os.environ["MDC_API_BASE"]]
@@ -416,7 +480,14 @@ class CommonVoiceBnAdapter(DatasetAdapter):
         print(f"[common_voice_bn] extracting {tar_path.name}")
         with tarfile.open(tar_path, "r:gz") as tf:
             tf.extractall(out_dir)
-        # Keep the archive; deleting risks a re-download against the 30/day cap.
+
+        if self._find_validated_tsv(out_dir) is None or self._find_clips_dir(out_dir) is None:
+            raise RuntimeError(
+                "[common_voice_bn] extraction completed without the expected "
+                "TSV and clips directory; preserving the archive for inspection"
+            )
+        (out_dir / ".extract.done").touch()
+        tar_path.unlink(missing_ok=True)
 
         return out_dir
 
@@ -528,7 +599,7 @@ def _authenticate_kaggle() -> "object":
 
     # KaggleApi reads KAGGLE_USERNAME / KAGGLE_KEY from the env. Touch them so
     # a missing key fails fast here rather than inside the SDK.
-    _ = os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"]
+    _require_env("KAGGLE_USERNAME", "KAGGLE_KEY")
     api = KaggleApi()
     api.authenticate()
     return api
@@ -541,11 +612,13 @@ class RegSpeech12Adapter(DatasetAdapter):
     _SLUG = "mdrezuwanhassan/regspeech12"
     _SPLITS: tuple[str, ...] = ("train", "valid", "test")
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "regspeech12"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if (out_dir / "train.xlsx").exists():
+            for archive in out_dir.glob("*.zip"):
+                archive.unlink(missing_ok=True)
             return out_dir
 
         api = _authenticate_kaggle()
@@ -648,13 +721,15 @@ class BengaliAISpeechAdapter(DatasetAdapter):
 
     _COMPETITION = "bengaliai-speech"
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         # Folder matches the competition slug so an existing manual download
         # (e.g. data/bengaliai-speech) is reused when --data-root points at it.
         out_dir = dest_root / self._COMPETITION
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if (out_dir / "train.csv").exists() and (out_dir / "train_mp3s").is_dir():
+            for archive in out_dir.glob("*.zip"):
+                archive.unlink(missing_ok=True)
             print(f"[bengaliai_speech] already extracted under {out_dir!s}")
             return out_dir
 
@@ -673,7 +748,10 @@ class BengaliAISpeechAdapter(DatasetAdapter):
                 )
             zip_path = zips[0]
 
-        print(f"[bengaliai_speech] extracting {zip_path.name} ({zip_path.stat().st_size >> 30} GB)")
+        print(
+            f"[bengaliai_speech] extracting {zip_path.name} "
+            f"({zip_path.stat().st_size >> 30} GB)"
+        )
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(out_dir)
         zip_path.unlink(missing_ok=True)
@@ -719,7 +797,7 @@ class IndicVoicesAdapter(DatasetAdapter):
 
     _REPO_ID = "ai4bharat/indicvoices_r"
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "indicvoices"
         hf_snapshot_download(self._REPO_ID, out_dir, allow_patterns="Bengali/*")
         return out_dir
@@ -789,7 +867,7 @@ class SubakKoAdapter(DatasetAdapter):
 
     _REPO_ID = "SUST-CSE-Speech/SUBAK.KO"
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "subak_ko"
         # Only fetch the parquet shards we actually use; the repo also has a
         # large unused zip under `Data/` (23.3 GB) that we don't need.
@@ -812,7 +890,7 @@ class ShrutilipiAdapter(DatasetAdapter):
 
     _REPO_ID = "ai4bharat/Shrutilipi"
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "shrutilipi"
         # Bengali subset lives under `bengali/` as flat train-*.parquet shards.
         hf_snapshot_download(self._REPO_ID, out_dir, allow_patterns="bengali/*")
@@ -839,7 +917,7 @@ class KathbathAdapter(DatasetAdapter):
 
     _REPO_ID = "ai4bharat/Kathbath"
 
-    def download(self, dest_root: Path) -> Path:
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
         out_dir = dest_root / "kathbath"
         # Bengali subset is under `bengali/` as flat shards; no test split
         # exists, so use valid-* as the held-out probe/eval set.
@@ -905,9 +983,11 @@ def _per_dataset_split(
 
 def _write_jsonl(path: Path, rows: list[Record]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, path)
 
 
 def build_manifests_only(
@@ -915,6 +995,7 @@ def build_manifests_only(
     out_dir: Path,
     val_pct: float = 0.05,
     seed: int = 42,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """Walk attached raw datasets and write ``train.jsonl`` / ``val.jsonl`` with
     ABSOLUTE audio paths — no transcode, no copy.
@@ -925,14 +1006,17 @@ def build_manifests_only(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_counts: dict[str, int] = {}
-    all_records: list[Record] = []
+    prepared: list[tuple[DatasetAdapter, Path]] = []
     for adapter, raw_dir in adapters_with_dirs:
         raw_dir = Path(raw_dir).resolve()
         if not raw_dir.exists():
             raise SystemExit(
                 f"[manifest] raw dir for {adapter.name} does not exist: {raw_dir}"
             )
+        prepared.append((adapter, raw_dir))
+
+    def collect(pair: tuple[DatasetAdapter, Path]) -> list[Record]:
+        adapter, raw_dir = pair
         print(f"[manifest] {adapter.name}: iterating records from {raw_dir}")
         recs = list(adapter.iter_records(raw_dir))
         for r in recs:
@@ -940,8 +1024,6 @@ def build_manifests_only(
             p = r.get("audio_filepath")
             if p:
                 r["audio_filepath"] = str(Path(p).resolve())
-        raw_counts[adapter.name] = len(recs)
-        all_records.extend(recs)
         print(f"[manifest]   {adapter.name}: {len(recs)} records")
         if not recs:
             listing = (
@@ -953,6 +1035,17 @@ def build_manifests_only(
                 f"[manifest]   WARNING: 0 records for {adapter.name}. "
                 f"Top-level of {raw_dir}: {listing}"
             )
+        return recs
+
+    max_workers = min(max(1, workers), len(prepared)) if prepared else 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        record_groups = list(pool.map(collect, prepared))
+
+    raw_counts = {
+        adapter.name: len(recs)
+        for (adapter, _), recs in zip(prepared, record_groups)
+    }
+    all_records = [record for records in record_groups for record in records]
 
     if not all_records:
         raise SystemExit("[manifest] no records from any adapter — check --map paths.")
@@ -962,18 +1055,24 @@ def build_manifests_only(
     train_rows, val_rows = _per_dataset_split(all_records, val_pct, rng)
     print(f"[manifest] split: {len(train_rows)} train / {len(val_rows)} val")
 
-    _write_jsonl(out_dir / "train.jsonl", train_rows)
-    _write_jsonl(out_dir / "val.jsonl", val_rows)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, max(1, workers))) as pool:
+        writes = (
+            pool.submit(_write_jsonl, out_dir / "train.jsonl", train_rows),
+            pool.submit(_write_jsonl, out_dir / "val.jsonl", val_rows),
+        )
+        for write in writes:
+            write.result()
 
     meta: dict[str, Any] = {
         "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
         "mode": "manifest_only",
-        "sources": {a.name: str(d) for a, d in adapters_with_dirs},
+        "sources": {a.name: str(d) for a, d in prepared},
         "raw_counts": raw_counts,
         "train_rows": len(train_rows),
         "val_rows": len(val_rows),
         "val_pct": float(val_pct),
         "seed": int(seed),
+        "workers": int(workers),
     }
     import yaml
 
@@ -1008,6 +1107,36 @@ def _parse_datasets(s: str | None) -> List[str]:
     return out
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _default_workers() -> int:
+    configured = os.environ.get("HOUSEKEEPING_WORKERS")
+    if configured:
+        return _positive_int(configured)
+    return min(4, os.cpu_count() or 1)
+
+
+def _download_adapters(
+    names: list[str], root: Path, workers: int
+) -> list[tuple[DatasetAdapter, Path]]:
+    """Download datasets concurrently while keeping total fan-out bounded."""
+    adapters = [get_adapter(name) for name in names]
+    outer_workers = min(max(1, workers), len(adapters)) if adapters else 1
+    inner_workers = max(1, workers // outer_workers)
+
+    def download(adapter: DatasetAdapter) -> tuple[DatasetAdapter, Path]:
+        print(f"[housekeeping] download: {adapter.name} -> {root}")
+        return adapter, adapter.download(root, workers=inner_workers)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=outer_workers) as pool:
+        return list(pool.map(download, adapters))
+
+
 class _LimitedAdapter(DatasetAdapter):
     """Wrap an adapter to cap ``iter_records`` at ``limit`` rows (smoke testing)."""
 
@@ -1017,8 +1146,8 @@ class _LimitedAdapter(DatasetAdapter):
         self.name = inner.name
         self.language = inner.language
 
-    def download(self, dest_root: Path) -> Path:
-        return self._inner.download(dest_root)
+    def download(self, dest_root: Path, workers: int = 1) -> Path:
+        return self._inner.download(dest_root, workers=workers)
 
     def iter_records(self, raw_dir: Path) -> Iterator[Record]:
         return itertools.islice(self._inner.iter_records(raw_dir), self._limit)
@@ -1045,6 +1174,12 @@ def _add_download(p: argparse.ArgumentParser) -> None:
         default=None,
         help="Root for raw archives. Default: $DATA_ROOT env.",
     )
+    p.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=_default_workers(),
+        help="Maximum concurrent dataset/shard jobs (default: $HOUSEKEEPING_WORKERS or 4).",
+    )
     p.set_defaults(func=_run_download)
 
 
@@ -1052,10 +1187,7 @@ def _run_download(args: argparse.Namespace) -> None:
     names = _parse_datasets(args.datasets)
     root = _data_root(args.data_root)
     root.mkdir(parents=True, exist_ok=True)
-    for name in names:
-        adapter = get_adapter(name)
-        print(f"[housekeeping] download: {name} -> {root}")
-        adapter.download(root)
+    _download_adapters(names, root, args.workers)
 
 
 # --- make-manifests (manifest-only build over attached raw datasets) ------- #
@@ -1088,6 +1220,12 @@ def _add_make_manifests(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--val-pct", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=_default_workers(),
+        help="Maximum concurrent download/manifest jobs (default: $HOUSEKEEPING_WORKERS or 4).",
+    )
     p.set_defaults(func=_run_make_manifests)
 
 
@@ -1095,13 +1233,8 @@ def _run_make_manifests(args: argparse.Namespace) -> None:
     if args.data_root:
         names = _parse_datasets(args.datasets)
         root = Path(args.data_root)
-        pairs: list[tuple[DatasetAdapter, Path]] = []
-        for name in names:
-            adapter = get_adapter(name)
-            raw_dir = adapter.download(root)
-            if not raw_dir.exists():
-                raise SystemExit(f"[manifest] raw dir for {name} does not exist: {raw_dir}")
-            pairs.append((adapter, raw_dir))
+        root.mkdir(parents=True, exist_ok=True)
+        pairs = _download_adapters(names, root, args.workers)
     elif args.map:
         pairs = []
         for m in args.map:
@@ -1117,6 +1250,7 @@ def _run_make_manifests(args: argparse.Namespace) -> None:
         out_dir=Path(args.out_dir),
         val_pct=args.val_pct,
         seed=args.seed,
+        workers=args.workers,
     )
 
 

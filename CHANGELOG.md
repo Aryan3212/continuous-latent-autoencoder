@@ -2,6 +2,36 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-16 (b)
+
+**Parallel, self-cleaning data preparation and automatic local env loading**
+
+- **`scripts/housekeeping.py`**: added bounded parallel downloads (including
+  OpenSLR shards), parallel adapter record collection, and atomic parallel
+  train/val manifest publication via `--workers` / `HOUSEKEEPING_WORKERS`.
+  Successful archive extraction now removes ZIP/TAR inputs. HF parquet sources
+  publish an atomic extracted-record cache before deleting shards, preserving
+  safe retries and fast subsequent manifest builds.
+- **`train.py`, housekeeping, dependencies**: direct commands automatically
+  load the gitignored repo `.env` without overriding already-exported platform
+  values. Added `python-dotenv` as a direct dependency and documented HF, W&B,
+  MDC, Kaggle, and worker settings in `.env.example`.
+- **`Makefile`, `setup.sh`, docs**: exposed the worker count and made the setup
+  path use the current combined data preparation flow before training.
+
+## 2026-07-16 (a)
+
+**Wire `aug.frame_mask` into the training path (P1)**
+
+- **`schema.py`**: `FrameMaskCfg` (`mask_ratio`, default `enabled=False`) already
+  existed but was never read by `train.py`.
+- **`data_loading.py`**: `make_frame_masks` produces a `(B, T')` binary mask that
+  zero-masks ENTIRE latent frames (Bernoulli per frame) on the post-frontend grid.
+- **`train.py`**: now imports `make_frame_masks`, reads `cfg.aug.frame_mask`, and
+  applies it to the LOCAL slices of `h0_cat` (the last `num_locals*B` rows) before
+  the encoder — globals stay clean as the anchor. Enabling `frame_mask` now drops
+  whole feature vectors from local-view context as documented.
+
 ## 2026-07-15 (f)
 
 **Use CPU-only TorchCodec for dataset audio decoding**

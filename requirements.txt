@@ -1,8 +1,8 @@
 PyYAML>=6.0
 numpy>=1.26
+python-dotenv>=1.0
 wandb>=0.16; platform_system != "Windows"
 torch>=2.2
 torchaudio>=2.2
 soundfile>=0.12
 jiwer>=3.0
-

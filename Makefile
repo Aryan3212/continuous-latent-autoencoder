@@ -3,6 +3,7 @@ OUTPUT_DIR    ?= runs
 DATA_ROOT     ?= $(CURDIR)/datasets
 MANIFEST_DIR  ?= staging/manifests
 DATASETS      ?= openslr53,common_voice_bn,regspeech12,indicvoices,shrutilipi
+HOUSEKEEPING_WORKERS ?= 4
 TRAIN_EXTRA_ARGS ?=
 
 export PATH := $(HOME)/.local/bin:$(PATH)
@@ -13,7 +14,7 @@ help:
 	@echo "Targets:"
 	@echo "  prepare         Install deps via uv sync."
 	@echo "  download-data   Download raw source datasets to DATA_ROOT."
-	@echo "  make-manifests  Build train/val JSONL manifests from downloaded data."
+	@echo "  make-manifests  Download missing data and build train/val manifests."
 	@echo "  train           Train the autoencoder (point MANIFEST_DIR at your manifests)."
 	@echo "  clean-runs      Delete runs/* (with confirmation)."
 	@echo ""
@@ -23,6 +24,7 @@ help:
 	@echo "  DATA_ROOT        = $(DATA_ROOT)"
 	@echo "  MANIFEST_DIR     = $(MANIFEST_DIR)"
 	@echo "  DATASETS         = $(DATASETS)"
+	@echo "  HOUSEKEEPING_WORKERS = $(HOUSEKEEPING_WORKERS)"
 	@echo "  TRAIN_EXTRA_ARGS = $(TRAIN_EXTRA_ARGS)"
 	@echo "  RUN_NAME         = (auto: run-YYYYMMDD-HHMMSS if unset)"
 
@@ -32,14 +34,18 @@ prepare:
 
 download-data: prepare
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	uv run python scripts/housekeeping.py download --datasets $(DATASETS) --data-root $(DATA_ROOT)
+	uv run python scripts/housekeeping.py download \
+	    --datasets $(DATASETS) \
+	    --data-root $(DATA_ROOT) \
+	    --workers $(HOUSEKEEPING_WORKERS)
 
 make-manifests: prepare
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	uv run python scripts/housekeeping.py make-manifests \
 	    --data-root $(DATA_ROOT) \
 	    --datasets $(DATASETS) \
-	    --out-dir $(MANIFEST_DIR)
+	    --out-dir $(MANIFEST_DIR) \
+	    --workers $(HOUSEKEEPING_WORKERS)
 
 train: prepare
 	@set -e; \
