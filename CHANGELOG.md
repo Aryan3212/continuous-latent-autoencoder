@@ -2,30 +2,26 @@
 
 Date format: `YYYY-MM-DD`
 
-## 2026-07-16 — Stronger JEPA local-view augmentation
+## 2026-07-16 — Restructured JEPA augmentation into named per-stage configs
 
-- Locals now get HEAVY waveform augmentation (`cfg.aug.wave_aug_local`, a new
-  `WaveAugLocalCfg`) while globals keep LIGHT augmentation (`cfg.aug.wave_aug`),
-  making globals a clean anchor.
-- Locals get token-level frame masking on the frontend output `h0` BEFORE the
-  encoder — controlled by `wave_chunk_mask.apply_on: "frontend"` (also
-  "waveform" or "both"); masked frames are zeroed so the encoder never sees them
-  (I-JEPA / SpecAugment style), with spans via `token_ratio` /
-  `token_min_span` / `token_max_span`. This is Mask #1.
-- The decoder path applies a SECOND, INDEPENDENT random token mask on the local
-  `z` latents (Mask #2) plus light Gaussian noise (`decode_noise_std`, default
-  0.03) added to ALL views' `z` — multi-view denoising decode, done in `train.py`.
-- Reconstruction loss is computed by decoding ALL V=num_globals+num_locals views
-  (each noised/masked) and averaging `l_recon` / `l_wav` / mel stats against the
-  clean target waveform `wav_a`; previously only view-0 was decoded.
-- The projector output `p_cat` (JEPA + VISReg/SIGReg) is UNCHANGED — it uses all
-  six views with NO extra masking/noise; `z` between encoder and projector is
-  untouched.
-- New schema: `WaveAugLocalCfg`, new `WaveChunkMaskCfg` fields (`apply_on`,
-  `token_ratio`, `token_min_span`, `token_max_span`, `decode_noise_std`), new
-  `AugCfg.wave_aug_local` field; new `data_loading.py` helpers
-  `apply_token_chunk_mask_h0` / `apply_token_chunk_mask_z`; new `train.py`
-  helper `_make_token_masks`.
+- Replaced the single `wave_aug` / `wave_chunk_mask` configs with seven
+  independently-configured stages under `aug:`:
+  `waveform_aug_global` (light, globals), `waveform_aug_local` (heavy,
+  locals), `waveform_aug_local_mask` (pre-frontend raw-audio chunk mask,
+  locals), `frontend_frame_local_mask` (SpecAug-style frame zeroing on `h0`,
+  pre-encoder, Mask #1), `frontend_frame_noise` (optional, off),
+  `decoder_input_noise` (light Gaussian noise on all views' `z`),
+  `decoder_input_mask` (independent second frame mask on local `z`, Mask #2).
+- Globals: light aug only, no masking anywhere. Locals: heavy aug + masking at
+  both the frontend output (Mask #1) and decoder input (Mask #2, independent
+  draw). The two masks are configured and drawn separately.
+- Reconstruction loss is averaged over all V=num_globals+num_locals decoded
+  views against the clean target. The projector/JEPA + VISReg/SIGReg path is
+  unchanged (all views, no extra masking/noise on `p_cat` or on `z` before the
+  projector).
+- New schema classes: `FrameMaskCfg`, `FrameNoiseCfg`, `LatentNoiseCfg`.
+  `make_frame_chunk_masks` now accepts both `WaveChunkMaskCfg` and
+  `FrameMaskCfg`. New helpers `apply_frame_mask`, `apply_frame_noise`.
 
 ## 2026-07-15 (f)
 

@@ -30,7 +30,7 @@ class RunCfg(_Base):
     # Per-process VRAM cap for PyTorch's allocator. Note the CUDA context + NCCL
     # (~0.9 GiB) live OUTSIDE this cap, so fraction*total + that must stay under
     # the card; back off if you OOM right at the cap.
-    gpu_mem_fraction: float = Field(0.99, gt=0.0, le=1.0)
+    gpu_mem_fraction: float = Field(0.92, gt=0.0, le=1.0)
     wandb: WandbCfg = Field(default_factory=WandbCfg)
 
 
@@ -46,6 +46,11 @@ class DataCfg(_Base):
 
 
 class WaveAugCfg(_Base):
+    """Waveform augmentation applied to raw audio before the frontend.
+
+    Used for both globals (light) and locals (heavy); the two roles get
+    separate configs that share this shape.
+    """
     enabled: bool = False
     noise_prob: float = 0.0
     noise_snr_min: float = 3.0
@@ -60,46 +65,57 @@ class WaveAugCfg(_Base):
     clip_min: float = 0.5
 
 
-class WaveAugLocalCfg(_Base):
-    enabled: bool = True
-    noise_prob: float = 0.8
-    noise_snr_min: float = 3.0
-    noise_snr_max: float = 15.0
-    lowpass_prob: float = 0.6
-    lowpass_min_freq: float = 1500.0
-    lowpass_max_freq: float = 6000.0
-    gain_prob: float = 0.8
-    gain_min: float = 0.5
-    gain_max: float = 1.7
-    clip_prob: float = 0.3
-    clip_min: float = 0.3
-
-
 class WaveChunkMaskCfg(_Base):
+    """Pre-frontend chunk mask: zero contiguous RAW audio samples for locals.
+
+    Mapped from encoder frames to waveform samples via the frontend stride
+    product. Distinct from the token-level frame masks below.
+    """
     enabled: bool = True
     target_ratio: float = 0.5
     min_span_frames: int = 4
     max_span_frames: int = 24
-    # Where the chunk mask is applied. "waveform" = zero raw audio samples
-    # before the frontend (current behaviour); "frontend" = zero contiguous
-    # encoder frames (T') of the frontend output h0, BEFORE the encoder, so
-    # the encoder never sees the masked frames (I-JEPA/SpecAugment style);
-    # "both" = apply to both.
-    apply_on: str = "frontend"
-    # Token-level masking on the frontend output (locals only). Fraction of
-    # encoder frames masked, and the contiguous span size range.
+
+
+class FrameMaskCfg(_Base):
+    """Token-level frame mask on an (N, C, T') tensor (locals only).
+
+    Used for both the frontend-output mask (SpecAug-style, pre-encoder) and
+    the decoder-input mask (pre-decoder). Each usage gets its own instance so
+    the two masks are configured and drawn independently.
+    """
+    enabled: bool = True
     token_ratio: float = 0.5
     token_min_span: int = 4
     token_max_span: int = 24
-    # Light Gaussian noise added to ALL views' latent z at decode time
-    # (before the decoder), to regularise the latent. 0.0 disables.
-    decode_noise_std: float = 0.03
+
+
+class FrameNoiseCfg(_Base):
+    """Light Gaussian noise on an (N, C, T') tensor (locals only).
+
+    Reserved for the frontend-output noise stage. Disabled by default (std 0).
+    """
+    enabled: bool = False
+    std: float = 0.0
+
+
+class LatentNoiseCfg(_Base):
+    """Light Gaussian noise on the latent z before the decoder (all views)."""
+    enabled: bool = True
+    std: float = 0.03
 
 
 class AugCfg(_Base):
-    wave_aug: WaveAugCfg = Field(default_factory=WaveAugCfg)
-    wave_aug_local: WaveAugLocalCfg = Field(default_factory=WaveAugLocalCfg)
-    wave_chunk_mask: WaveChunkMaskCfg = Field(default_factory=WaveChunkMaskCfg)
+    # Raw-waveform augmentation.
+    waveform_aug_global: WaveAugCfg = Field(default_factory=WaveAugCfg)  # light, globals
+    waveform_aug_local: WaveAugCfg = Field(default_factory=WaveAugCfg)   # heavy, locals
+    waveform_aug_local_mask: WaveChunkMaskCfg = Field(default_factory=WaveChunkMaskCfg)  # locals, pre-frontend
+    # Frontend-output (h0) stage, locals only, pre-encoder.
+    frontend_frame_local_mask: FrameMaskCfg = Field(default_factory=FrameMaskCfg)  # SpecAug-style Mask #1
+    frontend_frame_noise: FrameNoiseCfg = Field(default_factory=FrameNoiseCfg)      # optional, off
+    # Decoder-input (z) stage.
+    decoder_input_noise: LatentNoiseCfg = Field(default_factory=LatentNoiseCfg)  # all views
+    decoder_input_mask: FrameMaskCfg = Field(default_factory=FrameMaskCfg)       # locals, Mask #2
 
 
 class FrontendCfg(_Base):

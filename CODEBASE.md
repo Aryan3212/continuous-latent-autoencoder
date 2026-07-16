@@ -68,14 +68,9 @@ interfaces use channels-first `(B, D, T)` as noted.
   decoder, but D grads aren't corrupted under grad accumulation). `L_fm` is
   additionally gated on `fm_start_step`. The adversarial objective is selected by
   `loss.adv.loss_type` (`lsgan` default, `hinge` available); it is
-  mean-normalized across MPD branches.   `L_jepa` = MSE(globals, center) + MSE(locals, center)
+  mean-normalized across MPD branches. `L_jepa` = MSE(globals, center) + MSE(locals, center)
   (uniform 1:1, no context weight). `L_reg` is frame-level Gaussianisation on the
   projector output — SIGReg (`L_sig`) or VISReg (`L_vis`), chosen by `loss.reg_type`.
-  JEPA local views are now heavily augmented and masked at the `h0` level
-  (pre-encoder) with an independent second token mask at the decoder, and the
-  reconstruction loss is averaged over all V views (each noised/masked) against
-  the clean `wav_a`; globals retain light augmentation so they stay a clean
-  anchor, and the projector/JEPA path itself consumes all views unchanged.
   Validation computes `val_stft` only; the val dataloader is built once at
   startup.
 - Configs: `configs/exp0.yaml` (cloud, ~6M params, d_model 192),
@@ -148,16 +143,18 @@ One module, `data_loading.py` (repo root, not a package):
   Audio loading uses the CPU-only TorchCodec wheel (via `torchaudio.load`), so
   CUDA training does not impose a CUDA NPP runtime dependency on dataloader
   workers.
-- augmentation for JEPA views, now asymmetric: globals get light waveform
-  augmentation only, while locals get heavy waveform augmentation plus a
-  token-level frame mask applied to the frontend output `h0` (before the
-  encoder, so masked frames are zeroed and never seen) and, at decode time, a
-  second independent random token mask plus light Gaussian noise on `z`. All
-  V=num_globals+num_locals views are decoded and averaged for reconstruction
-  against the clean target; the projector/JEPA path uses all views unchanged.
-  New helpers: `apply_token_chunk_mask_h0`, `apply_token_chunk_mask_z` (plus the
-  prior `apply_waveform_augment`, `make_frame_chunk_masks`,
-  `apply_waveform_chunk_mask`).
+- Augmentation is a separately-named pipeline (config `aug:`): globals get
+  light `waveform_aug_global`; locals get heavy `waveform_aug_local` + an
+  optional pre-frontend `waveform_aug_local_mask` (raw-audio chunk mask), a
+  SpecAug-style `frontend_frame_local_mask` (zeros encoder frames of the
+  frontend output `h0`, pre-encoder, Mask #1), and an optional
+  `frontend_frame_noise`. The decoder input gets an independent
+  `decoder_input_mask` (Mask #2, second random frame mask on local `z`) plus
+  `decoder_input_noise` (light Gaussian noise on all views). Reconstruction is
+  averaged over all V=num_globals+num_locals views. The projector/JEPA path
+  consumes all views unchanged. Helpers: `apply_waveform_augment`,
+  `make_frame_chunk_masks`, `apply_waveform_chunk_mask`, `apply_frame_mask`,
+  `apply_frame_noise`.
 
 Fetched/built datasets live under `$DATA_ROOT` (default the gitignored
 `datasets/` at the repo root), never in the repo source tree.

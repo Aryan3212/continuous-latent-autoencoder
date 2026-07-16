@@ -188,20 +188,31 @@ def collate_fixed(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 def make_frame_chunk_masks(
     batch_size: int,
     num_frames: int,
-    cfg: WaveChunkMaskCfg,
+    cfg,
 ) -> torch.Tensor:
     """Returns (B, num_frames), 1 where masked. CPU tensor (float32).
 
-    Overlays random spans of length [min_span_frames, max_span_frames] per
-    sample until target_ratio coverage is reached (or attempts cap hit).
-    Independent draw per sample.
+    Accepts either a :class:`WaveChunkMaskCfg` (reads ``target_ratio`` /
+    ``min_span_frames`` / ``max_span_frames``) or a :class:`FrameMaskCfg`
+    (reads ``token_ratio`` / ``token_min_span`` / ``token_max_span``). Both
+    describe random contiguous-span overlays until a target coverage ratio is
+    reached. Independent draw per sample.
     """
     masks = torch.zeros((batch_size, num_frames), dtype=torch.float32)
-    if not cfg.enabled or num_frames <= 0 or cfg.target_ratio <= 0.0:
+    target_ratio = getattr(cfg, "token_ratio", None)
+    if target_ratio is None:
+        target_ratio = getattr(cfg, "target_ratio", 0.0)
+    min_span = getattr(cfg, "token_min_span", None)
+    if min_span is None:
+        min_span = getattr(cfg, "min_span_frames", 1)
+    max_span = getattr(cfg, "token_max_span", None)
+    if max_span is None:
+        max_span = getattr(cfg, "max_span_frames", num_frames)
+    if not getattr(cfg, "enabled", True) or num_frames <= 0 or target_ratio <= 0.0:
         return masks
-    target = max(1, int(round(num_frames * cfg.target_ratio)))
-    min_span = max(1, int(cfg.min_span_frames))
-    max_span = max(min_span, int(cfg.max_span_frames))
+    target = max(1, int(round(num_frames * target_ratio)))
+    min_span = max(1, int(min_span))
+    max_span = max(min_span, int(max_span))
     max_span = min(max_span, num_frames)
     for b in range(batch_size):
         covered = 0
@@ -216,6 +227,36 @@ def make_frame_chunk_masks(
             covered += span - before
             attempts += 1
     return masks
+
+
+def apply_frame_mask(
+    x: torch.Tensor,
+    frame_masks: torch.Tensor,
+) -> torch.Tensor:
+    """Zero out masked encoder frames of an (N, C, T') tensor (locals only).
+
+    x:           (N, C, T') e.g. frontend output h0 or latent z.
+    frame_masks: (N, T'), 1 = masked.
+    Returns (N, C, T') with masked frames zeroed across all channels C.
+    The caller slices locals-only before calling.
+    """
+    m = frame_masks.unsqueeze(1).to(device=x.device, dtype=x.dtype)
+    return x * (1.0 - m)
+
+
+def apply_frame_noise(
+    x: torch.Tensor,
+    std: float,
+) -> torch.Tensor:
+    """Add light Gaussian noise to an (N, C, T') tensor (locals only).
+
+    x:   (N, C, T') e.g. frontend output h0.
+    std: noise standard deviation; 0.0 is a no-op.
+    Returns (N, C, T') with noise added.
+    """
+    if std <= 0.0:
+        return x
+    return x + std * torch.randn_like(x)
 
 
 def apply_waveform_chunk_mask(

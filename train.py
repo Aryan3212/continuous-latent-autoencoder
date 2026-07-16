@@ -25,8 +25,8 @@ import torch.distributed as dist
 from data_loading import (
     apply_waveform_augment,
     apply_waveform_chunk_mask,
-    apply_token_chunk_mask_h0,
-    apply_token_chunk_mask_z,
+    apply_frame_mask,
+    apply_frame_noise,
     make_frame_chunk_masks,
 )
 from data_loading import AudioDataset, DatasetConfig, collate_fixed
@@ -52,22 +52,6 @@ from schema import Config
 
 def _now_run_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
-
-
-def _make_token_masks(num_samples, num_frames, cfg):
-    """Build token-level frame masks for locals using token_ratio / token spans.
-
-    Mirrors make_frame_chunk_masks but reads the token_* fields of the
-    WaveChunkMaskCfg. Returns (num_samples, num_frames) float32, 1=masked.
-    """
-    from data_loading import make_frame_chunk_masks
-    # Reuse make_frame_chunk_masks by temporarily overriding the ratio/span fields.
-    class _Proxy:
-        enabled = True
-        target_ratio = cfg.token_ratio
-        min_span_frames = cfg.token_min_span
-        max_span_frames = cfg.token_max_span
-    return make_frame_chunk_masks(num_samples, num_frames, _Proxy())
 
 
 def seed_all(seed: int) -> None:
@@ -433,8 +417,13 @@ def main() -> None:
     else:
         recon_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
     stft_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
-    wave_aug_cfg = cfg.aug.wave_aug
-    wave_chunk_mask_cfg = cfg.aug.wave_chunk_mask
+    aug_global_cfg = cfg.aug.waveform_aug_global
+    aug_local_cfg = cfg.aug.waveform_aug_local
+    aug_local_mask_cfg = cfg.aug.waveform_aug_local_mask
+    front_frame_mask_cfg = cfg.aug.frontend_frame_local_mask
+    front_frame_noise_cfg = cfg.aug.frontend_frame_noise
+    dec_input_noise_cfg = cfg.aug.decoder_input_noise
+    dec_input_mask_cfg = cfg.aug.decoder_input_mask
 
     # Frontend stride product gives samples-per-output-frame. Used to convert
     # frame-level chunk masks (local-view recipe) into waveform sample masks.
@@ -654,42 +643,41 @@ def main() -> None:
             with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 B = wav_a.size(0)
                 sr = dcfg.sample_rate
-                wave_aug_local_cfg = cfg.aug.wave_aug_local
 
-                # Globals: light wave aug, no chunk mask.
-                view_wavs = [apply_waveform_augment(wav_a, sr, wave_aug_cfg) for _ in range(num_globals)]
-                # Locals: HEAVY wave aug (separate from globals) + optional
-                # waveform chunk mask (pre-frontend) + a separate token mask
-                # that will zero encoder frames of the frontend output (h0).
-                local_wave_masks_cpu = make_frame_chunk_masks(
-                    num_locals * B, n_frames_per_segment, wave_chunk_mask_cfg
-                )
-                local_wave_masks = local_wave_masks_cpu.to(device, non_blocking=True)
-                local_token_masks_cpu = _make_token_masks(
-                    num_locals * B, n_frames_per_segment, wave_chunk_mask_cfg
-                )
-                local_token_masks = local_token_masks_cpu.to(device, non_blocking=True)
+                # ---- Build views ----
+                # Globals: light waveform aug only (clean anchor, no mask).
+                view_wavs = [
+                    apply_waveform_augment(wav_a, sr, aug_global_cfg)
+                    for _ in range(num_globals)
+                ]
+                # Locals: heavy waveform aug + (optional) pre-frontend chunk mask.
                 for li in range(num_locals):
-                    aug = apply_waveform_augment(wav_a, sr, wave_aug_local_cfg)
-                    fmask = local_wave_masks[li * B:(li + 1) * B]   # (B, n_frames)
-                    if wave_chunk_mask_cfg.apply_on in ("waveform", "both"):
+                    aug = apply_waveform_augment(wav_a, sr, aug_local_cfg)
+                    if aug_local_mask_cfg.enabled:
+                        fmask = make_frame_chunk_masks(
+                            B, n_frames_per_segment, aug_local_mask_cfg
+                        ).to(device, non_blocking=True)
                         aug = apply_waveform_chunk_mask(aug, fmask, samples_per_frame)
                     view_wavs.append(aug)
                 wav_cat = torch.cat(view_wavs, dim=0)                 # (V*B, 1, T_wav)
 
-                h0_cat = model["frontend"](wav_cat)
-                # Locals carry the waveform chunk mask; globals get only the
-                # light waveform augmentation (noise/lowpass/gain/clip), no
-                # mask — that asymmetry is what makes the globals-only center
-                # a usable anchor.
+                h0_cat = model["frontend"](wav_cat)                  # (V*B, C, T')
 
-                # Mask locals' frontend output frames (Mask #1, independent draw)
-                # so the encoder never sees the masked frames. Globals untouched.
-                if wave_chunk_mask_cfg.apply_on in ("frontend", "both"):
+                # Frontend-output (h0) stage, locals only, pre-encoder:
+                #  - SpecAug-style frame mask (Mask #1, independent draw)
+                #  - optional light Gaussian noise
+                if front_frame_mask_cfg.enabled or front_frame_noise_cfg.enabled:
                     h0_g = h0_cat[: num_globals * B]
                     h0_l = h0_cat[num_globals * B :]
-                    h0_l = apply_token_chunk_mask_h0(h0_l, local_token_masks)
+                    if front_frame_mask_cfg.enabled:
+                        h0_mask = make_frame_chunk_masks(
+                            num_locals * B, n_frames_per_segment, front_frame_mask_cfg
+                        ).to(device, non_blocking=True)
+                        h0_l = apply_frame_mask(h0_l, h0_mask)
+                    if front_frame_noise_cfg.enabled:
+                        h0_l = apply_frame_noise(h0_l, front_frame_noise_cfg.std)
                     h0_cat = torch.cat([h0_g, h0_l], dim=0)
+
                 z_cat = model["encoder"](h0_cat)                      # (V*B, D, T')
                 p_cat = model["projector"](z_cat)                     # (V*B, P, T')
 
@@ -725,23 +713,22 @@ def main() -> None:
                 z_mask = z_cat[num_globals * B : (num_globals + 1) * B]
 
                 # ---- Multi-view denoising decode (all V views) ----------------
-                # Locals get a SECOND, INDEPENDENT token mask on z (Mask #2, a
-                # fresh random draw distinct from the h0 Mask #1) before the
-                # decoder, plus light Gaussian noise added to ALL views. Each
-                # view is decoded and scored against the clean wav_a; losses are
+                # Decoder-input (z) stage:
+                #  - Mask #2: SECOND, INDEPENDENT token mask on local z (pre-decoder)
+                #  - light Gaussian noise added to ALL views
+                # Each view is decoded and scored vs the clean wav_a; losses
                 # averaged over the V views.
-                local_token_masks_dec_cpu = _make_token_masks(
-                    num_locals * B, n_frames_per_segment, wave_chunk_mask_cfg
-                )
-                local_token_masks_dec = local_token_masks_dec_cpu.to(device, non_blocking=True)
                 z_dec = z_cat
-                if wave_chunk_mask_cfg.apply_on in ("frontend", "both"):
+                if dec_input_mask_cfg.enabled:
                     z_g = z_dec[: num_globals * B]
                     z_l = z_dec[num_globals * B :]
-                    z_l = apply_token_chunk_mask_z(z_l, local_token_masks_dec)
+                    z_mask2 = make_frame_chunk_masks(
+                        num_locals * B, n_frames_per_segment, dec_input_mask_cfg
+                    ).to(device, non_blocking=True)
+                    z_l = apply_frame_mask(z_l, z_mask2)
                     z_dec = torch.cat([z_g, z_l], dim=0)
-                if wave_chunk_mask_cfg.decode_noise_std > 0:
-                    z_dec = z_dec + wave_chunk_mask_cfg.decode_noise_std * torch.randn_like(z_dec)
+                if dec_input_noise_cfg.enabled:
+                    z_dec = z_dec + dec_input_noise_cfg.std * torch.randn_like(z_dec)
 
                 V = num_globals + num_locals
                 l_recon_acc = 0.0
@@ -925,7 +912,7 @@ def main() -> None:
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 z_clean = _unwrap(model["encoder"])(_unwrap(model["frontend"])(wav_a)).float()
                 z_aug = _unwrap(model["encoder"])(
-                    _unwrap(model["frontend"])(apply_waveform_augment(wav_a, dcfg.sample_rate, wave_aug_cfg))
+                    _unwrap(model["frontend"])(apply_waveform_augment(wav_a, dcfg.sample_rate, aug_global_cfg))
                 ).float()
                 pos_frame = (z_clean - z_aug).pow(2).mean()
                 neg_frame = (z_clean - z_aug.roll(1, dims=0)).pow(2).mean()
