@@ -30,7 +30,7 @@ class RunCfg(_Base):
     # Per-process VRAM cap for PyTorch's allocator. Note the CUDA context + NCCL
     # (~0.9 GiB) live OUTSIDE this cap, so fraction*total + that must stay under
     # the card; back off if you OOM right at the cap.
-    gpu_mem_fraction: float = Field(0.92, gt=0.0, le=1.0)
+    gpu_mem_fraction: float = Field(0.99, gt=0.0, le=1.0)
     wandb: WandbCfg = Field(default_factory=WandbCfg)
 
 
@@ -60,15 +60,45 @@ class WaveAugCfg(_Base):
     clip_min: float = 0.5
 
 
+class WaveAugLocalCfg(_Base):
+    enabled: bool = True
+    noise_prob: float = 0.8
+    noise_snr_min: float = 3.0
+    noise_snr_max: float = 15.0
+    lowpass_prob: float = 0.6
+    lowpass_min_freq: float = 1500.0
+    lowpass_max_freq: float = 6000.0
+    gain_prob: float = 0.8
+    gain_min: float = 0.5
+    gain_max: float = 1.7
+    clip_prob: float = 0.3
+    clip_min: float = 0.3
+
+
 class WaveChunkMaskCfg(_Base):
     enabled: bool = True
-    target_ratio: float = 0.25
-    min_span_frames: int = 2
-    max_span_frames: int = 8
+    target_ratio: float = 0.5
+    min_span_frames: int = 4
+    max_span_frames: int = 24
+    # Where the chunk mask is applied. "waveform" = zero raw audio samples
+    # before the frontend (current behaviour); "frontend" = zero contiguous
+    # encoder frames (T') of the frontend output h0, BEFORE the encoder, so
+    # the encoder never sees the masked frames (I-JEPA/SpecAugment style);
+    # "both" = apply to both.
+    apply_on: str = "frontend"
+    # Token-level masking on the frontend output (locals only). Fraction of
+    # encoder frames masked, and the contiguous span size range.
+    token_ratio: float = 0.5
+    token_min_span: int = 4
+    token_max_span: int = 24
+    # Light Gaussian noise added to ALL views' latent z at decode time
+    # (before the decoder), to regularise the latent. 0.0 disables.
+    decode_noise_std: float = 0.03
 
 
 class AugCfg(_Base):
     wave_aug: WaveAugCfg = Field(default_factory=WaveAugCfg)
+    wave_aug_local: WaveAugLocalCfg = Field(default_factory=WaveAugLocalCfg)
     wave_chunk_mask: WaveChunkMaskCfg = Field(default_factory=WaveChunkMaskCfg)
 
 

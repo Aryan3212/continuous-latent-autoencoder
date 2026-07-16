@@ -244,6 +244,37 @@ def apply_waveform_chunk_mask(
     return wav * (1.0 - sample_mask.unsqueeze(1))
 
 
+def apply_token_chunk_mask_h0(
+    h0: torch.Tensor,
+    frame_masks: torch.Tensor,
+) -> torch.Tensor:
+    """Zero out masked encoder frames of the frontend output, locals only.
+
+    h0:          (V*B, C, T') frontend output (channels-first).
+    frame_masks: (V*B, T'), 1 = masked.
+    Returns (V*B, C, T') with masked frames zeroed across all channels.
+    The caller is responsible for slicing locals-only before calling.
+    """
+    # (V*B, T', 1) -> broadcast over C
+    m = frame_masks.unsqueeze(1).to(device=h0.device, dtype=h0.dtype)
+    return h0 * (1.0 - m)
+
+
+def apply_token_chunk_mask_z(
+    z: torch.Tensor,
+    frame_masks: torch.Tensor,
+) -> torch.Tensor:
+    """Zero out masked encoder frames of the latent z, locals only (decode path).
+
+    z:           (V*B, D, T') encoder output (channels-first).
+    frame_masks: (V*B, T'), 1 = masked.
+    Returns (V*B, D, T') with masked frames zeroed across all channels.
+    The caller is responsible for slicing locals-only before calling.
+    """
+    m = frame_masks.unsqueeze(1).to(device=z.device, dtype=z.dtype)
+    return z * (1.0 - m)
+
+
 def apply_waveform_augment(wav: torch.Tensor, sample_rate: int, cfg: WaveAugCfg) -> torch.Tensor:
     """
     Apply augmentations to a batch of waveforms (B, 1, T). Fully vectorised.
