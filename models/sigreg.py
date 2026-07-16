@@ -66,10 +66,8 @@ class SlicingUnivariateTest(nn.Module):
 class SIGReg(nn.Module):
     """Paper-faithful SIGReg (Algorithm 1). Input: (N, D). Output: scalar."""
 
-    def __init__(self, dim: int, cfg: SIGRegCfg):
+    def __init__(self, cfg: SIGRegCfg):
         super().__init__()
-        self.dim = dim
-        self.cfg = cfg
         univariate = EppsPulley(t_max=cfg.t_max, n_points=cfg.n_points)
         self.test = SlicingUnivariateTest(
             univariate_test=univariate,
@@ -77,7 +75,4 @@ class SIGReg(nn.Module):
         )
 
     def forward(self, z: torch.Tensor, step: int) -> torch.Tensor:
-        if z.dim() != 2:
-            raise ValueError(f"Expected z as (N, D), got {tuple(z.shape)}")
-
         return self.test(z, step=step)

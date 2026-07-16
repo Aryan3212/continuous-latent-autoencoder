@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import List
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,14 +17,13 @@ class FiLM(nn.Module):
         )
 
     def forward(self, cond: torch.Tensor, length: int) -> torch.Tensor:
-        # cond: (B, d, Tcond) -> (B, 2C, length)
         if cond.size(-1) != length:
             cond = F.interpolate(cond, size=length, mode="linear", align_corners=False)
         return self.net(cond)
 
 
 class ResBlockFiLM(nn.Module):
-    def __init__(self, channels: int, dilations: List[int], cond_dim: int, film_hidden: int):
+    def __init__(self, channels: int, dilations: list[int], cond_dim: int, film_hidden: int):
         super().__init__()
         self.convs = nn.ModuleList()
         for d in dilations:
@@ -36,7 +33,6 @@ class ResBlockFiLM(nn.Module):
         self.film = FiLM(cond_dim, channels, hidden=film_hidden)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        # x: (B,C,T)
         g_b = self.film(cond, x.size(-1))
         gamma, beta = g_b.chunk(2, dim=1)
         h = x
@@ -47,30 +43,31 @@ class ResBlockFiLM(nn.Module):
         return x + h
 
 
+class _SameLengthConv1d(nn.Conv1d):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        total_pad = self.kernel_size[0] - 1
+        left = self.kernel_size[0] // 2
+        return super().forward(F.pad(x, (left, total_pad - left)))
+
+
 class WaveformDecoder(nn.Module):
-    """
-    Simple neural vocoder-like generator (no GAN in Exp0).
-      z: (B,d,T') -> x_hat: (B,1,T)
-    """
+    """Upsample continuous latents into a waveform."""
 
     def __init__(self, latent_dim: int, cfg: DecoderCfg):
         super().__init__()
-        self.cfg = cfg
         up_strides = cfg.up_strides
         up_kernels = cfg.up_kernels
         res_dilations = cfg.res_dilations
-        assert len(up_strides) == len(up_kernels)
-
         self.in_conv = nn.Conv1d(latent_dim, cfg.channels, kernel_size=3, padding=1)
 
-        ups: List[nn.Module] = []
-        resblocks: List[nn.Module] = []
+        ups: list[nn.Module] = []
+        resblocks: list[nn.Module] = []
         in_ch = cfg.channels
         for s, k in zip(up_strides, up_kernels):
             ups.append(
                 nn.Sequential(
                     nn.Upsample(scale_factor=float(s), mode="linear", align_corners=False),
-                    nn.Conv1d(in_ch, in_ch // 2, kernel_size=k, padding=k // 2),
+                    _SameLengthConv1d(in_ch, in_ch // 2, kernel_size=k),
                 )
             )
             out_ch = in_ch // 2
@@ -88,7 +85,6 @@ class WaveformDecoder(nn.Module):
         self.ups = nn.ModuleList(ups)
         self.resblocks = nn.ModuleList(resblocks)
         self.out_conv = nn.Conv1d(in_ch, 1, kernel_size=7, padding=3)
-        self.up_strides = up_strides
         self.res_blocks_per_up = cfg.res_blocks_per_up
 
     def forward(self, z: torch.Tensor, target_len: int | None = None) -> torch.Tensor:
@@ -100,9 +96,6 @@ class WaveformDecoder(nn.Module):
                 x = self.resblocks[rb_i](x, z)
                 rb_i += 1
         x = torch.tanh(self.out_conv(x))
-        if target_len is not None and x.size(-1) != target_len:
-            if x.size(-1) > target_len:
-                x = x[..., :target_len]
-            else:
-                x = F.pad(x, (0, target_len - x.size(-1)))
+        if target_len is not None:
+            x = x[..., :target_len]
         return x

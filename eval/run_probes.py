@@ -15,6 +15,7 @@ def run_all_probes(
     run_dir: str,
     step: int,
     exp_cfg: "Config",
+    config_path: str,
     ckpt_path: str,
     python_bin: str = "python",
 ) -> Dict[str, Any]:
@@ -58,10 +59,6 @@ def run_all_probes(
             timing[name] = -elapsed
             print(f"[{time.strftime('%H:%M:%S')}] [Eval Step {step}] {name} TIMED OUT after {elapsed:.1f}s", flush=True)
             return False
-
-    config_path = exp_cfg.resolved_config_path
-    if not config_path:
-        raise ValueError("exp_cfg must have resolved_config_path set before passing to run_all_probes")
 
     # Utterance-level probes (gender / emotion).
     def _run_utt_probe(name: str, pcfg: Any, key: str, hidden: int) -> None:

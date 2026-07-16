@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -130,10 +130,10 @@ class MelLoss(nn.Module):
     ablated against it.
     """
 
-    def __init__(self, cfg: MelCfg, sample_rate: Optional[int] = None):
+    def __init__(self, cfg: MelCfg, sample_rate: int):
         super().__init__()
         self.cfg = cfg
-        sr = int(sample_rate if sample_rate is not None else cfg.sample_rate)
+        sr = int(sample_rate)
         n_freqs = cfg.n_fft // 2 + 1
         fmax = float(cfg.fmax) if cfg.fmax is not None else sr / 2.0
         # (n_freqs, n_mels) mel filterbank; rebuilt on CPU, moved with .to(device).

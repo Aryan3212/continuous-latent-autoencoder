@@ -58,11 +58,11 @@ def main() -> None:
 
     if not args.skip_probes:
         cfg = load_config(args.config)
-        cfg.resolved_config_path = args.config
         results["probes"] = run_all_probes(
             run_dir=str(out_dir),
             step=int(step),
             exp_cfg=cfg,
+            config_path=args.config,
             ckpt_path=args.ckpt,
             python_bin=args.python_bin,
         )

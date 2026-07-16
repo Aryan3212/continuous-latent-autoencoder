@@ -1,35 +1,27 @@
 from __future__ import annotations
 
-from typing import List, Optional
+import math
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 
 class _Base(BaseModel):
-    """Forbid unknown keys so typos get caught at startup."""
     model_config = ConfigDict(extra="forbid")
 
 
 class WandbCfg(_Base):
     enabled: bool = True
     project: str = "continuous-latent-ae"
-    name: Optional[str] = None
+    name: str | None = None
 
 
 class RunCfg(_Base):
-    run_id: Optional[str] = None
+    run_id: str | None = None
     out_dir: str = "runs"
     seed: int = 0
     amp: bool = True
-    # Precision used by the AMP autocast region. "fp16" preserves the old default
-    # (good exponent range is NOT guaranteed); "bf16" is recommended on Ampere+
-    # hardware (4090 / A100): it keeps an FP32-like exponent range through the
-    # dynamically ranged parts of the network while preserving AMP throughput.
-    # The STFT / complex path is always forced to FP32 regardless of this setting.
-    amp_dtype: str = "fp16"
-    # Per-process VRAM cap for PyTorch's allocator. Note the CUDA context + NCCL
-    # (~0.9 GiB) live OUTSIDE this cap, so fraction*total + that must stay under
-    # the card; back off if you OOM right at the cap.
+    amp_dtype: Literal["fp16", "bf16"] = "fp16"
     gpu_mem_fraction: float = Field(0.92, gt=0.0, le=1.0)
     wandb: WandbCfg = Field(default_factory=WandbCfg)
 
@@ -37,12 +29,12 @@ class RunCfg(_Base):
 class DataCfg(_Base):
     sample_rate: int = 16000
     segment_seconds: float = 3.0
-    train_manifest: Optional[str] = None
-    val_manifest: Optional[str] = None
+    train_manifest: str
+    val_manifest: str | None = None
     num_workers: int = 4
     pin_memory: bool = True
     persistent_workers: bool = False
-    prefetch_factor: int = 2  # batches each worker buffers ahead; raise to hide decode/resample spikes
+    prefetch_factor: int = 2
 
 
 class WaveAugCfg(_Base):
@@ -60,60 +52,101 @@ class WaveAugCfg(_Base):
     clip_min: float = 0.5
 
 
-class WaveChunkMaskCfg(_Base):
-    enabled: bool = True
-    target_ratio: float = 0.25
-    min_span_frames: int = 2
-    max_span_frames: int = 8
+class SpanMaskCfg(_Base):
+    enabled: bool = False
+    ratio: float = Field(0.25, ge=0.0, le=1.0)
+    min_span_frames: int = Field(2, ge=1)
+    max_span_frames: int = Field(8, ge=1)
+
+    @model_validator(mode="after")
+    def validate_span_range(self) -> "SpanMaskCfg":
+        if self.max_span_frames < self.min_span_frames:
+            raise ValueError("max_span_frames must be >= min_span_frames")
+        return self
+
+
+class NoiseCfg(_Base):
+    enabled: bool = False
+    std: float = Field(0.0, ge=0.0)
 
 
 class AugCfg(_Base):
-    wave_aug: WaveAugCfg = Field(default_factory=WaveAugCfg)
-    wave_chunk_mask: WaveChunkMaskCfg = Field(default_factory=WaveChunkMaskCfg)
+    waveform_aug_global: WaveAugCfg = Field(default_factory=WaveAugCfg)
+    waveform_aug_local: WaveAugCfg | None = None
+    waveform_aug_local_mask: SpanMaskCfg = Field(default_factory=SpanMaskCfg)
+    frontend_frame_local_mask: SpanMaskCfg = Field(default_factory=SpanMaskCfg)
+    frontend_frame_noise: NoiseCfg = Field(default_factory=NoiseCfg)
+    decoder_input_mask: SpanMaskCfg = Field(default_factory=SpanMaskCfg)
+    decoder_input_noise: NoiseCfg = Field(default_factory=NoiseCfg)
 
 
 class FrontendCfg(_Base):
-    channels: List[int]
-    kernels: List[int]
-    strides: List[int]
-    groups: int = 1
+    channels: list[PositiveInt]
+    kernels: list[PositiveInt]
+    strides: list[PositiveInt]
+    groups: int = Field(1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_stack(self) -> "FrontendCfg":
+        if not self.channels or not (
+            len(self.channels) == len(self.kernels) == len(self.strides)
+        ):
+            raise ValueError("channels, kernels, and strides must have the same non-zero length")
+        return self
 
 
 class MHCCfg(_Base):
     enabled: bool = True
-    num_streams: int = 2
-    start_layer: int = 2
-    period: int = 3
-    sinkhorn_iters: int = 10
-    tau: float = 0.05
-    dropout: float = 0.0
+    num_streams: int = Field(2, ge=1)
+    start_layer: int = Field(2, ge=0)
+    period: int = Field(3, ge=1)
+    sinkhorn_iters: int = Field(10, ge=1)
+    tau: float = Field(0.05, gt=0.0)
+    dropout: float = Field(0.0, ge=0.0, le=1.0)
     identity_mix: bool = True
     alpha_init: float = 0.01
 
+    @model_validator(mode="after")
+    def validate_identity_mix(self) -> "MHCCfg":
+        if self.identity_mix and not 0.0 < self.alpha_init < 1.0:
+            raise ValueError("alpha_init must be in (0, 1) when identity_mix is enabled")
+        return self
+
 
 class EncoderCfg(_Base):
-    # Selects the per-layer block. "conformer" = macaron Conformer;
-    # "fastconformer" = same block + Squeeze-and-Excitation (and typically a
-    # smaller cnn_module_kernel, e.g. 9). Both share d_model/n_layers/heads/ffn.
-    encoder_type: str = "conformer"   # "conformer" | "fastconformer"
-    d_model: int = 256
-    n_layers: int = 4
-    num_heads: int = 4
-    feedforward_dim: int = 768
+    encoder_type: Literal["conformer", "fastconformer"] = "conformer"
+    d_model: int = Field(256, ge=1)
+    n_layers: int = Field(4, ge=1)
+    num_heads: int = Field(4, ge=1)
+    feedforward_dim: int = Field(768, ge=1)
     dropout: float = 0.1
-    cnn_module_kernel: int = 31
-    use_se: bool = True                # FastConformer SE gate (only used when encoder_type=="fastconformer")
-    xscaling: bool = False             # scale input embeddings by sqrt(d_model) (NeMo FastConformer)
+    cnn_module_kernel: PositiveInt = 31
+    use_se: bool = True
+    xscaling: bool = False
     mhc: MHCCfg = Field(default_factory=MHCCfg)
+
+    @model_validator(mode="after")
+    def validate_attention(self) -> "EncoderCfg":
+        if self.d_model % (2 * self.num_heads):
+            raise ValueError("d_model must be divisible by 2 * num_heads")
+        if self.cnn_module_kernel % 2 == 0:
+            raise ValueError("cnn_module_kernel must be odd")
+        return self
 
 
 class DecoderCfg(_Base):
     channels: int = 256
-    up_strides: List[int] = Field(default_factory=lambda: [4, 4, 4, 4, 5])
-    up_kernels: List[int] = Field(default_factory=lambda: [8, 8, 8, 8, 10])
+    up_strides: list[PositiveInt] = Field(default_factory=lambda: [4, 4, 4, 4, 5])
+    up_kernels: list[PositiveInt] = Field(default_factory=lambda: [8, 8, 8, 8, 10])
     res_blocks_per_up: int = 2
-    res_dilations: List[int] = Field(default_factory=lambda: [1, 3, 9])
+    res_dilations: list[int] = Field(default_factory=lambda: [1, 3, 9])
     film_hidden: int = 128
+
+    @model_validator(mode="after")
+    def validate_stack(self) -> "DecoderCfg":
+        if not self.up_strides or len(self.up_strides) != len(self.up_kernels):
+            raise ValueError("up_strides and up_kernels must have the same non-zero length")
+        return self
 
 
 class ProjectorCfg(_Base):
@@ -130,108 +163,76 @@ class ModelCfg(_Base):
 
 
 class STFTCfg(_Base):
-    fft_sizes: List[int] = Field(default_factory=lambda: [256, 512, 1024, 2048])
+    fft_sizes: list[int] = Field(default_factory=lambda: [256, 512, 1024, 2048])
     hop_ratio: float = 0.25
     win_ratio: float = 1.0
     center: bool = True
     window: str = "hann"
     logmag_eps: float = 1.0e-3
-    # Speech recon is carried mostly by magnitude / log-magnitude terms; spectral
-    # convergence (sc) is deliberately down-weighted so it doesn't dominate.
     sc_weight: float = 0.1
     mag_weight: float = 1.0
     logmag_weight: float = 1.0
 
 
 class MelCfg(_Base):
-    """Mel-spectrogram reconstruction loss config.
-
-    The mel loss operates on mel-scaled magnitudes, which are inherently
-    magnitude / log-magnitude quantities — so it is weighted toward mag / log_mag
-    by construction (spectral convergence is off by default via sc_weight=0.0).
-    Shares the sc/mag/logmag weighting scheme with STFTCfg for a clean ablation.
-    """
     n_mels: int = 80
     n_fft: int = 1024
     hop_length: int = 256
     win_length: int = 1024
-    sample_rate: int = 16000
     fmin: float = 0.0
-    fmax: Optional[float] = None       # None -> sample_rate / 2
+    fmax: float | None = None
     window: str = "hann"
     logmag_eps: float = 1.0e-3
-    sc_weight: float = 0.0            # mel is log-mag; SC off by default
+    sc_weight: float = 0.0
     mag_weight: float = 1.0
     logmag_weight: float = 1.0
 
 
 class JEPACfg(_Base):
     weight: float = 1.0
-    num_globals: int = 2
-    num_locals: int = 4
+    num_globals: int = Field(2, ge=1)
+    num_locals: int = Field(4, ge=1)
 
 
 class SIGRegCfg(_Base):
     weight: float = 0.05
-    num_slices: int = 1024
+    num_slices: int = Field(1024, ge=1)
     t_max: float = 5.0
-    n_points: int = 17
+    n_points: int = Field(17, ge=3)
+
+    @model_validator(mode="after")
+    def validate_points(self) -> "SIGRegCfg":
+        if self.n_points % 2 == 0:
+            raise ValueError("n_points must be odd")
+        return self
 
 
 class VISRegCfg(_Base):
-    """VISReg (Vector-ISotropic Gaussianisation), https://haiyuwu.github.io/visreg/.
-
-    Frame-level Gaussianisation on the projector output, mirroring SIGReg's role
-    (the two are mutually exclusive; select via ``LossCfg.reg_type``). No
-    learnable params; the random projection is resampled each forward pass.
-    """
-
     weight: float = 0.05
-    num_projections: int = 256
+    num_projections: int = Field(256, ge=1)
 
 
 class AdvCfg(_Base):
-    """HiFi-GAN-style adversarial + feature-matching loss on the decoder output.
-
-    Disabled by default so existing configs/runs are unaffected. When enabled,
-    train.py builds a Multi-Period Discriminator and a second optimizer.
-    """
     enabled: bool = False
     adv_weight: float = 1.0
     fm_weight: float = 2.0
-    adv_start_step: int = 0          # generator adversarial term active from here
-    fm_start_step: int = 20000       # feature-matching term active from here
-    lr: float = 2.0e-4               # discriminator AdamW lr
-    betas: List[float] = Field(default_factory=lambda: [0.8, 0.99])
-    periods: List[int] = Field(default_factory=lambda: [2, 3, 5, 7, 11])
-    # MPD hidden channel widths. HiFi-GAN default (32,128,512,1024) is a ~41M
-    # discriminator — too heavy for 6 GB; slim default keeps it ~proportionate
-    # to the generator. Raise on a bigger GPU.
-    disc_channels: List[int] = Field(default_factory=lambda: [16, 64, 128, 256])
-    loss_type: str = "lsgan"         # "lsgan" (least-squares) | "hinge" (margin-based).
-                                      # Pick ONE and keep it for the whole run; do not combine.
-                                      # Hinge is preferred for the multi-discriminator baseline:
-                                      # it does not square growing logits and gives a linear
-                                      # generator objective.
-    # Adaptive adversarial weight (VQGAN-style). When on, l_adv is rescaled each
-    # step so its gradient at the decoder's last layer matches the reconstruction
-    # gradient there, then multiplied by adv_weight. This keeps the GAN from
-    # overwhelming reconstruction regardless of the raw l_adv magnitude. With it
-    # on, adv_weight becomes a relative-strength knob (1.0 = parity with recon).
+    adv_start_step: int = 0
+    fm_start_step: int = 20000
+    lr: float = 2.0e-4
+    betas: list[float] = Field(default_factory=lambda: [0.8, 0.99])
+    periods: list[int] = Field(default_factory=lambda: [2, 3, 5, 7, 11])
+    disc_channels: list[int] = Field(default_factory=lambda: [16, 64, 128, 256])
+    loss_type: Literal["lsgan", "hinge"] = "lsgan"
     adaptive: bool = False
-    adaptive_max: float = 10      # clamp on the adaptive lambda (VQGAN default)
+    adaptive_max: float = 10
 
 
 class LossCfg(_Base):
-    # Reconstruction loss: swap between "stft" and "mel" for the ablation.
-    recon_type: str = "stft"          # "stft" | "mel" — which recon loss is trained
-    recon_weight: float = 0.005       # weight applied to whichever recon loss is active
-    recon_log_start_step: int = 1000  # only log the STFT log-mag metric after this many steps
-    # Gaussianisation loss: swap between "sigreg" and "visreg" for the ablation.
-    # Both act frame-level on the projector output (gathered across ranks so the
-    # estimate uses the global batch). Whichever is active is logged under
-    # ``l_sig`` / ``l_vis`` respectively.
-    reg_type: str = "sigreg"          # "sigreg" | "visreg" — which Gaussianisation loss is trained
+    recon_type: Literal["stft", "mel"] = "stft"
+    recon_views: Literal["global", "all"] = "global"
+    recon_weight: float = 0.005
+    recon_log_start_step: int = 1000
+    reg_type: Literal["sigreg", "visreg"] = "sigreg"
     stft: STFTCfg = Field(default_factory=STFTCfg)
     mel: MelCfg = Field(default_factory=MelCfg)
     jepa: JEPACfg = Field(default_factory=JEPACfg)
@@ -241,16 +242,14 @@ class LossCfg(_Base):
 
 
 class SchedulerCfg(_Base):
-    warmup_steps: int = 2000
-    # None -> derived from train.max_steps at the Config level (they are always
-    # equal in practice). Set explicitly only to decay over a different horizon.
-    total_steps: Optional[int] = None
-    min_lr_ratio: float = 0.0
+    warmup_steps: int = Field(2000, ge=0)
+    total_steps: int | None = Field(None, ge=1)
+    min_lr_ratio: float = Field(0.0, ge=0.0, le=1.0)
 
 
 class OptimCfg(_Base):
     lr: float = 5.0e-4
-    betas: List[float] = Field(default_factory=lambda: [0.9, 0.999])
+    betas: list[float] = Field(default_factory=lambda: [0.9, 0.999])
     eps: float = 1.0e-8
     weight_decay: float = 1.0e-2
     scheduler: SchedulerCfg = Field(default_factory=SchedulerCfg)
@@ -258,40 +257,40 @@ class OptimCfg(_Base):
 
 
 class TrainCfg(_Base):
-    batch_size: int = 50
-    grad_accum_steps: int = 1
-    max_steps: int = 30000
-    log_interval_steps: int = 10
-    eval_interval_steps: int = 5000
-    save_interval_steps: int = 10000
-    probe_interval_steps: int = 1000  # embedding similarity probe (pos/neg MSE on z)
-    val_batches: Optional[int] = None
+    batch_size: int = Field(50, ge=1)
+    grad_accum_steps: int = Field(1, ge=1)
+    max_steps: int = Field(30000, ge=1)
+    log_interval_steps: int = Field(10, ge=1)
+    eval_interval_steps: int = Field(5000, ge=1)
+    save_interval_steps: int = Field(10000, ge=1)
+    probe_interval_steps: int = Field(1000, ge=1)
+    val_batches: int | None = None
 
 
 class EmotionCfg(_Base):
     enabled: bool = False
-    train_manifest: Optional[str] = None
-    dev_manifest: Optional[str] = None
+    train_manifest: str | None = None
+    dev_manifest: str | None = None
     label_key: str = "emotion"
     steps: int = 2000
     batch_size: int = 64
-    segment_seconds: Optional[float] = None
+    segment_seconds: float | None = None
 
 
 class GenderCfg(_Base):
     enabled: bool = False
-    train_manifest: Optional[str] = None
-    dev_manifest: Optional[str] = None
+    train_manifest: str | None = None
+    dev_manifest: str | None = None
     label_key: str = "gender"
     steps: int = 1500
     batch_size: int = 64
-    segment_seconds: Optional[float] = None
+    segment_seconds: float | None = None
 
 
 class AsrCfg(_Base):
     enabled: bool = True
-    train_manifest: Optional[str] = None
-    dev_manifest: Optional[str] = None
+    train_manifest: str | None = None
+    dev_manifest: str | None = None
     text_key: str = "text"
     steps: int = 1000
     batch_size: int = 16
@@ -307,12 +306,17 @@ class EvalCfg(_Base):
 
 
 class Config(_Base):
-    resolved_config_path: Optional[str] = None
     run: RunCfg = Field(default_factory=RunCfg)
-    data: DataCfg = Field(default_factory=DataCfg)
+    data: DataCfg
     aug: AugCfg = Field(default_factory=AugCfg)
     model: ModelCfg
     loss: LossCfg = Field(default_factory=LossCfg)
     optim: OptimCfg = Field(default_factory=OptimCfg)
     train: TrainCfg = Field(default_factory=TrainCfg)
     eval: EvalCfg = Field(default_factory=EvalCfg)
+
+    @model_validator(mode="after")
+    def validate_frame_rate(self) -> "Config":
+        if math.prod(self.model.frontend.strides) != math.prod(self.model.decoder.up_strides):
+            raise ValueError("frontend and decoder stride products must match")
+        return self

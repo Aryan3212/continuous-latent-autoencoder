@@ -35,7 +35,7 @@ data:
   persistent_workers: true
 
 aug:
-  wave_aug:
+  waveform_aug_global:
     enabled: true
     noise_prob: 1.0
     noise_snr_min: 0.0
@@ -48,9 +48,9 @@ aug:
     gain_max: 1.5
     clip_prob: 0.3
     clip_min: 0.5
-  wave_chunk_mask:
+  waveform_aug_local_mask:
     enabled: true
-    target_ratio: 0.25
+    ratio: 0.25
     min_span_frames: 2
     max_span_frames: 8
 
@@ -111,7 +111,6 @@ loss:
     n_fft: 1024
     hop_length: 256
     win_length: 1024
-    sample_rate: 16000
     fmin: 0.0
     fmax: null                 # null -> sample_rate/2
     window: hann

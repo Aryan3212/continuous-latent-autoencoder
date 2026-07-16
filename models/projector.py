@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import List
-
 import torch
 import torch.nn as nn
 
@@ -23,9 +21,7 @@ class Projector(nn.Module):
 
     def __init__(self, dim: int, cfg: ProjectorCfg):
         super().__init__()
-        self.dim = dim
-        self.cfg = cfg
-        layers: List[nn.Module] = []
+        layers: list[nn.Module] = []
         in_dim = dim
         for _ in range(max(0, cfg.n_hidden_layers)):
             layers.append(nn.Linear(in_dim, cfg.hidden_dim))
@@ -37,8 +33,6 @@ class Projector(nn.Module):
         self.output_dim = cfg.output_dim
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        if z.dim() != 3:
-            raise ValueError(f"Expected (B, D, T), got {tuple(z.shape)}")
         B, D, T = z.shape
         x = z.transpose(1, 2).reshape(B * T, D)
         x = self.net(x)

@@ -263,7 +263,36 @@ def _our_encoder_embedder(name: str, *, random_init: bool, ckpt: Optional[str]) 
     ckpt_path = _resolve_our_ckpt(ckpt)
     print(f"[{name}] loading checkpoint {ckpt_path}", flush=True)
     state = torch.load(ckpt_path, map_location="cpu")
-    cfg = Config.model_validate(state["cfg"])
+    cfg_data = dict(state["cfg"])
+    cfg_data.pop("resolved_config_path", None)
+
+    aug_data = dict(cfg_data.get("aug", {}))
+    if "wave_aug" in aug_data:
+        aug_data["waveform_aug_global"] = aug_data.pop("wave_aug")
+    if "wave_chunk_mask" in aug_data:
+        aug_data["waveform_aug_local_mask"] = aug_data.pop("wave_chunk_mask")
+    for key in (
+        "waveform_aug_local_mask",
+        "frontend_frame_local_mask",
+        "decoder_input_mask",
+    ):
+        mask = dict(aug_data.get(key, {}))
+        if "target_ratio" in mask:
+            mask["ratio"] = mask.pop("target_ratio")
+        if "token_ratio" in mask:
+            mask["ratio"] = mask.pop("token_ratio")
+            mask["min_span_frames"] = mask.pop("token_min_span")
+            mask["max_span_frames"] = mask.pop("token_max_span")
+        if mask:
+            aug_data[key] = mask
+    cfg_data["aug"] = aug_data
+
+    loss_data = dict(cfg_data.get("loss", {}))
+    mel_data = dict(loss_data.get("mel", {}))
+    mel_data.pop("sample_rate", None)
+    loss_data["mel"] = mel_data
+    cfg_data["loss"] = loss_data
+    cfg = Config.model_validate(cfg_data)
 
     frontend = ConvFrontend(cfg.model.frontend)
     encoder = Encoder(frontend.out_channels, cfg.model.encoder)

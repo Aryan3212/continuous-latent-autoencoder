@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from schema import VISRegCfg
+
 
 class VISReg(nn.Module):
     """VISReg (Vector-ISotropic Gaussianisation) from
@@ -29,9 +31,9 @@ class VISReg(nn.Module):
     gradient remains an unbiased estimate).
     """
 
-    def __init__(self, num_projections: int = 256):
+    def __init__(self, cfg: VISRegCfg):
         super().__init__()
-        self.K = num_projections
+        self.K = cfg.num_projections
         self._cached_B = -1
         self._cached_target = None
 
@@ -43,8 +45,6 @@ class VISReg(nn.Module):
         return self._cached_target.to(device=device, dtype=dtype)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        if z.dim() != 3:
-            raise ValueError(f"Expected z as (N, B, D), got {tuple(z.shape)}")
         _, B, D = z.shape
 
         mu = z.mean(dim=1, keepdim=True)

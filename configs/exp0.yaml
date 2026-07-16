@@ -20,7 +20,7 @@ data:
   persistent_workers: true
 
 aug:
-  wave_aug:
+  waveform_aug_global:
     enabled: true
     noise_prob: 1.0             # always add noise; intensity sampled per-sample
     noise_snr_min: 0.0          # loud end: noise matches speech
@@ -33,12 +33,12 @@ aug:
     gain_max: 1.5
     clip_prob: 0.3              # keep occasional — clipping is non-linear/destructive
     clip_min: 0.5
-  wave_chunk_mask:
+  waveform_aug_local_mask:
     # Waveform-space chunk masking applied to LOCAL views only (V-JEPA / MAE
     # tube-masking analogue for 1-D audio). Frame-aligned: spans are sampled
     # in frame units, then expanded to samples_per_frame contiguous samples.
     enabled: true
-    target_ratio: 0.25          # mask ~25% of frames per local view
+    ratio: 0.25                 # mask ~25% of frames per local view
     min_span_frames: 2          # 2 frames = 160 ms @ 12.5 Hz frame rate
     max_span_frames: 8          # 8 frames = 640 ms
 
@@ -101,7 +101,6 @@ loss:
     n_fft: 1024
     hop_length: 256
     win_length: 1024
-    sample_rate: 16000
     fmin: 0.0
     fmax: null                 # null -> sample_rate/2
     window: hann

@@ -11,8 +11,8 @@ import signal
 import subprocess
 import sys
 import time
-import warnings
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import yaml
@@ -23,9 +23,10 @@ import torch
 import torch.distributed as dist
 
 from data_loading import (
+    apply_frame_mask,
     apply_waveform_augment,
     apply_waveform_chunk_mask,
-    make_frame_chunk_masks,
+    make_span_masks,
 )
 from data_loading import AudioDataset, DatasetConfig, collate_fixed
 from losses import (
@@ -36,16 +37,66 @@ from losses import (
     feature_matching_loss,
     generator_adv_loss,
 )
-from models.decoder_generator import WaveformDecoder
+from models.autoencoder import Autoencoder
 from models.discriminator import MultiPeriodDiscriminator
-from models.encoder import Encoder
-from models.frontend_conv import ConvFrontend
-
-from models.projector import Projector
 from models.sigreg import SIGReg
 from models.visreg import VISReg
 from config import apply_overrides, load_config
 from schema import Config
+
+
+@dataclass(frozen=True)
+class _ScheduleInputs:
+    lr: float
+    warmup_steps: int
+    total_steps: int
+    min_lr_ratio: float
+
+
+def _schedule_inputs(cfg: Config) -> _ScheduleInputs:
+    scheduler = cfg.optim.scheduler
+    return _ScheduleInputs(
+        lr=cfg.optim.lr,
+        warmup_steps=scheduler.warmup_steps,
+        total_steps=scheduler.total_steps or cfg.train.max_steps,
+        min_lr_ratio=scheduler.min_lr_ratio,
+    )
+
+
+def _checkpoint_schedule_inputs(state: dict[str, Any]) -> _ScheduleInputs | None:
+    try:
+        cfg = state["cfg"]
+        optim = cfg["optim"]
+        scheduler = optim["scheduler"]
+        total_steps = scheduler["total_steps"] or cfg["train"]["max_steps"]
+        return _ScheduleInputs(
+            lr=float(optim["lr"]),
+            warmup_steps=int(scheduler["warmup_steps"]),
+            total_steps=int(total_steps),
+            min_lr_ratio=float(scheduler["min_lr_ratio"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _warn_schedule_change(saved: _ScheduleInputs, current: _ScheduleInputs) -> None:
+    labels = {
+        "lr": "optim.lr",
+        "warmup_steps": "optim.scheduler.warmup_steps",
+        "total_steps": "effective total_steps",
+        "min_lr_ratio": "optim.scheduler.min_lr_ratio",
+    }
+    changes = [
+        f"{labels[name]}: checkpoint={getattr(saved, name)}, current={getattr(current, name)}"
+        for name in labels
+        if getattr(saved, name) != getattr(current, name)
+    ]
+    if changes:
+        print(
+            "[train] WARNING: LR schedule inputs changed on resume; using the current "
+            f"schedule ({'; '.join(changes)}).",
+            flush=True,
+        )
 
 
 def _now_run_id() -> str:
@@ -67,7 +118,7 @@ def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
     return module
 
 
-def _clean_state_dict(model: torch.nn.Module) -> Dict[str, Any]:
+def _clean_state_dict(model: torch.nn.Module) -> dict[str, Any]:
     """state_dict with any DDP ``module.`` prefix stripped, so checkpoints written
     under DDP are byte-compatible with single-GPU ones (and resume either way)."""
     return {k.replace(".module.", ".", 1): v for k, v in model.state_dict().items()}
@@ -96,7 +147,7 @@ class JsonlLogger:
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def log(self, row: Dict[str, Any]) -> None:
+    def log(self, row: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
 
@@ -122,12 +173,11 @@ def save_checkpoint(
     step: int,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: Optional[torch.cuda.amp.GradScaler],
+    scaler: torch.cuda.amp.GradScaler | None,
     cfg: Config,
-    extra: Optional[Dict[str, Any]] = None,
-    disc: Optional[torch.nn.Module] = None,
-    optimizer_d: Optional[torch.optim.Optimizer] = None,
-    scaler_d: Optional[torch.cuda.amp.GradScaler] = None,
+    disc: torch.nn.Module | None = None,
+    optimizer_d: torch.optim.Optimizer | None = None,
+    scaler_d: torch.cuda.amp.GradScaler | None = None,
 ) -> None:
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +187,6 @@ def save_checkpoint(
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
         "cfg": cfg.model_dump(),
-        "extra": extra or {},
     }
     if disc is not None:
         payload["disc"] = _unwrap(disc).state_dict()
@@ -193,12 +242,107 @@ def _participation_ratio(x: torch.Tensor) -> torch.Tensor:
     return (eig.sum() ** 2) / (eig.pow(2).sum() + 1e-8)
 
 
-def _decode(model: torch.nn.ModuleDict, z: torch.Tensor, target_len: int) -> torch.Tensor:
-    return model["decoder"](z, target_len=target_len)
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--resume", default=None)
+    parser.add_argument("--profile", action="store_true", help="Enable PyTorch Profiler with W&B")
+    parser.add_argument("--profile_wait", type=int, default=0, help="Steps to wait before profiling")
+    parser.add_argument("--profile_warmup", type=int, default=0, help="Steps to warm up profiler")
+    parser.add_argument("--profile_active", type=int, default=1, help="Steps to actively profile")
+    parser.add_argument(
+        "--max_hours",
+        type=float,
+        default=None,
+        help="Stop cleanly after this many hours and save last.pt.",
+    )
+    parser.add_argument("overrides", nargs="*")
+    return parser.parse_args()
+
+
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    base_lr: float,
+    warmup_steps: int,
+    total_steps: int,
+    min_lr_ratio: float,
+    completed_steps: int,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    decay_steps = max(1, total_steps - warmup_steps)
+    warmup_start = 1.0 / max(1, warmup_steps)
+
+    def lr_ratio(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return warmup_start + (1.0 - warmup_start) * step / warmup_steps
+        progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    for group in optimizer.param_groups:
+        group["initial_lr"] = base_lr
+    return torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lr_ratio,
+        last_epoch=completed_steps - 1,
+    )
+
+
+def _reduce_metric_totals(
+    sums: dict[str, torch.Tensor],
+    counts: dict[str, int],
+    *,
+    distributed: bool,
+    device: torch.device,
+) -> dict[str, float]:
+    keys = sorted(sums)
+    sum_values = torch.stack([sums[key] for key in keys])
+    count_values = torch.tensor(
+        [counts[key] for key in keys], device=device, dtype=sum_values.dtype
+    )
+    if distributed:
+        dist.all_reduce(sum_values)
+        dist.all_reduce(count_values)
+    return {
+        key: (value / count).item()
+        for key, value, count in zip(keys, sum_values, count_values)
+    }
+
+
+def _all_gather_batch(x: torch.Tensor, world_size: int) -> torch.Tensor:
+    if world_size == 1:
+        return x
+    x = x.contiguous()
+    gathered = [torch.empty_like(x) for _ in range(world_size)]
+    dist.all_gather(gathered, x)
+    return torch.cat(gathered, dim=0)
+
+
+def _restore_checkpoint(
+    path: str,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    disc: torch.nn.Module | None,
+    optimizer_d: torch.optim.Optimizer | None,
+    scaler_d: torch.cuda.amp.GradScaler | None,
+) -> tuple[int, _ScheduleInputs | None]:
+    state = torch.load(path, map_location="cpu")
+    model.load_state_dict(state["model"], strict=True)
+    optimizer.load_state_dict(state["optimizer"])
+    if state.get("scaler") and scaler.is_enabled():
+        scaler.load_state_dict(state["scaler"])
+    if disc is not None and state.get("disc") is not None:
+        disc.load_state_dict(state["disc"], strict=True)
+        if state.get("optimizer_d") is not None:
+            optimizer_d.load_state_dict(state["optimizer_d"])
+        if state.get("scaler_d") and scaler_d is not None and scaler_d.is_enabled():
+            scaler_d.load_state_dict(state["scaler_d"])
+    return int(state.get("step", 0)), _checkpoint_schedule_inputs(state)
 
 
 def main() -> None:
-    # Flush stdout immediately so print() output appears over SSH/nohup/pipe.
     sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 
     _shutdown = False
@@ -208,8 +352,6 @@ def main() -> None:
         print(f"\n[train] {signal.Signals(sig).name} received — stopping after current step.", flush=True)
         _shutdown = True
 
-    # SIGTERM as well as SIGINT: Kaggle / Slurm / cloud preemption send SIGTERM
-    # before the hard kill, so catching it lets us save last.pt on the way out.
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
@@ -226,50 +368,17 @@ def main() -> None:
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
-    # Hardware acceleration flags
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
-    # (Per-process VRAM cap is applied below, once cfg is loaded — it's tunable.)
 
-    # Everything in the config is settable via trailing dotted overrides, e.g.
-    #   python train.py --config configs/exp0.yaml train.max_steps=5000 train.log_interval_steps=50
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--resume", default=None)
-    ap.add_argument("--profile", action="store_true", help="Enable PyTorch Profiler with W&B")
-    ap.add_argument("--profile_wait", type=int, default=0, help="Steps to wait before profiling")
-    ap.add_argument("--profile_warmup", type=int, default=0, help="Steps to warm up profiler")
-    ap.add_argument("--profile_active", type=int, default=1, help="Steps to actively profile")
-    ap.add_argument(
-        "--max_hours",
-        type=float,
-        default=None,
-        help="Wall-clock budget in hours: stop cleanly and save last.pt after this "
-        "long. For fixed-length sessions (e.g. Kaggle's 12h cap) set it below the "
-        "limit (e.g. 11.5) so the final save lands before the hard kill.",
-    )
-    ap.add_argument("overrides", nargs="*")
-    args = ap.parse_args()
+    args = _parse_args()
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
-    cfg.resolved_config_path = args.config
 
-    # Resolve the AMP autocast precision. STFT / complex math is forced to FP32 in
-    # losses.py regardless; this only selects the autocast dtype for conv networks.
     _AMP_DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16}
-    if cfg.run.amp_dtype not in _AMP_DTYPES:
-        raise ValueError(
-            f"run.amp_dtype must be 'fp16' or 'bf16'; got {cfg.run.amp_dtype!r}"
-        )
     amp_dtype = _AMP_DTYPES[cfg.run.amp_dtype]
 
-    # Cap per-process VRAM now that cfg is known (must be after set_device, before
-    # any large allocation — argparse/config load do none). Raise on a dedicated
-    # GPU; leave ~0.9 GiB for the CUDA context + NCCL (outside PyTorch's allocator).
     torch.cuda.set_per_process_memory_fraction(cfg.run.gpu_mem_fraction, device=local_rank)
-
-    # When resuming, pass run.run_id=<id> matching the checkpoint's run dir
-    # (<out_dir>/<run_id>/checkpoints/<name>.pt) to reuse its out_dir and wandb run.
 
     # Per-rank seed offset: identical model init is enforced by DDP's broadcast at
     # wrap time anyway, so offsetting by rank only diversifies the per-rank waveform
@@ -292,8 +401,6 @@ def main() -> None:
 
     # Data
     dcfg = cfg.data
-    if dcfg.train_manifest is None:
-        raise ValueError("Set data.train_manifest to a JSONL manifest path (e.g. data/manifests/train.jsonl)")
     if is_main:
         meta_extra = {
             "git_hash": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
@@ -340,16 +447,7 @@ def main() -> None:
 
     # Model
     mcfg = cfg.model
-    frontend = ConvFrontend(mcfg.frontend)
-    encoder = Encoder(frontend.out_channels, mcfg.encoder)
-
-    latent_dim = mcfg.encoder.d_model
-
-    decoder = WaveformDecoder(latent_dim, mcfg.decoder)
-
-    projector = Projector(latent_dim, mcfg.projector)
-    proj_dim = projector.output_dim
-
+    model = Autoencoder(mcfg)
     # Gaussianisation loss: SIGReg (sliced characteristic-function test) or VISReg
     # (vector isotropic Gaussianisation). Both are param-free and act frame-level
     # on the projector output; selected by loss.reg_type. Stored under the
@@ -357,25 +455,16 @@ def main() -> None:
     # param-free module under "sigreg") still loads under strict=True.
     reg_type = cfg.loss.reg_type
     if reg_type == "sigreg":
-        reg = SIGReg(proj_dim, cfg.loss.sigreg)
-    elif reg_type == "visreg":
-        reg = VISReg(cfg.loss.visreg.num_projections)
+        reg = SIGReg(cfg.loss.sigreg)
     else:
-        raise ValueError(f"loss.reg_type must be 'sigreg' or 'visreg'; got {reg_type!r}")
+        reg = VISReg(cfg.loss.visreg)
 
-    model = torch.nn.ModuleDict(
-        {
-            "frontend": frontend,
-            "encoder": encoder,
-            "projector": projector,
-            "decoder": decoder,
-            reg_type: reg,
-        }
-    ).to(device)
+    model.add_module(reg_type, reg)
+    model.to(device)
 
     # One-time trainable-parameter breakdown (replaces scripts/get_param_count.py).
     _block_params = {
-        name: sum(p.numel() for p in model[name].parameters() if p.requires_grad)
+        name: sum(p.numel() for p in getattr(model, name).parameters() if p.requires_grad)
         for name in ("frontend", "encoder", "projector", "decoder", reg_type)
     }
     if is_main:
@@ -384,20 +473,19 @@ def main() -> None:
             print(f"  {_name:<10} {_n:>12,}")
         print(f"  {'total':<10} {sum(_block_params.values()):>12,}")
 
-    # Reconstruction representation (mel or STFT) — also the domain the GAN
-    # discriminator operates in (it sees spectrograms, not raw waveform).
     recon_type = cfg.loss.recon_type
-    if recon_type not in ("stft", "mel"):
-        raise ValueError(f"loss.recon_type must be 'stft' or 'mel'; got {recon_type!r}")
-    disc_spec = ReconSpectrogram(cfg.loss, dcfg.sample_rate).to(device)
+    if recon_type == "mel":
+        recon_fn = MelLoss(cfg.loss.mel, sample_rate=dcfg.sample_rate).to(device)
+        stft_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
+    else:
+        recon_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
+        stft_fn = recon_fn
 
-    # Adversarial discriminator (HiFi-GAN MPD). Built separately from `model`
-    # so the generator optimizer / param breakdown stay clean; trained by its
-    # own optimizer below. Disabled -> None and the loop runs exactly as before.
-    # It consumes the recon spectrogram (mel/STFT), so in_channels = its bin count.
     acfg = cfg.loss.adv
     disc = None
+    disc_spec = None
     if acfg.enabled:
+        disc_spec = ReconSpectrogram(cfg.loss, dcfg.sample_rate).to(device)
         disc = MultiPeriodDiscriminator(
             acfg.periods, channels=acfg.disc_channels, in_channels=disc_spec.n_bins
         ).to(device)
@@ -406,32 +494,24 @@ def main() -> None:
             print(f"  {'disc(MPD)':<10} {_d_params:>12,}  (adversarial, separate optimizer; "
                   f"input = {recon_type} spectrogram, {disc_spec.n_bins} bins)")
 
-    # Losses
-    # Reconstruction loss is swappable (stft <-> mel) for the ablation; the
-    # STFT loss is always built too so we can log the comparable stft_log metric
-    # in BOTH recon modes (after recon_log_start_step).
-    if recon_type == "mel":
-        recon_fn = MelLoss(cfg.loss.mel, sample_rate=dcfg.sample_rate).to(device)
-    else:
-        recon_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
-    stft_fn = MultiResSTFTLoss(cfg.loss.stft).to(device)
-    wave_aug_cfg = cfg.aug.wave_aug
-    wave_chunk_mask_cfg = cfg.aug.wave_chunk_mask
+    aug_global_cfg = cfg.aug.waveform_aug_global
+    aug_local_cfg = cfg.aug.waveform_aug_local or aug_global_cfg
+    wave_mask_cfg = cfg.aug.waveform_aug_local_mask
+    frontend_mask_cfg = cfg.aug.frontend_frame_local_mask
+    frontend_noise_cfg = cfg.aug.frontend_frame_noise
+    decoder_mask_cfg = cfg.aug.decoder_input_mask
+    decoder_noise_cfg = cfg.aug.decoder_input_noise
 
     # Frontend stride product gives samples-per-output-frame. Used to convert
     # frame-level chunk masks (local-view recipe) into waveform sample masks.
     samples_per_frame = math.prod(mcfg.frontend.strides)
-    assert math.prod(mcfg.decoder.up_strides) == samples_per_frame, (
-        f"decoder up_strides product {math.prod(mcfg.decoder.up_strides)} must equal "
-        f"frontend strides product {samples_per_frame}"
-    )
     # Pre-compute exact output frame count via one dummy frontend forward —
-    # this is what we hand to make_frame_chunk_masks so the local-view mask
+    # this is what we hand to make_span_masks so the local-view mask
     # aligns 1:1 with the encoder grid.
-    _seg_samples = int(round(dcfg.segment_seconds * dcfg.sample_rate))
+    _seg_samples = int(math.ceil(dcfg.segment_seconds * dcfg.sample_rate))
     with torch.no_grad():
         _dummy = torch.zeros(1, 1, _seg_samples, device=device)
-        n_frames_per_segment = int(model["frontend"](_dummy).size(-1))
+        n_frames_per_segment = int(model.frontend(_dummy).size(-1))
 
     # Optim
     ocfg = cfg.optim
@@ -443,27 +523,7 @@ def main() -> None:
         weight_decay=ocfg.weight_decay,
     )
 
-    scfg = ocfg.scheduler
-    warmup_steps = scfg.warmup_steps
-    # total_steps defaults to the whole run (train.max_steps); pin it in config
-    # only to decay over a different horizon. Raising max_steps alone extends both.
-    total_steps = scfg.total_steps if scfg.total_steps is not None else cfg.train.max_steps
-    _cosine_inner = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=max(1, total_steps - warmup_steps),
-        eta_min=ocfg.lr * scfg.min_lr_ratio,
-    )
-    _warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1.0 / max(1, warmup_steps),
-        end_factor=1.0,
-        total_iters=warmup_steps,
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[_warmup, _cosine_inner],
-        milestones=[warmup_steps],
-    )
+    schedule_inputs = _schedule_inputs(cfg)
 
     use_amp = cfg.run.amp
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -483,29 +543,26 @@ def main() -> None:
 
     step = 0
     if args.resume:
-        state = torch.load(args.resume, map_location="cpu")
-        model.load_state_dict(state["model"], strict=True)
-        optimizer.load_state_dict(state["optimizer"])
-        if state.get("scaler") and scaler.is_enabled():
-            scaler.load_state_dict(state["scaler"])
-        step = int(state.get("step", 0))
-        # Re-derive the LR schedule by fast-forwarding the freshly-built scheduler
-        # to `step` instead of restoring its state: load_state_dict would bake in
-        # the checkpoint's old T_max AND leave CosineAnnealingLR's recurrent get_lr
-        # anchored to the old curve's amplitude, so a raised total_steps would train
-        # at the wrong LR. The schedule is a pure function of step, so re-stepping
-        # rebuilds the correct curve for the current total_steps. (step() without a
-        # preceding optimizer.step() only warns; it doesn't alter the LR values.)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for _ in range(step):
-                scheduler.step()
-        if disc is not None and state.get("disc") is not None:
-            disc.load_state_dict(state["disc"], strict=True)
-            if state.get("optimizer_d") is not None:
-                optimizer_d.load_state_dict(state["optimizer_d"])
-            if state.get("scaler_d") and scaler_d is not None and scaler_d.is_enabled():
-                scaler_d.load_state_dict(state["scaler_d"])
+        step, saved_schedule_inputs = _restore_checkpoint(
+            args.resume,
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            disc=disc,
+            optimizer_d=optimizer_d,
+            scaler_d=scaler_d,
+        )
+        if is_main and saved_schedule_inputs is not None:
+            _warn_schedule_change(saved_schedule_inputs, schedule_inputs)
+
+    scheduler = _build_scheduler(
+        optimizer,
+        base_lr=schedule_inputs.lr,
+        warmup_steps=schedule_inputs.warmup_steps,
+        total_steps=schedule_inputs.total_steps,
+        min_lr_ratio=schedule_inputs.min_lr_ratio,
+        completed_steps=step,
+    )
 
     # Wrap param-bearing submodules in DDP AFTER any resume-load (so the clean
     # single-GPU checkpoint format loads into the raw modules). The Gaussianisation
@@ -515,9 +572,10 @@ def main() -> None:
     # find_unused_parameters=True there.)
     if is_dist:
         for _name in ("frontend", "encoder", "projector", "decoder"):
-            model[_name] = torch.nn.parallel.DistributedDataParallel(
-                model[_name], device_ids=[local_rank], output_device=local_rank
-            )
+            module = getattr(model, _name)
+            setattr(model, _name, torch.nn.parallel.DistributedDataParallel(
+                module, device_ids=[local_rank], output_device=local_rank
+            ))
         if disc is not None:
             disc = torch.nn.parallel.DistributedDataParallel(
                 disc, device_ids=[local_rank], output_device=local_rank
@@ -533,14 +591,14 @@ def main() -> None:
     jepa_w = jcfg.weight
     num_globals = jcfg.num_globals
     num_locals = jcfg.num_locals
-    if num_globals < 1 or num_locals < 1:
-        raise ValueError(f"loss.jepa.num_globals and num_locals must both be >= 1; got G={num_globals}, L={num_locals}")
+    num_views = num_globals + num_locals
     reg_w = cfg.loss.sigreg.weight if reg_type == "sigreg" else cfg.loss.visreg.weight
     # The Gaussianisation loss is gathered across ranks (see loop); DDP averages
     # gradients by 1/W, so scaling its term by world_size restores the single-GPU
     # full-batch gradient.
     reg_scale = float(world_size)
     recon_w = cfg.loss.recon_weight
+    reconstruct_all_views = cfg.loss.recon_views == "all"
     recon_log_start = cfg.loss.recon_log_start_step
     adv_w = acfg.adv_weight
     fm_w = acfg.fm_weight
@@ -548,13 +606,6 @@ def main() -> None:
     fm_start = acfg.fm_start_step
     adaptive_adv = acfg.adaptive
     adaptive_max = acfg.adaptive_max
-
-
-
-    def _extra_state(**extra: Any) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"scheduler": scheduler.state_dict()}
-        payload.update(extra)
-        return payload
 
     prof = None
     if args.profile and is_main:
@@ -566,7 +617,12 @@ def main() -> None:
             handler = wandb.profiler.torch_trace_handler()
 
         prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=args.profile_wait, warmup=args.profile_warmup, active=args.profile_active, repeat=1),
+            schedule=torch.profiler.schedule(
+                wait=args.profile_wait,
+                warmup=args.profile_warmup,
+                active=args.profile_active,
+                repeat=1,
+            ),
             on_trace_ready=handler,
             record_shapes=True,
             profile_memory=True,
@@ -574,8 +630,8 @@ def main() -> None:
         )
         prof.start()
 
-    accum_sums: Dict[str, torch.Tensor] = {}
-    accum_counts: Dict[str, int] = {}
+    accum_sums: dict[str, torch.Tensor] = {}
+    accum_counts: dict[str, int] = {}
 
     start_time = time.monotonic()
     max_seconds = args.max_hours * 3600.0 if args.max_hours else None
@@ -614,9 +670,8 @@ def main() -> None:
         # first disc-active microbatch) and reused across the accumulation window:
         # it's a slowly-varying scalar, and recomputing it every microbatch would
         # add two extra partial backward passes per microbatch.
-        lam_adv_cached: Optional[torch.Tensor] = None
+        lam_adv_cached: torch.Tensor | None = None
 
-        microbatches = []
         for _ in range(grad_accum):
             try:
                 batch = next(train_it)
@@ -626,9 +681,6 @@ def main() -> None:
                     train_sampler.set_epoch(epoch)
                 train_it = iter(train_dl)
                 batch = next(train_it)
-            microbatches.append(batch)
-
-        for batch in microbatches:
             wav_a = batch["wav"]  # (B,1,T)
 
             wav_a = wav_a.to(device, non_blocking=True)
@@ -637,26 +689,38 @@ def main() -> None:
                 B = wav_a.size(0)
                 sr = dcfg.sample_rate
 
-                # Globals: light wave aug, no chunk mask.
-                view_wavs = [apply_waveform_augment(wav_a, sr, wave_aug_cfg) for _ in range(num_globals)]
-                # Locals: wave aug + waveform-space chunk mask (sample-aligned to frames).
-                local_frame_masks_cpu = make_frame_chunk_masks(
-                    num_locals * B, n_frames_per_segment, wave_chunk_mask_cfg
-                )
-                local_frame_masks = local_frame_masks_cpu.to(device, non_blocking=True)
+                view_wavs = [
+                    apply_waveform_augment(wav_a, sr, aug_global_cfg)
+                    for _ in range(num_globals)
+                ]
+                wave_masks = make_span_masks(
+                    num_locals * B, n_frames_per_segment, wave_mask_cfg
+                ).to(device, non_blocking=True)
                 for li in range(num_locals):
-                    aug = apply_waveform_augment(wav_a, sr, wave_aug_cfg)
-                    fmask = local_frame_masks[li * B:(li + 1) * B]   # (B, n_frames)
-                    view_wavs.append(apply_waveform_chunk_mask(aug, fmask, samples_per_frame))
+                    aug = apply_waveform_augment(wav_a, sr, aug_local_cfg)
+                    chunk_mask = wave_masks[li * B:(li + 1) * B]
+                    view_wavs.append(
+                        apply_waveform_chunk_mask(aug, chunk_mask, samples_per_frame)
+                    )
                 wav_cat = torch.cat(view_wavs, dim=0)                 # (V*B, 1, T_wav)
 
-                h0_cat = model["frontend"](wav_cat)
-                # Locals carry the waveform chunk mask; globals get only the
-                # light waveform augmentation (noise/lowpass/gain/clip), no
-                # mask — that asymmetry is what makes the globals-only center
-                # a usable anchor.
-                z_cat = model["encoder"](h0_cat)                      # (V*B, D, T')
-                p_cat = model["projector"](z_cat)                     # (V*B, P, T')
+                h0_cat = model.frontend(wav_cat)
+                g = num_globals * B
+                n_local = num_locals * B
+                if frontend_mask_cfg.enabled or frontend_noise_cfg.enabled:
+                    local_h0 = h0_cat[g:]
+                    if frontend_mask_cfg.enabled:
+                        feature_masks = make_span_masks(
+                            n_local, h0_cat.size(-1), frontend_mask_cfg
+                        )
+                        local_h0 = apply_frame_mask(local_h0, feature_masks)
+                    if frontend_noise_cfg.enabled:
+                        local_h0 = local_h0 + frontend_noise_cfg.std * torch.randn_like(
+                            local_h0
+                        )
+                    h0_cat = torch.cat((h0_cat[:g], local_h0), dim=0)
+                z_cat = model.encoder(h0_cat)                         # (V*B, D, T')
+                p_cat = model.projector(z_cat)                        # (V*B, P, T')
 
                 l_jepa = _global_local_jepa_loss(
                     p_cat,
@@ -689,16 +753,33 @@ def main() -> None:
                 z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + diagnostics)
                 z_mask = z_cat[num_globals * B : (num_globals + 1) * B]
 
-                # Decode from view-0 to clean wav_a (denoising reconstruction).
-                x_hat = _decode(model, z_a, target_len=wav_a.size(-1))
+                if reconstruct_all_views:
+                    z_dec = z_cat
+                    if decoder_mask_cfg.enabled:
+                        decoder_masks = make_span_masks(
+                            n_local, z_dec.size(-1), decoder_mask_cfg
+                        )
+                        masked_locals = apply_frame_mask(z_dec[g:], decoder_masks)
+                        z_dec = torch.cat((z_dec[:g], masked_locals), dim=0)
+                    clean_targets = wav_a.repeat(num_views, 1, 1)
+                else:
+                    z_dec = z_a
+                    clean_targets = wav_a
+                if decoder_noise_cfg.enabled:
+                    z_dec = z_dec + decoder_noise_cfg.std * torch.randn_like(z_dec)
+
+                x_hat_all = model.decoder(z_dec, target_len=wav_a.size(-1))
+                x_hat = x_hat_all[:B]
 
                 # Active reconstruction loss (training signal). Returns
                 # stats prefixed stft_* or mel_* depending on recon_type.
-                l_recon_ps, recon_stats_ps = recon_fn(x_hat, wav_a, return_per_sample=True)
+                l_recon_ps, recon_stats_ps = recon_fn(
+                    x_hat_all, clean_targets, return_per_sample=True
+                )
                 l_recon = l_recon_ps.mean()
                 recon_stats = {k: v.mean().detach() for k, v in recon_stats_ps.items()}
 
-                l_wav_ps = (x_hat - wav_a).abs().mean(dim=(1, 2))
+                l_wav_ps = (x_hat_all - clean_targets).abs().mean(dim=(1, 2))
                 l_wav = l_wav_ps.mean()
 
                 # ---- Discriminator update (MPD) -------------------------------
@@ -752,7 +833,7 @@ def main() -> None:
                 lam_adv = x_hat.new_ones(())
                 if disc_active and adaptive_adv:
                     if lam_adv_cached is None:
-                        last_w = _unwrap(model["decoder"]).out_conv.weight
+                        last_w = _unwrap(model.decoder).out_conv.weight
                         # gs lifts grads off the fp16 underflow floor; it cancels in
                         # the ratio so its value is arbitrary. Kept modest (not 1e3)
                         # so gs*l_adv can't overflow fp16 to inf -> inf/inf = NaN.
@@ -780,8 +861,16 @@ def main() -> None:
                 )
                 loss = loss / grad_accum
 
+                reported_loss = (
+                    recon_w * l_recon.detach()
+                    + jepa_w * l_jepa.detach()
+                    + reg_w * l_reg.detach()
+                    + adv_w * lam_adv.detach() * l_adv.detach()
+                    + fm_w * l_fm.detach()
+                ) / grad_accum
+
             scaler.scale(loss).backward()
-            total_loss = total_loss + loss.detach()
+            total_loss = total_loss + reported_loss
 
             # JEPA collapse detector on z — cheap, run every microbatch. z is
             # what the decoder and downstream probes consume, so monitor it
@@ -861,9 +950,9 @@ def main() -> None:
         if is_main and step % cfg.train.probe_interval_steps == 0:
             model.eval()
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                z_clean = _unwrap(model["encoder"])(_unwrap(model["frontend"])(wav_a)).float()
-                z_aug = _unwrap(model["encoder"])(
-                    _unwrap(model["frontend"])(apply_waveform_augment(wav_a, dcfg.sample_rate, wave_aug_cfg))
+                z_clean = _unwrap(model.encoder)(_unwrap(model.frontend)(wav_a)).float()
+                z_aug = _unwrap(model.encoder)(
+                    _unwrap(model.frontend)(apply_waveform_augment(wav_a, dcfg.sample_rate, aug_global_cfg))
                 ).float()
                 pos_frame = (z_clean - z_aug).pow(2).mean()
                 neg_frame = (z_clean - z_aug.roll(1, dims=0)).pow(2).mean()
@@ -886,30 +975,35 @@ def main() -> None:
                 wb.log(probe_row, step=step)
 
         log_interval = cfg.train.log_interval_steps
-        if is_main and step % log_interval == 0:
-            log_stats = {k: (v / accum_counts[k]).item() for k, v in accum_sums.items()}
+        if step % log_interval == 0:
+            log_stats = _reduce_metric_totals(
+                accum_sums,
+                accum_counts,
+                distributed=is_dist,
+                device=device,
+            )
             accum_sums.clear()
             accum_counts.clear()
-            # Rank gauges: eigendecompositions are expensive, so compute them
-            # once per log boundary from the last microbatch's view-0
-            # embeddings and log the raw value — these must NOT pass through
-            # accum_sums, whose per-key averaging diluted them 10x.
-            with torch.no_grad():
-                z32 = z_a.detach().float()
-                z_frames = z32.permute(0, 2, 1).reshape(-1, z32.size(1))
-                z_res = (z32 - z32.mean(dim=2, keepdim=True)).permute(0, 2, 1).reshape(-1, z32.size(1))
-                log_stats["z_rank"] = _participation_ratio(z_frames).item()
-                log_stats["z_rank_utt"] = _participation_ratio(z32.mean(dim=2)).item()
-                log_stats["z_rank_res"] = _participation_ratio(z_res).item()
-                # Pooled-p rank: the utterance-level SIGReg term was cut, so
-                # watch this gauge — if it sags toward 1-2, pooled embeddings
-                # are collapsing and the term should come back.
-                log_stats["p_rank_utt"] = _participation_ratio(p_cat[:B].detach().float().mean(dim=2)).item()
-            row = {"step": step, **log_stats}
 
-            jsonl.log(row)
-            if wb is not None:
-                wb.log(row, step=step)
+            with torch.no_grad():
+                z32 = _all_gather_batch(z_a.detach().float(), world_size)
+                p_utt = _all_gather_batch(
+                    p_cat[:B].detach().float().mean(dim=2), world_size
+                )
+
+            if is_main:
+                with torch.no_grad():
+                    z_frames = z32.permute(0, 2, 1).reshape(-1, z32.size(1))
+                    z_res = (z32 - z32.mean(dim=2, keepdim=True)).permute(0, 2, 1).reshape(-1, z32.size(1))
+                    log_stats["z_rank"] = _participation_ratio(z_frames).item()
+                    log_stats["z_rank_utt"] = _participation_ratio(z32.mean(dim=2)).item()
+                    log_stats["z_rank_res"] = _participation_ratio(z_res).item()
+                    log_stats["p_rank_utt"] = _participation_ratio(p_utt).item()
+                row = {"step": step, **log_stats}
+
+                jsonl.log(row)
+                if wb is not None:
+                    wb.log(row, step=step)
 
         if is_main and step % cfg.train.save_interval_steps == 0:
             # Step-tagged so a later collapse still leaves usable checkpoints
@@ -922,7 +1016,6 @@ def main() -> None:
                 optimizer=optimizer,
                 scaler=scaler if scaler.is_enabled() else None,
                 cfg=cfg,
-                extra=_extra_state(),
                 disc=disc,
                 optimizer_d=optimizer_d,
                 scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
@@ -943,7 +1036,6 @@ def main() -> None:
             optimizer=optimizer,
             scaler=scaler if scaler.is_enabled() else None,
             cfg=cfg,
-            extra=_extra_state(),
             disc=disc,
             optimizer_d=optimizer_d,
             scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,

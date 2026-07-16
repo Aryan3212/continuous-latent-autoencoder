@@ -24,8 +24,6 @@ def sinkhorn_log(logits: torch.Tensor, num_iters: int = 10, tau: float = 0.05) -
 class MHCWrapper(nn.Module):
     def __init__(
         self,
-        branch: nn.Module,
-        dim: int,
         num_streams: int,
         layer_index: int,
         sinkhorn_iters: int,
@@ -38,8 +36,6 @@ class MHCWrapper(nn.Module):
         super().__init__()
         if num_streams < 1:
             raise ValueError("num_streams must be >= 1")
-        self.branch = branch
-        self.layer_index = int(layer_index)
         self.num_streams = num_streams
         self.mhc_num_iters = int(sinkhorn_iters)
         self.mhc_tau = float(tau)
@@ -61,40 +57,37 @@ class MHCWrapper(nn.Module):
             self.branch_scale = nn.Parameter(torch.zeros(1))
 
         if identity_mix:
-            # Learned alpha via sigmoid to keep it in (0, 1)
-            # Initialize so sigmoid(logit) approx alpha_init
             if alpha_init <= 0 or alpha_init >= 1:
                 raise ValueError("alpha_init must be in (0, 1)")
             logit_alpha = math.log(alpha_init / (1 - alpha_init))
             self.H_res_alpha_logit = nn.Parameter(torch.tensor(logit_alpha))
 
-    def forward(self, residuals: torch.Tensor) -> torch.Tensor:
-        if residuals.dim() != 4:
-            raise ValueError(f"Expected residuals as (S,B,T,D), got {tuple(residuals.shape)}")
+    def forward(self, residuals: torch.Tensor, branch: nn.Module) -> torch.Tensor:
+        projected = sinkhorn_log(
+            self.H_res_logits,
+            num_iters=self.mhc_num_iters,
+            tau=self.mhc_tau,
+        )
 
-        # 1. Project to Doubly Stochastic Matrix
-        S = sinkhorn_log(self.H_res_logits, num_iters=self.mhc_num_iters, tau=self.mhc_tau)
-        
-        # 2. Apply Identity Mix
         if self.identity_mix:
             alpha = torch.sigmoid(self.H_res_alpha_logit)
-            I = torch.eye(self.num_streams, device=residuals.device, dtype=residuals.dtype)
-            h_res = (1 - alpha) * I + alpha * S
+            identity = torch.eye(
+                self.num_streams,
+                device=residuals.device,
+                dtype=residuals.dtype,
+            )
+            h_res = (1 - alpha) * identity + alpha * projected
         else:
-            h_res = S
+            h_res = projected
 
-        # 3. Residual Mixing
         residuals_out = torch.einsum("sr, s b t d -> r b t d", h_res, residuals)
 
-        # 4. Branch Logic
         h_pre = self.H_pre_logits.softmax(dim=-1)
         branch_input = torch.einsum("vs, s b t d -> v b t d", h_pre, residuals).squeeze(0)
-        branch_out = self.branch(branch_input)
-        branch_out = self.dropout(branch_out)
+        branch_out = self.dropout(branch(branch_input))
 
         if self.add_branch_out_to_residual:
             h_post = self.H_post_logits.softmax(dim=-1)
-            # Apply learned scale (tanh to keep it bounded)
             branch_out_scaled = branch_out * torch.tanh(self.branch_scale)
             branch_to_residuals = torch.einsum("vs, b t d -> s b t d", h_post, branch_out_scaled)
             residuals_out = residuals_out + branch_to_residuals

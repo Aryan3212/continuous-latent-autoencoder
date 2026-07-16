@@ -130,6 +130,23 @@ class ConvModule(nn.Module):
         return y.transpose(1, 2)                     # (B, T, D)
 
 
+class SqueezeExcitation(nn.Module):
+    def __init__(self, d_model: int, se_ratio: int = 8):
+        super().__init__()
+        inner = max(1, d_model // se_ratio)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, inner),
+            nn.SiLU(),
+            nn.Linear(inner, d_model),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scale = self.pool(x.transpose(1, 2)).squeeze(-1)
+        scale = torch.sigmoid(self.fc(scale)).unsqueeze(1)
+        return x * scale
+
+
 class ConformerLayer(nn.Module):
     """Pre-norm macaron Conformer block. Input and output are (B, T, D)."""
 
@@ -140,6 +157,7 @@ class ConformerLayer(nn.Module):
         feedforward_dim: int,
         cnn_module_kernel: int = 31,
         dropout: float = 0.0,
+        use_se: bool = False,
     ):
         super().__init__()
         self.norm_ff1 = nn.LayerNorm(d_model)
@@ -151,18 +169,11 @@ class ConformerLayer(nn.Module):
         self.norm_ff2 = nn.LayerNorm(d_model)
         self.ff2 = FeedForward(d_model, feedforward_dim, dropout)
         self.norm_final = nn.LayerNorm(d_model)
+        self.se = SqueezeExcitation(d_model) if use_se else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, T, D)
-        # Macaron FFN #1
         x = x + 0.5 * self.ff1(self.norm_ff1(x))
-        # MHSA
         x = x + self.attn_dropout(self.attn(self.norm_attn(x)))
-        # Convolution module
-        x = x + self.conv(x)
-        # Macaron FFN #2
+        x = x + self.se(self.conv(x))
         x = x + 0.5 * self.ff2(self.norm_ff2(x))
-        # Final norm
-        x = self.norm_final(x)
-
-        return x
+        return self.norm_final(x)
