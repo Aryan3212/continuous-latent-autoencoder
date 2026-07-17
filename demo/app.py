@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 # --- config -----------------------------------------------------------------
 REPO_URL    = "https://github.com/Aryan3212/continuous-latent-autoencoder.git"
-REPO_BRANCH = "simplification"
+REPO_BRANCH = "main"
 REPO_DIR    = "/home/user/clae_code"        # writable on Spaces; falls back below
 CONFIG_PATH = "configs/large_2kh.yaml"
 HF_REPO     = "aryan3212/clae-bengali-encoder"
