@@ -1,4 +1,5 @@
 # Continuous Latent Autoencoder
+HF Spaces Demo: https://huggingface.co/spaces/aryan3212/clae-demo
 
 A config-driven speech autoencoder for 16 kHz audio. It learns low-rate
 continuous latents using waveform reconstruction, JEPA view consistency, and
