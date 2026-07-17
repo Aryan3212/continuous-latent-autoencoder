@@ -1364,10 +1364,12 @@ def publish_checkpoint(
     tok = os.environ["HF_TOKEN"]
 
     api = HfApi(token=tok)
+    print(f"[publish] ensuring model repository exists: {repo_id}", flush=True)
     api.create_repo(
         repo_id=repo_id, repo_type="model", exist_ok=True, private=private
     )
 
+    print(f"[publish] reading checkpoint: {ckpt_path}", flush=True)
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
     step = ckpt.get("step", "?")
     cfg = ckpt.get("cfg", {})
@@ -1388,6 +1390,10 @@ def publish_checkpoint(
         config_path = tmp_dir / "config.yaml"
         config_path.write_text(cfg_yaml, encoding="utf-8")
 
+        print(
+            f"[publish] uploading last.pt ({ckpt_path.stat().st_size / (1024**3):.2f} GiB)",
+            flush=True,
+        )
         api.upload_file(
             path_or_fileobj=str(ckpt_path),
             path_in_repo="last.pt",
@@ -1395,6 +1401,9 @@ def publish_checkpoint(
             repo_type="model",
             commit_message=msg,
         )
+        print("[publish] last.pt uploaded", flush=True)
+
+        print("[publish] uploading README.md", flush=True)
         api.upload_file(
             path_or_fileobj=str(readme_path),
             path_in_repo="README.md",
@@ -1402,6 +1411,9 @@ def publish_checkpoint(
             repo_type="model",
             commit_message=msg,
         )
+        print("[publish] README.md uploaded", flush=True)
+
+        print("[publish] uploading config.yaml", flush=True)
         api.upload_file(
             path_or_fileobj=str(config_path),
             path_in_repo="config.yaml",
@@ -1409,6 +1421,7 @@ def publish_checkpoint(
             repo_type="model",
             commit_message=msg,
         )
+        print("[publish] config.yaml uploaded", flush=True)
 
     url = f"https://huggingface.co/{repo_id}"
     print(f"[publish] done: {url}")

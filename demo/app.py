@@ -26,14 +26,11 @@ import torch.nn.functional as F
 REPO_URL    = "https://github.com/Aryan3212/continuous-latent-autoencoder.git"
 REPO_BRANCH = "simplification"
 REPO_DIR    = "/home/user/clae_code"        # writable on Spaces; falls back below
-CONFIG_PATH = "configs/kaggle_3m_gan.yaml"
+CONFIG_PATH = "configs/large_2kh.yaml"
 HF_REPO     = "aryan3212/clae-bengali-encoder"
-# Two checkpoints, decoded side by side so you can hear training progress.
-# "last.pt" is byte-identical to step-48000; step-30320 is the earliest snapshot
-# published on the repo (the nearest available to "~step-30000").
+# Hardcoded for now; this checkpoint must be compatible with CONFIG_PATH.
 CKPTS = {
-    "step-30320 (early)":      "step-30320.pt",
-    "step-48000 (latest=last)": "last.pt",
+    "last": "last.pt",
 }
 
 # The model code (config.py, models/, reconstruct_audio.py) is not pip-installable
@@ -109,18 +106,16 @@ def run(audio):
     info = (f"{dur:.2f}s → {n_frames} latent frames × {latent_dim} dims "
             f"(~{SR / max(1, n_frames):.0f} samples/frame, ~12.5 Hz). "
             f"Encoded/decoded in independent {cfg.data.segment_seconds:g}s windows. "
-            f"Same input through {len(LABELS)} checkpoints — compare how the round-trip "
-            f"sharpens from {LABELS[0]} to {LABELS[-1]}.")
+            f"Same input through {len(LABELS)} checkpoint(s): {', '.join(LABELS)}.")
     return (*outs, info)
 
 
 DESCRIPTION = """
-# CLAE — Bengali Speech Autoencoder (checkpoint comparison)
+# CLAE — Bengali Speech Autoencoder
 
-A ~2.5M-parameter continuous-latent autoencoder: waveform → 12.5 Hz continuous
-latent → waveform. Upload a clip or record yourself, and hear what survives the
-encode→decode round-trip at **two training checkpoints** — an early snapshot
-(step-30320) and the latest (step-48000, a.k.a. `last.pt`). Bengali speech works
+A continuous-latent autoencoder: waveform → latent → waveform. Upload a clip or
+record yourself, and hear what survives the encode→decode round-trip using the
+`last.pt` checkpoint and the `large_2kh.yaml` configuration. Bengali speech works
 best (that's the training data); reconstruction is **intelligible but robotic** —
 that's the current model, not a bug.
 
@@ -133,7 +128,7 @@ demo = gr.Interface(
     inputs=gr.Audio(sources=["upload", "microphone"], type="numpy", label="Input audio"),
     outputs=[gr.Audio(label=f"Reconstruction — {label}", type="numpy") for label in LABELS]
             + [gr.Textbox(label="Latent info")],
-    title="CLAE Bengali Speech Autoencoder — checkpoint comparison",
+    title="CLAE Bengali Speech Autoencoder",
     description=DESCRIPTION,
     flagging_mode="never",
 )

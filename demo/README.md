@@ -12,11 +12,10 @@ pinned: false
 
 # CLAE Bengali Speech Autoencoder — checkpoint comparison demo
 
-Web version of `scripts/reconstruct_live.py`: upload or record audio, the ~2.5M-param
-continuous-latent autoencoder encodes it to a 12.5 Hz latent and decodes back to a
-waveform. To make training progress audible, the same input is decoded through **two
-checkpoints** side by side — `step-30320.pt` (early) and `last.pt` (= `step-48000.pt`,
-latest). Runs on CPU (free Spaces tier is fine).
+Web version of `scripts/reconstruct_live.py`: upload or record audio, the continuous-
+latent autoencoder encodes it to a latent representation and decodes back to a
+waveform using the `last.pt` checkpoint. The demo uses `configs/large_2kh.yaml` and
+runs on CPU (free Spaces tier is fine).
 
 ## Deploy to Hugging Face Spaces
 
@@ -33,8 +32,8 @@ latest). Runs on CPU (free Spaces tier is fine).
 3. If the checkpoint repo `aryan3212/clae-bengali-encoder` is **private**, add an
    `HF_TOKEN` secret in the Space settings (Settings → Variables and secrets). If it's
    public, no secret is needed.
-4. The Space builds, clones the model code from GitHub at startup, downloads both
-   checkpoints (`step-30320.pt` and `last.pt`), and serves the UI. First boot takes
+4. The Space builds, clones the model code from GitHub at startup, downloads
+   `last.pt`, and serves the UI. First boot takes
    ~1–2 min (clone + ckpt downloads + model loads).
 
 ## Notes
@@ -42,6 +41,5 @@ latest). Runs on CPU (free Spaces tier is fine).
 - Audio is processed in independent **3 s windows** (the encoder's training segment
   length); longer clips may have mild seam artifacts.
 - Output is **intelligible but robotic** — that's the current model.
-- To change which checkpoints are compared, edit the `CKPTS` dict in `app.py` (any
-  number of `label -> filename` entries renders that many side-by-side outputs); to
-  change the model config, change `CONFIG_PATH`.
+- To change the checkpoint, edit the `CKPTS` dict in `app.py`; to change the model
+  config, change `CONFIG_PATH`. The checkpoint and config must be architecture-compatible.
