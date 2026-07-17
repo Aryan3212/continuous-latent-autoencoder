@@ -4,13 +4,14 @@
 # (Squeeze-and-Excitation + 9-tap conv). GAN is OFF for the real run; flip it
 # on via the smoke-test command overrides to exercise the adversarial path.
 #
-# Dataset assumptions:
-#   2000 hours @ 16kHz, 3s segments, batch 64 = 37,500 steps/epoch
-#   Warmup ~1% = 15,000 steps, cosine decay to 0 over the rest
+# Remote training profile:
+#   staging manifest, batch 42 with 4-step gradient accumulation
+#   5,000-step warmup, cosine decay over 100,000 optimizer steps
 
 run:
   seed: 42
   amp: true
+  amp_dtype: bf16                # wider exponent range than fp16 for the deep FiLM decoder
   wandb:
     enabled: true
     project: "continuous-latent-ae"
@@ -19,7 +20,7 @@ run:
 data:
   sample_rate: 16000
   segment_seconds: 3.0
-  train_manifest: "data/manifests/train.jsonl"
+  train_manifest: "staging/manifests/train.jsonl"
   val_manifest: null
   num_workers: 8
   pin_memory: true
@@ -111,8 +112,10 @@ model:
 
 loss:
   recon_type: mel              # "stft" | "mel" — reconstruction loss used for training
-  recon_views: all
-  recon_weight: 2         # weight applied to whichever recon loss is active
+  recon_views: global
+  # Balance reconstruction against the complete representation objective:
+  #   1.0 * recon  vs  0.3 * JEPA + 0.7 * VISReg.
+  recon_weight: 1.0
   recon_log_start_step: 10   # only log the mel log-mag metric after this many steps
   reg_type: visreg             # "sigreg" | "visreg" — which Gaussianisation loss is trained
   stft:
@@ -138,7 +141,7 @@ loss:
     mag_weight: 1.0
     logmag_weight: 1.0
   jepa:
-    weight: 2.0
+    weight: 0.3
     num_globals: 2
     num_locals: 4
 
@@ -148,7 +151,7 @@ loss:
     t_max: 5.0
     n_points: 17
   visreg:
-    weight: 0.05                # mirror sigreg default unless tuned
+    weight: 0.7                # 70% of the normalized JEPA + VISReg branch
     num_projections: 256       # VISReg random-projection count (K)
   adv:
     enabled: false             # real run: no GAN. Smoke test overrides enabled=true + early start.
@@ -167,17 +170,17 @@ optim:
   eps: 1.0e-8
   weight_decay: 1.0e-5
   scheduler:
-    warmup_steps: 15000
-    total_steps: 200000
+    warmup_steps: 5000
+    total_steps: 100000
     min_lr_ratio: 0.0
   grad_clip: 1.0
 
 train:
-  batch_size: 32
+  batch_size: 42
   grad_accum_steps: 4
   max_steps: 100000
   log_interval_steps: 50
   eval_interval_steps: 5000
-  save_interval_steps: 20000
+  save_interval_steps: 5000
   probe_interval_steps: 5000
   val_batches: 10
