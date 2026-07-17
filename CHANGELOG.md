@@ -2,6 +2,16 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-17
+
+**Uniform decoder-latent corruption across reconstruction-view ablations**
+
+- **`schema.py`**: `loss.recon_views` now accepts `global`, `local`, and `all`.
+- **`train.py`**: selects the requested global, local, or all latent views for
+  reconstruction, then applies `aug.decoder_input_mask` and
+  `aug.decoder_input_noise` to every selected decoder input. The augmentations
+  no longer depend on the selected view type.
+
 ## 2026-07-16 (b)
 
 **Parallel, self-cleaning data preparation and automatic local env loading**

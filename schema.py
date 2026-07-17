@@ -229,7 +229,7 @@ class AdvCfg(_Base):
 
 class LossCfg(_Base):
     recon_type: Literal["stft", "mel"] = "stft"
-    recon_views: Literal["global", "all"] = "global"
+    recon_views: Literal["global", "local", "all"] = "global"
     recon_weight: float = 0.005
     recon_log_start_step: int = 1000
     reg_type: Literal["sigreg", "visreg"] = "sigreg"

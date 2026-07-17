@@ -52,11 +52,11 @@ View construction:
   `aug.waveform_aug_local` and add a waveform-aligned span mask.
 - Local frontend frames can receive an independent span mask and Gaussian noise
   before the encoder.
-- Local decoder inputs can receive a second independent span mask; decoder
-  inputs for every view can receive Gaussian noise.
-- `loss.recon_views` selects global-view reconstruction or decoding every view
-  against the clean waveform and averaging their losses. The GAN uses global
-  view 0 in either mode.
+- Decoder inputs receive their configured independent span mask and Gaussian
+  noise regardless of whether global, local, or all views are selected.
+- `loss.recon_views` selects global-view, local-view, or all-view reconstruction
+  against the clean waveform; when multiple views are selected, their losses are
+  averaged. The GAN uses the first selected reconstruction view.
 
 Conceptual generator objective:
 

@@ -602,7 +602,7 @@ def main() -> None:
     # full-batch gradient.
     reg_scale = float(world_size)
     recon_w = cfg.loss.recon_weight
-    reconstruct_all_views = cfg.loss.recon_views == "all"
+    recon_views = cfg.loss.recon_views
     recon_log_start = cfg.loss.recon_log_start_step
     adv_w = acfg.adv_weight
     fm_w = acfg.fm_weight
@@ -757,18 +757,24 @@ def main() -> None:
                 z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + diagnostics)
                 z_mask = z_cat[num_globals * B : (num_globals + 1) * B]
 
-                if reconstruct_all_views:
-                    z_dec = z_cat
-                    if decoder_mask_cfg.enabled:
-                        decoder_masks = make_span_masks(
-                            n_local, z_dec.size(-1), decoder_mask_cfg
-                        )
-                        masked_locals = apply_frame_mask(z_dec[g:], decoder_masks)
-                        z_dec = torch.cat((z_dec[:g], masked_locals), dim=0)
-                    clean_targets = wav_a.repeat(num_views, 1, 1)
-                else:
+                if recon_views == "global":
                     z_dec = z_a
                     clean_targets = wav_a
+                elif recon_views == "local":
+                    z_dec = z_cat[g:]
+                    clean_targets = wav_a.repeat(num_locals, 1, 1)
+                else:  # all
+                    z_dec = z_cat
+                    clean_targets = wav_a.repeat(num_views, 1, 1)
+
+                # The decoder corruptions apply to every selected reconstruction
+                # view. This keeps global-only, local-only, and all-view ablations
+                # comparable; selection controls only which views are decoded.
+                if decoder_mask_cfg.enabled:
+                    decoder_masks = make_span_masks(
+                        z_dec.size(0), z_dec.size(-1), decoder_mask_cfg
+                    )
+                    z_dec = apply_frame_mask(z_dec, decoder_masks)
                 if decoder_noise_cfg.enabled:
                     z_dec = z_dec + decoder_noise_cfg.std * torch.randn_like(z_dec)
 
