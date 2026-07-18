@@ -4,6 +4,16 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-18
 
+**Reproducible SUBESCO acquisition**
+
+- **`scripts/download_subesco.py`**: added an idempotent downloader for the
+  processed Hugging Face SUBESCO release. It materializes its Parquet audio
+  rows as WAV clips under `datasets/SUBESCO/audio/` and writes the supplied
+  transcription, speaker, gender, sentence, repetition, and emotion labels to
+  `datasets/SUBESCO/metadata.tsv`.
+
+## 2026-07-18
+
 **Script workflow cleanup**
 
 - Removed obsolete Kaggle wrapper/notebook-export evaluation scripts and the

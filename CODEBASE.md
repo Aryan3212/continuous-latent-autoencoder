@@ -120,6 +120,9 @@ same name.
 ## Entrypoints
 
 - `scripts/housekeeping.py` — download data, make manifests, and publish/fetch checkpoints.
+- `scripts/download_subesco.py` — materializes the processed
+  `sajid73/SUBESCO-audio-dataset` Parquet release into local WAV files plus a
+  label-preserving TSV at `datasets/SUBESCO/` for emotion evaluation.
 - `Makefile` — setup, data preparation, training, and run cleanup.
 - `eval/run_all.py` — reconstruction evaluation plus configured probes.
 - `eval/repr_bench.py` — shared frozen-feature adapter registry and versioned
