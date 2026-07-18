@@ -615,12 +615,24 @@ def _emotion2vec_embedder() -> Embedder:
 
 def _usad2_embedder() -> Embedder:
     """Extract USAD 2.0's documented final frame features."""
-    from transformers import AutoModel
+    from transformers import AutoConfig
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     spec = model_spec("usad2_small")
     print(f"[{spec.name}] loading {spec.repo}", flush=True)
-    model = AutoModel.from_pretrained(
-        spec.repo, revision=spec.revision, trust_remote_code=True, token=_hf_token()
+    token = _hf_token()
+    config = AutoConfig.from_pretrained(
+        spec.repo, revision=spec.revision, trust_remote_code=True, token=token
+    )
+    model_class = get_class_from_dynamic_module(
+        config.auto_map["AutoModel"], spec.repo, revision=spec.revision, token=token
+    )
+    # USAD2's remote model code predates Transformers 5.x, whose loader reads
+    # this mapping while finalising weights. USAD2 has no tied weights.
+    if not hasattr(model_class, "all_tied_weights_keys"):
+        model_class.all_tied_weights_keys = {}
+    model = model_class.from_pretrained(
+        spec.repo, config=config, revision=spec.revision, token=token
     ).eval().to(DEVICE)
     usad_sr = int(model.sample_rate)
 
