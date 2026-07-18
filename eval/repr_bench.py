@@ -632,7 +632,14 @@ def _usad2_embedder() -> Embedder:
     if not hasattr(model_class, "all_tied_weights_keys"):
         model_class.all_tied_weights_keys = {}
     model = model_class.from_pretrained(
-        spec.repo, config=config, revision=spec.revision, token=token
+        spec.repo,
+        config=config,
+        revision=spec.revision,
+        token=token,
+        # The remote positional-encoding buffer is used lazily and is not
+        # materialised correctly by Transformers 5's meta-device loader.
+        # At 25M parameters, normal eager loading is inexpensive and safe.
+        low_cpu_mem_usage=False,
     ).eval().to(DEVICE)
     usad_sr = int(model.sample_rate)
 
