@@ -3,8 +3,10 @@
 ## Executive summary
 
 This thesis work trains a **23.8M-parameter continuous-latent autoencoder
-(CLAE)** for 16 kHz Bengali speech.  Its main product is a frozen, frame-level
-speech representation for downstream analysis—not a deployment audio codec.
+(CLAE)** for 16 kHz Bengali speech. Its frozen feature extractor—the Conv1D
+frontend plus FastConformer/mHC encoder—contains **15.29M parameters**. Its
+main product is this frame-level speech representation for downstream
+analysis—not a deployment audio codec.
 The training objective combines clean-target mel reconstruction with
 global/local representation consistency and isotropic-distribution
 regularisation.  The current `large_2kh` run is intended to test whether this
@@ -117,18 +119,33 @@ samples, equivalent to 20,286,000 seconds / **5,635 hours** of audio and
 
 ## Evaluation status and next milestone
 
-Frozen-representation evaluation is in progress; results will be appended
-separately.  The planned measures are SUBESCO speaker-disjoint emotion
+### Preliminary emotion probe
+
+On a fixed 500-utterance SUBESCO subset (20 speakers, 7 emotions), a
+speaker-disjoint 5-fold linear probe using frozen mean+std pooled features
+obtained **41.3% macro-F1 ± 9.3** and **43.0% accuracy ± 8.7** for CLAE. The
+random-initialised CLAE control reached **27.2% macro-F1**, so training adds
+**14.1 macro-F1 points** using the same feature-extractor architecture and
+probe. This is preliminary: the subset is not exactly class-balanced and the
+fold variation is substantial. It is evidence of learned emotion-relevant
+structure, not a final ranking.
+
+For context, the same preliminary protocol gave 47.3% macro-F1 for WavLM,
+53.3% for Whisper-tiny, 47.4% for ECAPA, 47.9% for emotion2vec, 51.2% for
+Mimi, and 40.9% for Higgs Audio V2. These values should not be treated as
+significant pairwise differences until the full SUBESCO evaluation is complete.
+
+Frozen-representation evaluation remains in progress. The final planned
+measures are SUBESCO speaker-disjoint emotion
 classification, Bengali speaker identification and verification, Common Voice
 Bengali age prediction, a fixed-budget Transformer-decoder Bengali ASR probe,
 and PCA/UMAP views coloured by speaker or emotion.  These tasks evaluate the
 latent representation rather than decoded-waveform quality
 ([`eval/repr_bench.py`](eval/repr_bench.py)).
 
-The next milestone is to complete these held-out probes, record their metrics
-alongside the reference encoders, and determine the representation's balance of
-paralinguistic and linguistic information before selecting final thesis
-ablations.
+The next milestone is to repeat the emotion probe on all 7,000 SUBESCO clips,
+then complete the held-out identity, age, and content probes before selecting
+final thesis ablations.
 
 ## Prompt for an architecture figure
 

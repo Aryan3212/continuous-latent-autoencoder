@@ -605,8 +605,10 @@ def _xcodec2_embedder() -> Embedder:
     def embed(wav16k: torch.Tensor) -> np.ndarray:
         inputs = feature_extractor(audio=wav16k.numpy(), sampling_rate=TARGET_SR, return_tensors="pt")
         inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-        encoded = model.encode(**inputs)
+        encoded = model.encode(**inputs, output_latents=True)
         latents = encoded.latents  # documented (B, D, T)
+        if latents is None:
+            raise RuntimeError("XCodec2 did not return continuous latents")
         return latents.transpose(1, 2).squeeze(0).float().cpu().numpy()
 
     return Embedder(name=spec.name, fn=embed, spec=spec)

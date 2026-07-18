@@ -13,6 +13,14 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-18
 
+**Preliminary supervisor report result**
+
+- **`SUPERVISOR_RESEARCH_REPORT.md`**: recorded the 500-clip preliminary
+  SUBESCO frozen-representation emotion probe and clarified the distinction
+  between the 15.29M feature encoder and the 23.80M full autoencoder.
+
+## 2026-07-18
+
 **Authenticated representation-model downloads**
 
 - **`eval/repr_bench.py`**: representation adapters now load the repo-local
@@ -25,6 +33,8 @@ Date format: `YYYY-MM-DD`
 - **Higgs Audio V2 adapter**: corrected the internal residual-quantizer code
   layout before continuous latent decoding, so pooling uses a fixed feature
   dimension rather than utterance length.
+- **XCodec2 adapter**: explicitly request the documented continuous latents
+  from `encode()` rather than relying on its default discrete-code path.
 
 ## 2026-07-18
 
