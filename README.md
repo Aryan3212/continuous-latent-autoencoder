@@ -150,11 +150,12 @@ New repositories are created as private unless `publish-checkpoint` receives
 
 ## Credentials
 
-The data CLI and `train.py` automatically load the repository's gitignored
-`.env`; already-exported environment variables take precedence. `.env.example`
-lists the available keys: `HF_TOKEN`, `WANDB_API_KEY`, `MDC_API_KEY`, and the
-Kaggle credentials. Hugging Face auth is optional for public, ungated datasets
-but required for gated resources and publishing. W&B remains optional.
+The data CLI, `train.py`, and the representation-evaluation adapters
+automatically load the repository's gitignored `.env`; already-exported
+environment variables take precedence. `.env.example` lists the available keys:
+`HF_TOKEN`, `WANDB_API_KEY`, `MDC_API_KEY`, and the Kaggle credentials. Hugging
+Face auth is optional for public, ungated datasets but required for gated
+resources and publishing. W&B remains optional.
 
 Never commit real credentials. Any credential-like value that has previously
 been committed should be rotated and removed from Git history before sharing

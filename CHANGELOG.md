@@ -4,6 +4,14 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-18
 
+**Authenticated representation-model downloads**
+
+- **`eval/repr_bench.py`**: representation adapters now load the repo-local
+  `.env` and pass `HF_TOKEN` (or legacy lowercase `hf_token`) to Hugging Face
+  model and processor downloads, without recording credentials in outputs.
+
+## 2026-07-18
+
 **Reproducible SUBESCO acquisition**
 
 - **`scripts/download_subesco.py`**: added an idempotent downloader for the

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,10 +11,21 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+# Evaluation entry points do not go through train.py/housekeeping.py, so load
+# the repository credentials here as well.  Shell variables still take
+# precedence over .env values.
+load_dotenv(_REPO_ROOT / ".env", override=False)
+
+
+def _hf_token() -> Optional[str]:
+    """Return the Hub token without ever exposing it in logs or metadata."""
+    return os.environ.get("HF_TOKEN") or os.environ.get("hf_token") or None
 
 EVAL_DIR = _REPO_ROOT / "runs" / "eval"
 EMB_DIR = EVAL_DIR / "embeddings"
@@ -388,14 +400,12 @@ def _resolve_our_ckpt(ckpt: Optional[str]) -> str:
         local = sorted((_REPO_ROOT / "runs").rglob("last.pt"))
         if local:
             return str(local[-1])
-    import os
-
     from huggingface_hub import hf_hub_download
 
     repo = ckpt if (ckpt and "/" in ckpt and not Path(ckpt).exists()) else OUR_HF_REPO
     print(f"[ours] no local ckpt; downloading last.pt from {repo}", flush=True)
     return hf_hub_download(
-        repo_id=repo, filename="last.pt", token=os.environ.get("HF_TOKEN") or None
+        repo_id=repo, filename="last.pt", token=_hf_token()
     )
 
 
@@ -405,8 +415,8 @@ def _mimi_embedder() -> Embedder:
 
     repo = "kyutai/mimi"
     print(f"[mimi] loading {repo}", flush=True)
-    fe = AutoFeatureExtractor.from_pretrained(repo)
-    model = MimiModel.from_pretrained(repo).eval().to(DEVICE)
+    fe = AutoFeatureExtractor.from_pretrained(repo, token=_hf_token())
+    model = MimiModel.from_pretrained(repo, token=_hf_token()).eval().to(DEVICE)
     mimi_sr = int(fe.sampling_rate)
 
     @torch.no_grad()
@@ -430,8 +440,8 @@ def _hf_hidden_state_embedder(name: str, repo: str) -> Embedder:
     from transformers import AutoFeatureExtractor, AutoModel
 
     print(f"[{name}] loading {repo}", flush=True)
-    fe = AutoFeatureExtractor.from_pretrained(repo)
-    model = AutoModel.from_pretrained(repo).eval().to(DEVICE)
+    fe = AutoFeatureExtractor.from_pretrained(repo, token=_hf_token())
+    model = AutoModel.from_pretrained(repo, token=_hf_token()).eval().to(DEVICE)
     msr = int(getattr(fe, "sampling_rate", TARGET_SR))
 
     @torch.no_grad()
@@ -512,8 +522,12 @@ def _whisper_embedder() -> Embedder:
     from transformers import WhisperModel, WhisperProcessor
 
     spec = model_spec("whisper_tiny")
-    processor = WhisperProcessor.from_pretrained(spec.repo, revision=spec.revision)
-    model = WhisperModel.from_pretrained(spec.repo, revision=spec.revision).eval().to(DEVICE)
+    processor = WhisperProcessor.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    )
+    model = WhisperModel.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    ).eval().to(DEVICE)
 
     @torch.no_grad()
     def embed(wav16k: torch.Tensor) -> np.ndarray:
@@ -543,8 +557,12 @@ def _remote_continuous_embedder(name: str) -> Embedder:
     from transformers import AutoModel, AutoProcessor
 
     spec = model_spec(name)
-    processor = AutoProcessor.from_pretrained(spec.repo, revision=spec.revision, trust_remote_code=True)
-    model = AutoModel.from_pretrained(spec.repo, revision=spec.revision, trust_remote_code=True).eval().to(DEVICE)
+    processor = AutoProcessor.from_pretrained(
+        spec.repo, revision=spec.revision, trust_remote_code=True, token=_hf_token()
+    )
+    model = AutoModel.from_pretrained(
+        spec.repo, revision=spec.revision, trust_remote_code=True, token=_hf_token()
+    ).eval().to(DEVICE)
 
     @torch.no_grad()
     def embed(wav16k: torch.Tensor) -> np.ndarray:
@@ -562,8 +580,12 @@ def _xcodec2_embedder() -> Embedder:
     from transformers import AutoFeatureExtractor, AutoModel
 
     spec = model_spec("xcodec2")
-    feature_extractor = AutoFeatureExtractor.from_pretrained(spec.repo, revision=spec.revision)
-    model = AutoModel.from_pretrained(spec.repo, revision=spec.revision).eval().to(DEVICE)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    )
+    model = AutoModel.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    ).eval().to(DEVICE)
 
     @torch.no_grad()
     def embed(wav16k: torch.Tensor) -> np.ndarray:
@@ -581,8 +603,12 @@ def _higgs_embedder() -> Embedder:
     from transformers import AutoFeatureExtractor, HiggsAudioV2TokenizerModel
 
     spec = model_spec("higgs_audio_v2")
-    feature_extractor = AutoFeatureExtractor.from_pretrained(spec.repo, revision=spec.revision)
-    model = HiggsAudioV2TokenizerModel.from_pretrained(spec.repo, revision=spec.revision).eval().to(DEVICE)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    )
+    model = HiggsAudioV2TokenizerModel.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    ).eval().to(DEVICE)
 
     @torch.no_grad()
     def embed(wav16k: torch.Tensor) -> np.ndarray:
