@@ -122,8 +122,19 @@ same name.
 - `scripts/housekeeping.py` — download data, make manifests, and publish/fetch checkpoints.
 - `Makefile` — setup, data preparation, training, and run cleanup.
 - `eval/run_all.py` — reconstruction evaluation plus configured probes.
-- `eval/run_probes.py` — ASR/classification probes and latent visualization.
-- Other `eval/eval_*.py` files — standalone diagnostics and representation benchmarks.
+- `eval/repr_bench.py` — shared frozen-feature adapter registry and versioned
+  embedding cache. Supports CLAE, WavLM, Whisper-tiny, ECAPA, emotion2vec,
+  USAD2-Small, Mimi, Higgs Audio V2, and XCodec2; codec adapters use continuous
+  latent/quantizer-decoded vectors and never substitute discrete code IDs.
+- `eval/eval_emotion.py`, `eval/eval_speaker_id.py`, `eval/eval_speaker_verif.py`,
+  and `eval/eval_age.py` — speaker-disjoint downstream probes. The age probe
+  reads local Common Voice Bengali `validated.tsv` metadata.
+- `eval/eval_asr_attn.py` — fixed-budget 2-layer Transformer-decoder ASR probe;
+  it accepts the shared adapters and is the content metric for low-rate CLAE.
+- `eval/eval_repr_viz.py` / `eval/render_compact_scorecard.py` — PCA+UMAP
+  attribute plots and Markdown scorecard aggregation.
+- `eval/eval_mimi_recon.py` — standalone Mimi reconstruction baseline using the
+  same loss family as CLAE reconstruction evaluation.
 - `scripts/reconstruct_audio.py` / `reconstruct_live.py` — reconstruction tools.
 - `scripts/visualize_latents.py` — standalone latent visualization.
 

@@ -9,8 +9,8 @@ run:
     name: null
 
 data:
-  # Note: manifests are JSONL files produced by `python scripts/housekeeping.py build`
-  # (or fetched from HF Hub via `make fetch-data`).
+  # Note: manifests are JSONL files produced by
+  # `python scripts/housekeeping.py make-manifests`.
   sample_rate: 16000
   segment_seconds: 3.0
   train_manifest: "data/manifests/combined_train.jsonl"

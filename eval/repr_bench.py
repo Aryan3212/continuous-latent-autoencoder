@@ -1,22 +1,8 @@
-"""Shared plumbing for the representation-quality benchmark.
-
-Loads a fixed set of Bengali Common Voice utterances and extracts one
-mean-pooled encoder embedding per utterance for each model under test:
-
-    ours          our trained encoder (z, before any decoder)
-    ours_random   same architecture, random init (lower-bound control)
-    mimi          kyutai/mimi continuous encoder output (before quantization)
-    wavlm         microsoft/wavlm-base-plus final hidden state
-    mms           facebook/mms-300m final hidden state
-
-Every embedding is mean-pooled over time so a single vector represents each
-utterance. Embeddings are cached to ``runs/eval/embeddings/<model>.npz`` so the
-UMAP and EER scripts can share one extraction pass.
-
-Used by ``eval/eval_repr_umap.py`` and ``eval/eval_repr_eer.py``.
-"""
+"""Shared adapters, data loaders, and versioned caches for representation evals."""
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,7 +27,10 @@ OPENSLR53_TSV = _REPO_ROOT / "datasets" / "OpenSLR53" / "asr_bengali" / "utt_spk
 # Default model under test (our checkpoint on the Hub).
 OUR_HF_REPO = "aryan3212/my-model"
 
-MODEL_ORDER = ["ours", "ours_random", "mimi", "wavlm", "mms"]
+MODEL_ORDER = [
+    "ours", "ours_random", "wavlm", "whisper_tiny", "ecapa", "emotion2vec",
+    "usad2_small", "mimi", "higgs_audio_v2", "xcodec2",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +45,8 @@ class Utterance:
     wav: torch.Tensor  # 1-D float32 mono @ TARGET_SR
     emotion: Optional[str] = None
     gender: Optional[str] = None
+    age: Optional[str] = None
+    text: Optional[str] = None
 
 
 def _resample(wav: torch.Tensor, src_sr: int, dst_sr: int) -> torch.Tensor:
@@ -226,13 +217,69 @@ def load_cv_utterances(max_utts: int = 300) -> List[Utterance]:
     return utts
 
 
+def load_common_voice_age_utterances(
+    cv_root: str,
+    max_utts: Optional[int] = None,
+    seed: int = 0,
+) -> List[Utterance]:
+    """Load age-labelled Bengali Common Voice clips from a local release.
+
+    ``cv_root`` may be the release directory itself or any parent containing a
+    ``validated.tsv`` and sibling ``clips/`` directory.  Age is a speaker-level
+    field, so consumers must split by ``Utterance.speaker``.
+    """
+    import random
+
+    import pandas as pd
+    import torchaudio
+
+    root = Path(cv_root)
+    candidates = sorted(root.rglob("validated.tsv"))
+    if not candidates:
+        raise FileNotFoundError(f"No validated.tsv found under {root}")
+    tsv = candidates[0]
+    clips = tsv.parent / "clips"
+    if not clips.is_dir():
+        raise FileNotFoundError(f"No clips/ directory next to {tsv}")
+    df = pd.read_csv(tsv, sep="\t", low_memory=False)
+    required = {"path", "client_id", "age"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{tsv} is missing required columns: {sorted(missing)}")
+    rows = []
+    columns = ["path", "client_id", "age"] + (["sentence"] if "sentence" in df.columns else [])
+    for row in df[columns].fillna("").to_dict("records"):
+        path = clips / str(row["path"])
+        if str(row["client_id"]).strip() and str(row["age"]).strip() and path.is_file():
+            rows.append((path, str(row["client_id"]).strip(), str(row["age"]).strip(), str(row.get("sentence", ""))))
+    rng = random.Random(seed)
+    rng.shuffle(rows)
+    if max_utts is not None:
+        rows = rows[:max_utts]
+
+    utts: List[Utterance] = []
+    for path, speaker, age, text in rows:
+        wav, sr = torchaudio.load(str(path))
+        if wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        utts.append(Utterance(
+            id=path.stem, speaker=speaker,
+            wav=_resample(wav.squeeze(0), int(sr), TARGET_SR).contiguous(),
+            age=age, text=text,
+        ))
+    print(f"[data] Common Voice age: {len(utts)} clips, {len({u.speaker for u in utts})} speakers", flush=True)
+    return utts
+
+
 def load_utterances(source: str = "openslr53", max_utts: int = 300) -> List[Utterance]:
     """Dispatch to a speaker-labelled utterance source."""
     if source == "openslr53":
         return load_openslr53_utterances(max_utts=max_utts)
     if source == "cv":
         return load_cv_utterances(max_utts=max_utts)
-    raise ValueError(f"unknown source {source!r}; choose 'openslr53' or 'cv'")
+    if source == "subesco":
+        return load_subesco_utterances(max_utts=max_utts)
+    raise ValueError(f"unknown source {source!r}; choose 'openslr53', 'cv', or 'subesco'")
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +291,7 @@ def load_utterances(source: str = "openslr53", max_utts: int = 300) -> List[Utte
 class Embedder:
     name: str
     fn: Callable[[torch.Tensor], np.ndarray]
+    spec: "ModelSpec"
     # Filled lazily so importing this module is cheap.
     _ready: bool = field(default=False, repr=False)
 
@@ -328,7 +376,7 @@ def _our_encoder_embedder(name: str, *, random_init: bool, ckpt: Optional[str]) 
         z = z.permute(1, 0, 2).reshape(z.size(1), -1)  # (D, n*T')
         return z.t().float().cpu().numpy()  # (n*T', D) frame features
 
-    return Embedder(name=name, fn=embed)
+    return Embedder(name=name, fn=embed, spec=model_spec(name))
 
 
 def _resolve_our_ckpt(ckpt: Optional[str]) -> str:
@@ -374,7 +422,7 @@ def _mimi_embedder() -> Embedder:
         emb = model.downsample(emb)                          # (1, C, T')
         return emb.squeeze(0).t().float().cpu().numpy()      # (T', C) frame features
 
-    return Embedder(name="mimi", fn=embed)
+    return Embedder(name="mimi", fn=embed, spec=model_spec("mimi"))
 
 
 def _hf_hidden_state_embedder(name: str, repo: str) -> Embedder:
@@ -395,7 +443,166 @@ def _hf_hidden_state_embedder(name: str, repo: str) -> Embedder:
         hs = out.last_hidden_state  # (1, T, D)
         return hs.squeeze(0).float().cpu().numpy()  # (T, D) frame features
 
-    return Embedder(name=name, fn=embed)
+    return Embedder(name=name, fn=embed, spec=model_spec(name))
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Reproducibility metadata for a frozen feature extractor."""
+
+    name: str
+    repo: str
+    revision: str = "main"
+    feature_layer: str = "final_hidden_state"
+    native_sample_rate: int = TARGET_SR
+    frame_rate_hz: Optional[float] = None
+    component: str = "encoder"
+    supports_asr_probe: bool = True
+    reported_params: Optional[str] = None
+
+
+_MODEL_SPECS: Dict[str, ModelSpec] = {
+    "ours": ModelSpec("ours", "local-or-aryan3212/my-model", feature_layer="encoder.z", frame_rate_hz=12.5, reported_params="checkpoint"),
+    "ours_random": ModelSpec("ours_random", "local-random-init", feature_layer="encoder.z", frame_rate_hz=12.5, reported_params="checkpoint"),
+    "wavlm": ModelSpec("wavlm", "microsoft/wavlm-base-plus", frame_rate_hz=50.0, reported_params="95M"),
+    "mms": ModelSpec("mms", "facebook/mms-300m", frame_rate_hz=50.0),
+    "whisper_tiny": ModelSpec("whisper_tiny", "openai/whisper-tiny", feature_layer="encoder.last_hidden_state", frame_rate_hz=50.0, reported_params="39M"),
+    "ecapa": ModelSpec("ecapa", "speechbrain/spkrec-ecapa-voxceleb", feature_layer="utterance_embedding", frame_rate_hz=None, component="speaker_embedder", supports_asr_probe=False, reported_params="14.7M"),
+    "emotion2vec": ModelSpec("emotion2vec", "emotion2vec/emotion2vec_base", feature_layer="continuous_hidden_state"),
+    "usad2_small": ModelSpec("usad2_small", "MIT-SLS/USAD2-Small", feature_layer="last_hidden_state", reported_params="25M"),
+    "mimi": ModelSpec("mimi", "kyutai/mimi", native_sample_rate=24000, frame_rate_hz=12.5, feature_layer="pre_quantization", component="codec_encoder"),
+    "higgs_audio_v2": ModelSpec("higgs_audio_v2", "bosonai/higgs-audio-v2-tokenizer", native_sample_rate=24000, frame_rate_hz=25.0, feature_layer="quantizer_decoded_continuous", component="codec_encoder"),
+    "xcodec2": ModelSpec("xcodec2", "HKUSTAudio/xcodec2-hf", frame_rate_hz=50.0, feature_layer="quantized_continuous_latents", component="codec_encoder", reported_params="0.8B"),
+}
+
+
+def model_spec(name: str) -> ModelSpec:
+    try:
+        return _MODEL_SPECS[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown model {name!r}; choose from {MODEL_ORDER}") from exc
+
+
+def _output_frames(output: object, *, model_name: str) -> torch.Tensor:
+    """Return continuous ``(T, D)`` features without ever using token ids."""
+    for attr in ("last_hidden_state", "hidden_states", "continuous_latents", "pre_quantization", "embeddings", "latents"):
+        value = getattr(output, attr, None)
+        if isinstance(value, (tuple, list)):
+            value = value[-1]
+        if isinstance(value, torch.Tensor):
+            break
+    else:
+        if isinstance(output, (tuple, list)) and output and isinstance(output[0], torch.Tensor):
+            value = output[0]
+        else:
+            raise RuntimeError(
+                f"{model_name} did not expose continuous hidden features. "
+                "Update its adapter; do not substitute discrete audio codes."
+            )
+    if value.ndim == 2:
+        value = value.unsqueeze(0)
+    if value.ndim != 3:
+        raise RuntimeError(f"{model_name} feature tensor must be 3-D, got {tuple(value.shape)}")
+    # Remote adapters must expose Hugging Face's time-major (B,T,D) convention.
+    # Do not guess/transmute dimensions here: a short utterance can have T < D.
+    return value.squeeze(0).float().cpu()
+
+
+def _whisper_embedder() -> Embedder:
+    from transformers import WhisperModel, WhisperProcessor
+
+    spec = model_spec("whisper_tiny")
+    processor = WhisperProcessor.from_pretrained(spec.repo, revision=spec.revision)
+    model = WhisperModel.from_pretrained(spec.repo, revision=spec.revision).eval().to(DEVICE)
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        inputs = processor(wav16k.numpy(), sampling_rate=TARGET_SR, return_tensors="pt")
+        out = model.encoder(inputs.input_features.to(DEVICE))
+        return _output_frames(out, model_name=spec.name).numpy()
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
+
+
+def _ecapa_embedder() -> Embedder:
+    from speechbrain.inference.speaker import EncoderClassifier
+
+    spec = model_spec("ecapa")
+    model = EncoderClassifier.from_hparams(source=spec.repo, run_opts={"device": str(DEVICE)})
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        out = model.encode_batch(wav16k.unsqueeze(0).to(DEVICE))
+        return out.reshape(1, -1).float().cpu().numpy()
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
+
+
+def _remote_continuous_embedder(name: str) -> Embedder:
+    """Adapter for remote-code encoders that expose continuous HF-style outputs."""
+    from transformers import AutoModel, AutoProcessor
+
+    spec = model_spec(name)
+    processor = AutoProcessor.from_pretrained(spec.repo, revision=spec.revision, trust_remote_code=True)
+    model = AutoModel.from_pretrained(spec.repo, revision=spec.revision, trust_remote_code=True).eval().to(DEVICE)
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        wav = _resample(wav16k, TARGET_SR, spec.native_sample_rate).numpy()
+        inputs = processor(wav, sampling_rate=spec.native_sample_rate, return_tensors="pt")
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+        output = model(**inputs)
+        return _output_frames(output, model_name=spec.name).numpy()
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
+
+
+def _xcodec2_embedder() -> Embedder:
+    """Use XCodec2's documented continuous ``latents`` output, not code ids."""
+    from transformers import AutoFeatureExtractor, AutoModel
+
+    spec = model_spec("xcodec2")
+    feature_extractor = AutoFeatureExtractor.from_pretrained(spec.repo, revision=spec.revision)
+    model = AutoModel.from_pretrained(spec.repo, revision=spec.revision).eval().to(DEVICE)
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        inputs = feature_extractor(audio=wav16k.numpy(), sampling_rate=TARGET_SR, return_tensors="pt")
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        encoded = model.encode(**inputs)
+        latents = encoded.latents  # documented (B, D, T)
+        return latents.transpose(1, 2).squeeze(0).float().cpu().numpy()
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
+
+
+def _higgs_embedder() -> Embedder:
+    """Decode Higgs codebooks back to continuous quantizer vectors for probes."""
+    from transformers import AutoFeatureExtractor, HiggsAudioV2TokenizerModel
+
+    spec = model_spec("higgs_audio_v2")
+    feature_extractor = AutoFeatureExtractor.from_pretrained(spec.repo, revision=spec.revision)
+    model = HiggsAudioV2TokenizerModel.from_pretrained(spec.repo, revision=spec.revision).eval().to(DEVICE)
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        wav = _resample(wav16k, TARGET_SR, spec.native_sample_rate).numpy()
+        inputs = feature_extractor(raw_audio=wav, sampling_rate=spec.native_sample_rate, return_tensors="pt")
+        codes = model.encode(inputs["input_values"].to(DEVICE)).audio_codes
+        # The public model exposes codes, while the quantizer exposes their
+        # continuous reconstruction.  This remains a tokenizer representation,
+        # not an integer-ID feature.
+        for owner in (model, getattr(model, "acoustic_model", None), getattr(model, "semantic_model", None)):
+            quantizer = getattr(owner, "quantizer", None)
+            if quantizer is not None and hasattr(quantizer, "decode"):
+                latents = quantizer.decode(codes)
+                if isinstance(latents, (tuple, list)):
+                    latents = latents[0]
+                if isinstance(latents, torch.Tensor):
+                    return latents.transpose(1, 2).squeeze(0).float().cpu().numpy()
+        raise RuntimeError("Higgs adapter could not locate a continuous quantizer decode path in this pinned model revision")
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
 
 
 def build_embedder(name: str, *, ckpt: Optional[str] = None) -> Embedder:
@@ -406,9 +613,19 @@ def build_embedder(name: str, *, ckpt: Optional[str] = None) -> Embedder:
     if name == "mimi":
         return _mimi_embedder()
     if name == "wavlm":
-        return _hf_hidden_state_embedder("wavlm", "microsoft/wavlm-base-plus")
+        return _hf_hidden_state_embedder("wavlm", model_spec("wavlm").repo)
     if name == "mms":
-        return _hf_hidden_state_embedder("mms", "facebook/mms-300m")
+        return _hf_hidden_state_embedder("mms", model_spec("mms").repo)
+    if name == "whisper_tiny":
+        return _whisper_embedder()
+    if name == "ecapa":
+        return _ecapa_embedder()
+    if name == "xcodec2":
+        return _xcodec2_embedder()
+    if name == "higgs_audio_v2":
+        return _higgs_embedder()
+    if name in {"emotion2vec", "usad2_small"}:
+        return _remote_continuous_embedder(name)
     raise ValueError(f"unknown model {name!r}; choose from {MODEL_ORDER}")
 
 
@@ -488,19 +705,29 @@ def extract(
 ) -> Dict[str, np.ndarray]:
     """Return ``{"X": (N,D), "speakers": (N,), "ids": (N,)}`` for one model.
 
-    ``pool`` selects time pooling (``mean`` or ``meanstd``). Cached to
-    ``runs/eval/embeddings/<name>[.<pool>].npz`` keyed by the utterance ids so a
-    stale cache (different utterance set) is detected and recomputed.
+    ``pool`` selects time pooling (``mean`` or ``meanstd``). Cache keys include
+    the extractor revision/layer, checkpoint identity, pool and utterance ids.
     """
     EMB_DIR.mkdir(parents=True, exist_ok=True)
-    cache = EMB_DIR / (f"{name}.npz" if pool == "mean" else f"{name}.{pool}.npz")
     ids = np.array([u.id for u in utts])
+    spec = model_spec(name)
+    ckpt_identity = ""
+    if ckpt:
+        p = Path(ckpt)
+        ckpt_identity = f"{p.resolve()}:{p.stat().st_size}:{p.stat().st_mtime_ns}" if p.is_file() else ckpt
+    cache_payload = {
+        "name": name, "repo": spec.repo, "revision": spec.revision,
+        "feature_layer": spec.feature_layer, "pool": pool,
+        "checkpoint": ckpt_identity, "ids": ids.tolist(), "target_sr": TARGET_SR,
+    }
+    cache_hash = hashlib.sha256(json.dumps(cache_payload, sort_keys=True).encode()).hexdigest()[:16]
+    cache = EMB_DIR / f"{name}.{pool}.{cache_hash}.npz"
 
     if use_cache and cache.exists():
         data = np.load(cache, allow_pickle=True)
         if list(data["ids"]) == list(ids):
             print(f"[{name}] using cached embeddings ({data['X'].shape}, pool={pool})", flush=True)
-            return {"X": data["X"], "speakers": data["speakers"], "ids": data["ids"]}
+            return {"X": data["X"], "speakers": data["speakers"], "ids": data["ids"], "spec": spec}
 
     emb = build_embedder(name, ckpt=ckpt)
     vecs: List[np.ndarray] = []
@@ -512,5 +739,5 @@ def extract(
     speakers = np.array([u.speaker for u in utts])
     print(f"[{name}] done: {X.shape} (pool={pool})", flush=True)
 
-    np.savez(cache, X=X, speakers=speakers, ids=ids)
-    return {"X": X, "speakers": speakers, "ids": ids}
+    np.savez(cache, X=X, speakers=speakers, ids=ids, metadata=json.dumps(cache_payload, sort_keys=True))
+    return {"X": X, "speakers": speakers, "ids": ids, "spec": spec}

@@ -27,7 +27,7 @@ run:
 data:
   sample_rate: 16000
   segment_seconds: 3.0
-  # Produced by: python scripts/housekeeping.py build --staging-dir staging --data-root datasets
+  # Produced by: python scripts/housekeeping.py make-manifests --out-dir staging/manifests
   train_manifest: "staging/manifests/train.jsonl"
   val_manifest: "staging/manifests/val.jsonl"
   num_workers: 3                 # was 8: 8 persistent workers grew to ~1.9GB EACH (glibc heap frag from variable-len torchaudio.load) and OOM'd the 15GB host at step ~7930. Pair with MALLOC_ARENA_MAX=2 to bound per-worker growth across epochs.

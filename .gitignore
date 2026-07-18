@@ -4,6 +4,9 @@ datasets/
 staging/
 _hf_upload_tmp/
 runs/
+checkpoints/
+live_recon/
+hf-model-clae-encoder/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/

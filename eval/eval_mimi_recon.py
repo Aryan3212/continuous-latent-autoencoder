@@ -5,7 +5,7 @@ computes the same MultiResSTFTLoss metrics as train.py (at 24 kHz), and
 saves original / reconstructed WAV pairs for A/B listening.
 
 Usage:
-    uv run python scripts/eval_mimi_recon.py \
+    uv run python -m eval.eval_mimi_recon \
         --manifest staging/manifests/val.jsonl \
         --out_dir mimi_recon_out \
         --max_batches 50 \

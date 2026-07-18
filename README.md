@@ -133,7 +133,7 @@ uv run python scripts/reconstruct_audio.py \
   path/to/clip.wav
 ```
 
-## Checkpoint sync and Kaggle
+## Checkpoint sync
 
 Hugging Face can carry `last.pt` between machines or notebook sessions:
 
@@ -147,11 +147,6 @@ uv run python scripts/housekeeping.py fetch-checkpoint \
 
 New repositories are created as private unless `publish-checkpoint` receives
 `--public`; publishing to an existing repository keeps its current visibility.
-
-For Kaggle, attach datasets, build manifests with repeated `--map` arguments,
-and train with `configs/kaggle_3m_gan.yaml`. `scripts/kaggle_session.sh` is
-currently stale because it calls manifest-cache commands that no longer exist;
-use the commands above until that wrapper is repaired.
 
 ## Credentials
 

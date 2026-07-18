@@ -2,6 +2,35 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-18
+
+**Script workflow cleanup**
+
+- Removed obsolete Kaggle wrapper/notebook-export evaluation scripts and the
+  unused staging-upload helper. The supported checkpoint workflow is now the
+  `housekeeping.py publish-checkpoint` / `fetch-checkpoint` CLI.
+- Moved the Mimi reconstruction baseline from `scripts/` to `eval/` and
+  ignored local checkpoint, listening-output, and separate model-checkout
+  artifacts.
+
+## 2026-07-18
+
+**Compact frozen-representation benchmark for `large_2kh`**
+
+- **`eval/repr_bench.py`**: introduced model metadata/adapters for the compact
+  benchmark (CLAE controls, WavLM, Whisper-tiny, ECAPA, emotion2vec,
+  USAD2-Small, Mimi, Higgs Audio V2, and XCodec2) and versioned embedding
+  cache keys by model revision, feature layer, checkpoint identity, pooling,
+  preprocessing, and utterance IDs.
+- **`eval/eval_age.py`**, **`eval/eval_repr_viz.py`**, and
+  **`eval/render_compact_scorecard.py`**: added a speaker-disjoint Common
+  Voice Bengali age probe, PCA+UMAP plots coloured by speaker/emotion, and the
+  compact Markdown results table.
+- **`eval/eval_asr_attn.py`**: the fixed 2-layer Transformer decoder now
+  accepts frozen `repr_bench` adapters, avoiding CTC's token-rate constraint
+  for the 12.5 Hz CLAE representation.
+- **Dependencies**: added SpeechBrain for ECAPA-TDNN.
+
 ## 2026-07-17
 
 **Uniform decoder-latent corruption across reconstruction-view ablations**

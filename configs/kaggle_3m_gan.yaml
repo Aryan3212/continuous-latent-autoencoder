@@ -12,7 +12,7 @@
 # NOTE: train.max_steps stays at the base 30000 and spans the WHOLE run (not one
 # session); the LR schedule's total_steps now derives from it automatically, so
 # raise train.max_steps ALONE to train longer, e.g.
-#   bash scripts/kaggle_session.sh -- train.max_steps=60000
+#   uv run python train.py --config configs/kaggle_3m_gan.yaml train.max_steps=60000
 # The wall-clock budget (--max_hours) ends each session; scheduler state restores
 # on resume.
 _base_: configs/exp_3m_gan.yaml
@@ -23,8 +23,8 @@ run:
   amp: true
   gpu_mem_fraction: 0.95    # dedicated T4 (~15 GB) -> ~13.8 GiB for PyTorch; aggressive (CUDA ctx+NCCL ~0.9 GiB sit on top), drop to 0.92 if it OOMs at the cap
 
-# Under DDP (torchrun --nproc_per_node=N, auto-selected by kaggle_session.sh on
-# >1 GPU), train.batch_size is PER-GPU and effective batch =
+# Under DDP (`torchrun --nproc_per_node=N` on more than one GPU),
+# train.batch_size is PER-GPU and effective batch =
 # batch_size * grad_accum_steps * N. The base batch_size: 10 was sized for the
 # 6 GB GTX 1660 — on 16 GB T4/P100 raise it (and lower grad_accum to keep the
 # effective batch where you want it) via `-- train.batch_size=... grad_accum_steps=...`.

@@ -30,8 +30,9 @@ dependencies = [
   "pyarrow>=23.0.1",
   "librosa>=0.11.0",
   "umap-learn>=0.5.5",
-  "transformers>=5.12.1",
+  "transformers>=5.14.0",
   "utmosv2",
+  "speechbrain>=1.0",
 ]
 
 [tool.setuptools]

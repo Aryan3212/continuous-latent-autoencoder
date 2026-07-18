@@ -6,3 +6,4 @@ torch>=2.2
 torchaudio>=2.2
 soundfile>=0.12
 jiwer>=3.0
+speechbrain>=1.0

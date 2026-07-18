@@ -34,8 +34,7 @@ CKPTS = {
 }
 
 # The model code (config.py, models/, reconstruct_audio.py) is not pip-installable
-# (scripts/ is excluded from packaging), so clone it at startup and import — same
-# idiom as scripts/kaggle_eval.py.
+# (scripts/ is excluded from packaging), so clone it at startup and import.
 if not pathlib.Path(REPO_DIR).exists():
     try:
         subprocess.run(["git", "clone", "--depth", "1", "-b", REPO_BRANCH,

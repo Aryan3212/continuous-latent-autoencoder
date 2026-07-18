@@ -12,8 +12,10 @@ import torch.nn as nn
 
 from jiwer import cer, wer
 
+from data_loading import resolve_manifest_root
 from eval.common import amp_enabled, load_frozen_encoder
 from eval.eval_asr import _filter_manifest_by_duration, _load_feats_and_text
+from eval.repr_bench import TARGET_SR, _resample, build_embedder, model_spec
 
 # Special-token indices — these must not collide with the CTC probe's vocab
 # (CTC uses index 0 for <blank>; here index 0 is <pad>).
@@ -262,6 +264,51 @@ def _make_batch_targets(
     return tgt_in, tgt_out, tgt_kpm
 
 
+def _load_adapter_feats_and_text(
+    model_name: str,
+    manifest: str,
+    *,
+    text_key: str,
+    max_samples: int,
+    ckpt: str | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
+    """Extract CPU-resident frames from a ``repr_bench`` adapter for ASR."""
+    import os
+
+    import torchaudio
+
+    spec = model_spec(model_name)
+    if not spec.supports_asr_probe:
+        raise ValueError(f"{model_name} exposes utterance-only features and cannot be used for ASR")
+    with open(manifest, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    root = resolve_manifest_root(manifest, rows)
+    embedder = build_embedder(model_name, ckpt=ckpt)
+    feats: List[torch.Tensor] = []
+    texts: List[str] = []
+    for row in rows:
+        if text_key not in row or not str(row[text_key]).strip():
+            continue
+        path = str(row["audio_filepath"])
+        if not os.path.isabs(path):
+            path = str(root / path)
+        wav, sr = torchaudio.load(path)
+        if wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav16k = _resample(wav.squeeze(0), int(sr), TARGET_SR)
+        frames = torch.from_numpy(embedder.fn(wav16k)).float()
+        if frames.ndim != 2 or frames.size(0) < 1:
+            raise RuntimeError(f"{model_name} returned invalid ASR feature shape {tuple(frames.shape)}")
+        feats.append(frames)
+        texts.append(str(row[text_key]))
+        if max_samples and len(feats) >= max_samples:
+            break
+    if not feats:
+        raise ValueError(f"No usable transcript/audio rows in {manifest}")
+    lens = torch.tensor([x.size(0) for x in feats], dtype=torch.long)
+    return torch.nn.utils.rnn.pad_sequence(feats, batch_first=True), lens, texts
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -271,8 +318,9 @@ def main() -> None:
         description="Attention seq2seq ASR probe — diagnostic counterpart to eval_asr.py"
     )
     # Core / shared with eval_asr.py
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--model", default="ours", help="repr_bench adapter name (default: ours)")
+    ap.add_argument("--config", default=None, help="Required for --model ours")
+    ap.add_argument("--ckpt", default=None, help="CLAE checkpoint; ignored by external adapters")
     ap.add_argument("--train_manifest", required=True)
     ap.add_argument("--dev_manifest", required=True)
     ap.add_argument("--text_key", default="text")
@@ -320,31 +368,33 @@ def main() -> None:
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
 
-    # ------------------------------------------------------------------
-    # 1. Load frozen encoder
-    # ------------------------------------------------------------------
-    lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
-
-    # ------------------------------------------------------------------
-    # 2. Resolve segment / chunk timings (mirrors eval_asr.py exactly)
-    # ------------------------------------------------------------------
-    seg = (
-        args.segment_seconds
-        if args.segment_seconds is not None
-        else lm.cfg.eval.asr.segment_seconds
-    )
+    # ``ours_random`` deliberately takes the shared adapter route so it keeps
+    # freshly initialized weights instead of accidentally loading the checkpoint.
+    is_clae = args.model == "ours"
+    lm = None
+    if is_clae:
+        if not args.config or not args.ckpt:
+            ap.error("--config and --ckpt are required for --model ours")
+        lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
+        seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.eval.asr.segment_seconds
+        chunk = args.chunk_seconds if args.chunk_seconds is not None else lm.cfg.data.segment_seconds
+    else:
+        if args.features != "encoder":
+            ap.error("external --model adapters support --features encoder only")
+        spec = model_spec(args.model)
+        if not spec.supports_asr_probe:
+            ap.error(f"{args.model} exposes utterance-only features and is not an ASR baseline")
+        seg = args.segment_seconds if args.segment_seconds is not None else 15.0
+        chunk = None
+        if args.model == "ours_random" and not args.ckpt:
+            ap.error("--ckpt is required for --model ours_random to recover its architecture")
     max_utt = args.max_utt_seconds if args.max_utt_seconds is not None else seg
-    chunk = (
-        args.chunk_seconds
-        if args.chunk_seconds is not None
-        else lm.cfg.data.segment_seconds
-    )
-    if chunk <= 0:
+    if chunk is not None and chunk <= 0:
         chunk = None
     print(
         f"  [ASR-ATTN] segment_seconds={seg:g}, max_utt_seconds={max_utt:g}, "
         f"chunk_seconds={'off' if chunk is None else f'{chunk:g}'}, "
-        f"features={args.features}",
+        f"features={args.features} model={args.model}",
         flush=True,
     )
 
@@ -369,19 +419,18 @@ def main() -> None:
     # 4. Dry-run: pull one batch, write shape info, exit
     # ------------------------------------------------------------------
     if args.dry_run:
-        from eval.common import iter_frame_features
-
-        feats_iter = iter_frame_features(
-            lm,
-            train_manifest,
-            sample_rate=lm.cfg.data.sample_rate,
-            segment_seconds=seg,
-            batch_size=args.batch_size,
-            chunk_seconds=chunk,
-            source=args.features,
-            mel_hop=args.mel_hop,
-        )
-        feats, _, meta = next(feats_iter)
+        if is_clae:
+            from eval.common import iter_frame_features
+            feats, _, meta = next(iter_frame_features(
+                lm, train_manifest, sample_rate=lm.cfg.data.sample_rate,
+                segment_seconds=seg, batch_size=args.batch_size, chunk_seconds=chunk,
+                source=args.features, mel_hop=args.mel_hop,
+            ))
+        else:
+            feats, _, texts = _load_adapter_feats_and_text(
+                args.model, train_manifest, text_key=args.text_key, max_samples=1, ckpt=args.ckpt
+            )
+            meta = texts
         out = {
             "dry_run": True,
             "feats_shape": list(feats.shape),
@@ -399,40 +448,38 @@ def main() -> None:
         f"  [ASR-ATTN] Extracting train features{f' (max {max_s})' if max_s else ''}...",
         flush=True,
     )
-    feats_tr, lens_tr, text_tr = _load_feats_and_text(
-        lm,
-        train_manifest,
-        text_key=args.text_key,
-        batch_size=args.batch_size,
-        segment_seconds=seg,
-        chunk_seconds=chunk,
-        source=args.features,
-        mel_hop=args.mel_hop,
-        log_name="ASR-ATTN train",
-        max_samples=max_s,
-    )
+    if is_clae:
+        feats_tr, lens_tr, text_tr = _load_feats_and_text(
+            lm, train_manifest, text_key=args.text_key, batch_size=args.batch_size,
+            segment_seconds=seg, chunk_seconds=chunk, source=args.features,
+            mel_hop=args.mel_hop, log_name="ASR-ATTN train", max_samples=max_s,
+        )
+    else:
+        feats_tr, lens_tr, text_tr = _load_adapter_feats_and_text(
+            args.model, train_manifest, text_key=args.text_key, max_samples=max_s, ckpt=args.ckpt
+        )
     print(
         f"  [ASR-ATTN] Extracting dev features{f' (max {max_s})' if max_s else ''}...",
         flush=True,
     )
-    feats_de, lens_de, text_de = _load_feats_and_text(
-        lm,
-        dev_manifest,
-        text_key=args.text_key,
-        batch_size=args.batch_size,
-        segment_seconds=seg,
-        chunk_seconds=chunk,
-        source=args.features,
-        mel_hop=args.mel_hop,
-        log_name="ASR-ATTN dev",
-        max_samples=max_s,
-    )
+    if is_clae:
+        feats_de, lens_de, text_de = _load_feats_and_text(
+            lm, dev_manifest, text_key=args.text_key, batch_size=args.batch_size,
+            segment_seconds=seg, chunk_seconds=chunk, source=args.features,
+            mel_hop=args.mel_hop, log_name="ASR-ATTN dev", max_samples=max_s,
+        )
+    else:
+        feats_de, lens_de, text_de = _load_adapter_feats_and_text(
+            args.model, dev_manifest, text_key=args.text_key, max_samples=max_s, ckpt=args.ckpt
+        )
 
     # ------------------------------------------------------------------
     # 6. Free the frozen encoder to reclaim GPU memory
     # ------------------------------------------------------------------
-    del lm
-    torch.cuda.empty_cache()
+    if lm is not None:
+        del lm
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     print(f"  [ASR-ATTN] Train: {feats_tr.shape}, Dev: {feats_de.shape}", flush=True)
 
@@ -557,6 +604,7 @@ def main() -> None:
         "max_utt_seconds": float(max_utt),
         "chunk_seconds": chunk,
         "features": args.features,
+        "model": args.model,
         "mel_hop": args.mel_hop if args.features == "mel" else None,
         "n_filtered_train": n_filtered_tr,
         "n_filtered_dev": n_filtered_de,
