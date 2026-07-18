@@ -575,6 +575,44 @@ def _remote_continuous_embedder(name: str) -> Embedder:
     return Embedder(name=spec.name, fn=embed, spec=spec)
 
 
+def _emotion2vec_embedder() -> Embedder:
+    """Extract emotion2vec's documented 50 Hz frame features via FunASR."""
+    from funasr import AutoModel as FunASRAutoModel
+
+    spec = model_spec("emotion2vec")
+    print(f"[{spec.name}] loading {spec.repo} with FunASR", flush=True)
+    # FunASR delegates Hub downloads to huggingface_hub, which reads the
+    # standard uppercase environment variable rather than a call-time token.
+    token = _hf_token()
+    if token:
+        os.environ.setdefault("HF_TOKEN", token)
+    model = FunASRAutoModel(model=spec.repo, hub="hf", device=str(DEVICE))
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        result = model.generate(
+            input=wav16k.numpy(), fs=TARGET_SR, granularity="frame"
+        )
+        try:
+            frames = result[0]["feats"]
+        except (IndexError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                "emotion2vec did not return its documented `feats` output"
+            ) from exc
+        if isinstance(frames, torch.Tensor):
+            frames = frames.detach().cpu().numpy()
+        frames = np.asarray(frames, dtype=np.float32)
+        if frames.ndim == 3 and frames.shape[0] == 1:
+            frames = frames[0]
+        if frames.ndim != 2:
+            raise RuntimeError(
+                f"emotion2vec features must be (T, D), got {tuple(frames.shape)}"
+            )
+        return frames
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
+
+
 def _xcodec2_embedder() -> Embedder:
     """Use XCodec2's documented continuous ``latents`` output, not code ids."""
     from transformers import AutoFeatureExtractor, AutoModel
@@ -650,7 +688,9 @@ def build_embedder(name: str, *, ckpt: Optional[str] = None) -> Embedder:
         return _xcodec2_embedder()
     if name == "higgs_audio_v2":
         return _higgs_embedder()
-    if name in {"emotion2vec", "usad2_small"}:
+    if name == "emotion2vec":
+        return _emotion2vec_embedder()
+    if name == "usad2_small":
         return _remote_continuous_embedder(name)
     raise ValueError(f"unknown model {name!r}; choose from {MODEL_ORDER}")
 

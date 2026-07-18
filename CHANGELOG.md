@@ -9,6 +9,8 @@ Date format: `YYYY-MM-DD`
 - **`eval/repr_bench.py`**: representation adapters now load the repo-local
   `.env` and pass `HF_TOKEN` (or legacy lowercase `hf_token`) to Hugging Face
   model and processor downloads, without recording credentials in outputs.
+- **emotion2vec adapter**: replaced the invalid Transformers `AutoProcessor`
+  path with the model's official FunASR frame-feature extraction path.
 
 ## 2026-07-18
 
