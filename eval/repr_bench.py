@@ -41,7 +41,7 @@ OUR_HF_REPO = "aryan3212/my-model"
 
 MODEL_ORDER = [
     "ours", "ours_random", "wavlm", "whisper_tiny", "ecapa", "emotion2vec",
-    "usad2_small", "mimi", "higgs_audio_v2", "xcodec2",
+    "mimi", "higgs_audio_v2", "xcodec2",
 ]
 
 
@@ -479,7 +479,6 @@ _MODEL_SPECS: Dict[str, ModelSpec] = {
     "whisper_tiny": ModelSpec("whisper_tiny", "openai/whisper-tiny", feature_layer="encoder.last_hidden_state", frame_rate_hz=50.0, reported_params="39M"),
     "ecapa": ModelSpec("ecapa", "speechbrain/spkrec-ecapa-voxceleb", feature_layer="utterance_embedding", frame_rate_hz=None, component="speaker_embedder", supports_asr_probe=False, reported_params="14.7M"),
     "emotion2vec": ModelSpec("emotion2vec", "emotion2vec/emotion2vec_base", feature_layer="continuous_hidden_state"),
-    "usad2_small": ModelSpec("usad2_small", "MIT-SLS/USAD2-Small", feature_layer="last_hidden_state", reported_params="25M"),
     "mimi": ModelSpec("mimi", "kyutai/mimi", native_sample_rate=24000, frame_rate_hz=12.5, feature_layer="pre_quantization", component="codec_encoder"),
     "higgs_audio_v2": ModelSpec("higgs_audio_v2", "bosonai/higgs-audio-v2-tokenizer", native_sample_rate=24000, frame_rate_hz=25.0, feature_layer="quantizer_decoded_continuous", component="codec_encoder"),
     "xcodec2": ModelSpec("xcodec2", "HKUSTAudio/xcodec2-hf", frame_rate_hz=50.0, feature_layer="quantized_continuous_latents", component="codec_encoder", reported_params="0.8B"),
@@ -552,29 +551,6 @@ def _ecapa_embedder() -> Embedder:
     return Embedder(name=spec.name, fn=embed, spec=spec)
 
 
-def _remote_continuous_embedder(name: str) -> Embedder:
-    """Adapter for remote-code encoders that expose continuous HF-style outputs."""
-    from transformers import AutoModel, AutoProcessor
-
-    spec = model_spec(name)
-    processor = AutoProcessor.from_pretrained(
-        spec.repo, revision=spec.revision, trust_remote_code=True, token=_hf_token()
-    )
-    model = AutoModel.from_pretrained(
-        spec.repo, revision=spec.revision, trust_remote_code=True, token=_hf_token()
-    ).eval().to(DEVICE)
-
-    @torch.no_grad()
-    def embed(wav16k: torch.Tensor) -> np.ndarray:
-        wav = _resample(wav16k, TARGET_SR, spec.native_sample_rate).numpy()
-        inputs = processor(wav, sampling_rate=spec.native_sample_rate, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
-        output = model(**inputs)
-        return _output_frames(output, model_name=spec.name).numpy()
-
-    return Embedder(name=spec.name, fn=embed, spec=spec)
-
-
 def _emotion2vec_embedder() -> Embedder:
     """Extract emotion2vec's documented 50 Hz frame features via FunASR."""
     from funasr import AutoModel as FunASRAutoModel
@@ -609,49 +585,6 @@ def _emotion2vec_embedder() -> Embedder:
                 f"emotion2vec features must be (T, D), got {tuple(frames.shape)}"
             )
         return frames
-
-    return Embedder(name=spec.name, fn=embed, spec=spec)
-
-
-def _usad2_embedder() -> Embedder:
-    """Extract USAD 2.0's documented final frame features."""
-    from transformers import AutoConfig
-    from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-    spec = model_spec("usad2_small")
-    print(f"[{spec.name}] loading {spec.repo}", flush=True)
-    token = _hf_token()
-    config = AutoConfig.from_pretrained(
-        spec.repo, revision=spec.revision, trust_remote_code=True, token=token
-    )
-    model_class = get_class_from_dynamic_module(
-        config.auto_map["AutoModel"], spec.repo, revision=spec.revision, token=token
-    )
-    # USAD2's remote model code predates Transformers 5.x, whose loader reads
-    # this mapping while finalising weights. USAD2 has no tied weights.
-    if not hasattr(model_class, "all_tied_weights_keys"):
-        model_class.all_tied_weights_keys = {}
-    model = model_class.from_pretrained(
-        spec.repo,
-        config=config,
-        revision=spec.revision,
-        token=token,
-        # The remote positional-encoding buffer is used lazily and is not
-        # materialised correctly by Transformers 5's meta-device loader.
-        # At 25M parameters, normal eager loading is inexpensive and safe.
-        low_cpu_mem_usage=False,
-    ).eval().to(DEVICE)
-    usad_sr = int(model.sample_rate)
-
-    @torch.no_grad()
-    def embed(wav16k: torch.Tensor) -> np.ndarray:
-        wav = _resample(wav16k, TARGET_SR, usad_sr).to(DEVICE)
-        wavs = wav.unsqueeze(0)
-        wav_lengths = torch.tensor([wav.numel()], device=DEVICE)
-        output = model(wavs=wavs, wav_lengths=wav_lengths, target_layer=None)
-        frames = output["x"]
-        valid = int(output["x_lengths"][0].item())
-        return frames[0, :valid].float().cpu().numpy()
 
     return Embedder(name=spec.name, fn=embed, spec=spec)
 
@@ -702,11 +635,15 @@ def _higgs_embedder() -> Embedder:
         for owner in (model, getattr(model, "acoustic_model", None), getattr(model, "semantic_model", None)):
             quantizer = getattr(owner, "quantizer", None)
             if quantizer is not None and hasattr(quantizer, "decode"):
-                latents = quantizer.decode(codes)
+                # model.encode() returns (B, Q, T), whereas the internal
+                # residual quantizer decodes (Q, B, T) and returns (B, D, T).
+                # Passing (B, Q, T) directly makes the quantizer axis look like
+                # batch and causes pooling to retain variable utterance length.
+                latents = quantizer.decode(codes.transpose(0, 1))
                 if isinstance(latents, (tuple, list)):
                     latents = latents[0]
-                if isinstance(latents, torch.Tensor):
-                    return latents.transpose(1, 2).squeeze(0).float().cpu().numpy()
+                if isinstance(latents, torch.Tensor) and latents.ndim == 3:
+                    return latents.squeeze(0).transpose(0, 1).float().cpu().numpy()
         raise RuntimeError("Higgs adapter could not locate a continuous quantizer decode path in this pinned model revision")
 
     return Embedder(name=spec.name, fn=embed, spec=spec)
@@ -733,8 +670,6 @@ def build_embedder(name: str, *, ckpt: Optional[str] = None) -> Embedder:
         return _higgs_embedder()
     if name == "emotion2vec":
         return _emotion2vec_embedder()
-    if name == "usad2_small":
-        return _usad2_embedder()
     raise ValueError(f"unknown model {name!r}; choose from {MODEL_ORDER}")
 
 
@@ -841,7 +776,14 @@ def extract(
     emb = build_embedder(name, ckpt=ckpt)
     vecs: List[np.ndarray] = []
     for i, u in enumerate(utts):
-        vecs.append(_pool(emb.fn(u.wav), pool))
+        vec = _pool(emb.fn(u.wav), pool)
+        if vecs and vec.shape != vecs[0].shape:
+            raise ValueError(
+                f"{name} produced inconsistent pooled feature shapes: "
+                f"first={vecs[0].shape}, utterance {u.id}={vec.shape}. "
+                "Check the adapter's time/feature axis handling."
+            )
+        vecs.append(vec)
         if (i + 1) % 50 == 0:
             print(f"[{name}] {i + 1}/{len(utts)} embedded", flush=True)
     X = np.stack(vecs, axis=0).astype(np.float32)

@@ -4,6 +4,15 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-18
 
+**Supervisor-facing large_2kh research report**
+
+- **`SUPERVISOR_RESEARCH_REPORT.md`**: added a concise, code/config-grounded
+  report covering the configured 23.8M CLAE architecture, active mel + JEPA +
+  VISReg objective, current data/training scale, pending representation
+  evaluation plan, an ASCII architecture diagram, and a figure-generation prompt.
+
+## 2026-07-18
+
 **Authenticated representation-model downloads**
 
 - **`eval/repr_bench.py`**: representation adapters now load the repo-local
@@ -11,9 +20,11 @@ Date format: `YYYY-MM-DD`
   model and processor downloads, without recording credentials in outputs.
 - **emotion2vec adapter**: replaced the invalid Transformers `AutoProcessor`
   path with the model's official FunASR frame-feature extraction path.
-- **USAD2 adapter**: replaced the invalid `AutoProcessor` path with its
-  documented `wavs`/`wav_lengths` frame-feature API and added a narrow
-  compatibility shim for its pre-Transformers-5 custom model code.
+- **USAD2-Small**: removed from the benchmark after its custom model code
+  proved incompatible with the pinned Transformers runtime.
+- **Higgs Audio V2 adapter**: corrected the internal residual-quantizer code
+  layout before continuous latent decoding, so pooling uses a fixed feature
+  dimension rather than utterance length.
 
 ## 2026-07-18
 

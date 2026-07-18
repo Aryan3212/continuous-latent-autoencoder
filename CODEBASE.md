@@ -127,10 +127,9 @@ same name.
 - `eval/run_all.py` — reconstruction evaluation plus configured probes.
 - `eval/repr_bench.py` — shared frozen-feature adapter registry and versioned
   embedding cache. Supports CLAE, WavLM, Whisper-tiny, ECAPA, emotion2vec,
-  USAD2-Small, Mimi, Higgs Audio V2, and XCodec2; codec adapters use continuous
+  Mimi, Higgs Audio V2, and XCodec2; codec adapters use continuous
   latent/quantizer-decoded vectors and never substitute discrete code IDs.
   emotion2vec is extracted through its official FunASR 50 Hz frame-feature API.
-  USAD2 uses its custom `wavs`/`wav_lengths` feature-extraction interface.
 - `eval/eval_emotion.py`, `eval/eval_speaker_id.py`, `eval/eval_speaker_verif.py`,
   and `eval/eval_age.py` — speaker-disjoint downstream probes. The age probe
   reads local Common Voice Bengali `validated.tsv` metadata.
@@ -146,5 +145,7 @@ same name.
 ## Documentation roles
 
 - `README.md` — human-facing setup and workflows.
+- `SUPERVISOR_RESEARCH_REPORT.md` — concise supervisor-facing snapshot of the
+  configured `large_2kh` architecture, objective, data scale, and evaluation plan.
 - `CODEBASE.md` — current agent-facing map.
 - `CHANGELOG.md` — human-only change history.
