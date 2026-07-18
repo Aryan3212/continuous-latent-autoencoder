@@ -134,31 +134,3 @@ For context, the same preliminary protocol gave 47.3% macro-F1 for WavLM,
 53.3% for Whisper-tiny, 47.4% for ECAPA, 47.9% for emotion2vec, 51.2% for
 Mimi, and 40.9% for Higgs Audio V2. These values should not be treated as
 significant pairwise differences until the full SUBESCO evaluation is complete.
-
-Frozen-representation evaluation remains in progress. The final planned
-measures are SUBESCO speaker-disjoint emotion
-classification, Bengali speaker identification and verification, Common Voice
-Bengali age prediction, a fixed-budget Transformer-decoder Bengali ASR probe,
-and PCA/UMAP views coloured by speaker or emotion.  These tasks evaluate the
-latent representation rather than decoded-waveform quality
-([`eval/repr_bench.py`](eval/repr_bench.py)).
-
-The next milestone is to repeat the emotion probe on all 7,000 SUBESCO clips,
-then complete the held-out identity, age, and content probes before selecting
-final thesis ablations.
-
-## Prompt for an architecture figure
-
-> Create a clean landscape 16:9 academic neural-network architecture figure on
-> a white background, using restrained navy, teal, and orange accents. Show:
-> “16 kHz Bengali waveform” → five-stage strided Conv1D frontend (channels
-> 128, 256, 384, 512, 512; total stride 1280) → “8-layer FastConformer +
-> two-stream mHC” → “continuous 256-D latent, 12.5 Hz”. Split the latent into
-> (1) a decoder branch with span mask and Gaussian noise, FiLM residual
-> waveform decoder, reconstructed waveform, then “80-bin log-mel loss,
-> weight 1.0” against the clean waveform; and (2) a projector branch “256 →
-> 512 → 64, BatchNorm + GELU”, then “JEPA global-local consistency, weight
-> 0.3” and “VISReg Gaussianisation, 256 projections, weight 0.7”. Include the
-> formula “L = 1.0 L_mel + 0.3 L_JEPA + 0.7 L_VISReg” and a small footer
-> “Adversarial/GAN and feature-matching losses disabled.” Use crisp readable
-> labels, thin directional arrows, and no evaluation scores or SOTA claims.
