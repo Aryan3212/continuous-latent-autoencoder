@@ -613,6 +613,30 @@ def _emotion2vec_embedder() -> Embedder:
     return Embedder(name=spec.name, fn=embed, spec=spec)
 
 
+def _usad2_embedder() -> Embedder:
+    """Extract USAD 2.0's documented final frame features."""
+    from transformers import AutoModel
+
+    spec = model_spec("usad2_small")
+    print(f"[{spec.name}] loading {spec.repo}", flush=True)
+    model = AutoModel.from_pretrained(
+        spec.repo, revision=spec.revision, trust_remote_code=True, token=_hf_token()
+    ).eval().to(DEVICE)
+    usad_sr = int(model.sample_rate)
+
+    @torch.no_grad()
+    def embed(wav16k: torch.Tensor) -> np.ndarray:
+        wav = _resample(wav16k, TARGET_SR, usad_sr).to(DEVICE)
+        wavs = wav.unsqueeze(0)
+        wav_lengths = torch.tensor([wav.numel()], device=DEVICE)
+        output = model(wavs=wavs, wav_lengths=wav_lengths, target_layer=None)
+        frames = output["x"]
+        valid = int(output["x_lengths"][0].item())
+        return frames[0, :valid].float().cpu().numpy()
+
+    return Embedder(name=spec.name, fn=embed, spec=spec)
+
+
 def _xcodec2_embedder() -> Embedder:
     """Use XCodec2's documented continuous ``latents`` output, not code ids."""
     from transformers import AutoFeatureExtractor, AutoModel
@@ -691,7 +715,7 @@ def build_embedder(name: str, *, ckpt: Optional[str] = None) -> Embedder:
     if name == "emotion2vec":
         return _emotion2vec_embedder()
     if name == "usad2_small":
-        return _remote_continuous_embedder(name)
+        return _usad2_embedder()
     raise ValueError(f"unknown model {name!r}; choose from {MODEL_ORDER}")
 
 

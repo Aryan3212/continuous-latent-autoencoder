@@ -11,6 +11,8 @@ Date format: `YYYY-MM-DD`
   model and processor downloads, without recording credentials in outputs.
 - **emotion2vec adapter**: replaced the invalid Transformers `AutoProcessor`
   path with the model's official FunASR frame-feature extraction path.
+- **USAD2 adapter**: replaced the invalid `AutoProcessor` path with its
+  documented `wavs`/`wav_lengths` frame-feature API.
 
 ## 2026-07-18
 

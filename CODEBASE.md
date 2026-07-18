@@ -130,6 +130,7 @@ same name.
   USAD2-Small, Mimi, Higgs Audio V2, and XCodec2; codec adapters use continuous
   latent/quantizer-decoded vectors and never substitute discrete code IDs.
   emotion2vec is extracted through its official FunASR 50 Hz frame-feature API.
+  USAD2 uses its custom `wavs`/`wav_lengths` feature-extraction interface.
 - `eval/eval_emotion.py`, `eval/eval_speaker_id.py`, `eval/eval_speaker_verif.py`,
   and `eval/eval_age.py` — speaker-disjoint downstream probes. The age probe
   reads local Common Voice Bengali `validated.tsv` metadata.
