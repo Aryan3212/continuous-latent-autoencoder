@@ -25,6 +25,24 @@ Date format: `YYYY-MM-DD`
   scaled examples and detailed shard/completion summaries. Added
   `--progress-interval-seconds` (30 seconds by default).
 
+**Optional packed TAR streaming training backend**
+
+- **`data_loading.py` / `train.py`**: added `data.backend=tar` while retaining
+  `files` as the default. The new loader validates producer format v1
+  descriptors without opening `index.jsonl`, assigns whole shards uniquely over
+  DDP rank/worker consumers each epoch, streams TARs sequentially, applies a
+  byte-budgeted compressed shuffle, and emits equal complete-batch quotas so
+  DDP ranks exhaust together. It verifies canonical 16 kHz mono PCM16 FLAC,
+  then retains established crop/pad behavior and original manifest metadata.
+- **Resume**: future checkpoints now include scheduler state and packed data
+  epoch. Scheduler state restores only when schedule inputs still match;
+  legacy or changed-schedule resumes keep the current closed-form fallback.
+  Packed resumes intentionally start a fresh deterministic data epoch. No EMA
+  state exists in this project.
+- **Configuration**: added `configs/large_2kh_packed.yaml`, a data-only
+  `large_2kh` variant using four persistent workers and a 512 MiB compressed
+  shuffle buffer per worker.
+
 **Resumable canonical audio TAR-shard producer**
 
 - **`scripts/prepare_audio_shards.py`**: added an opt-in, manifest-authoritative

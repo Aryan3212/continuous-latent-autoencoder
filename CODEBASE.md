@@ -79,8 +79,12 @@ optional discriminator optimizer, and profiling.
 - LR is closed-form warmup plus cosine. Resume uses the completed step and the
   current schedule; changed LR inputs produce a warning instead of replaying
   or restoring scheduler state.
-- Checkpoints restore model/optimizer/scaler and optional discriminator state,
-  but not sampler position or Python/NumPy/Torch RNG state.
+- Checkpoints restore model/optimizer/scaler, matching-config scheduler state
+  when present, and optional discriminator state. Legacy checkpoints without
+  serialized scheduler state retain the closed-form resume path; changed schedule
+  inputs intentionally keep that current-config closed-form path. Future checkpoints record data epoch;
+  packed resumes deliberately begin a fresh randomized packed epoch rather than
+  attempting to restore a sample position. There is no EMA state in this codebase.
 - AMP-overflow-skipped updates still advance the attempted-step counter.
 - There is no in-loop validation. `train.eval_interval_steps`,
   `train.val_batches`, and `eval.enabled` are currently unused;
@@ -98,12 +102,18 @@ Full configs: `exp0.yaml`, `exp_3m.yaml`, `exp_3m_gan.yaml`, `large_2kh.yaml`,
 
 ## Data
 
-`data_loading.py` contains the dataset, fixed collator, waveform augmentation,
-shared span-mask construction, and waveform/feature mask application. JSONL
-rows require `audio_filepath`. Relative paths resolve per manifest against its
-directory or its parent for `<root>/manifests/`; multi-manifest lists retain
-separate roots. Audio is loaded/resampled with torchaudio, mixed to mono, then
-cropped and padded to the configured fixed length.
+`data_loading.py` contains the datasets, fixed collator, waveform augmentation,
+shared span-mask construction, and waveform/feature mask application. The
+default `data.backend=files` path is the existing map-style JSONL loader: rows
+require `audio_filepath`, paths resolve per manifest against its directory or
+its parent for `<root>/manifests/`, audio is loaded/resampled with torchaudio,
+mixed to mono, then cropped and padded to fixed length. `data.backend=tar`
+uses `PackedTarDataset`: it validates producer format v1 descriptors without
+loading `index.jsonl`, deterministically assigns whole uncompressed TAR shards
+uniquely to global `(rank, worker)` consumers, streams adjacent FLAC/JSON pairs,
+selects an equal full-batch quota with a byte-budgeted compressed shuffle
+buffer (plus at most one oversized selected member), decodes PCM16 FLAC through libFLAC, and applies the same crop/pad
+semantics. Its shared epoch counter is visible to spawned persistent workers.
 
 `scripts/prepare_audio_shards.py` is an optional, CPU-side producer for a
 future streaming data backend. It treats an existing combined training JSONL as
@@ -138,8 +148,8 @@ same name.
 
 - `scripts/housekeeping.py` — download data, make manifests, and publish/fetch checkpoints.
 - `scripts/prepare_audio_shards.py` — optional manifest-to-uncompressed-TAR
-  canonical audio producer and standalone structural verifier; not a training
-  entrypoint or dataset discovery tool.
+  canonical audio producer and standalone structural verifier; paired with
+  `data.backend=tar` for optional training, not dataset discovery.
 - `scripts/download_subesco.py` — materializes the processed
   `sajid73/SUBESCO-audio-dataset` Parquet release into local WAV files plus a
   label-preserving TSV at `datasets/SUBESCO/` for emotion evaluation.

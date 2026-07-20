@@ -30,11 +30,23 @@ class DataCfg(_Base):
     sample_rate: int = 16000
     segment_seconds: float = 3.0
     train_manifest: str
+    # ``files`` is the established JSONL + random-file-access path.  ``tar``
+    # consumes the optional, canonical packed representation produced by
+    # scripts/prepare_audio_shards.py; train_manifest remains provenance.
+    backend: Literal["files", "tar"] = "files"
+    shard_manifest: str | None = None
     val_manifest: str | None = None
     num_workers: int = 4
     pin_memory: bool = True
     persistent_workers: bool = False
     prefetch_factor: int = 2
+    shuffle_buffer_mb: int = Field(512, ge=1)
+
+    @model_validator(mode="after")
+    def validate_backend(self) -> "DataCfg":
+        if self.backend == "tar" and not self.shard_manifest:
+            raise ValueError("data.shard_manifest is required when data.backend=tar")
+        return self
 
 
 class WaveAugCfg(_Base):
