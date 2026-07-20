@@ -318,6 +318,37 @@ def _optional_nonnegative_float(value: Any, label: str) -> float | None:
     return number
 
 
+def _optional_amplitude_metadata(
+    value: dict[str, Any], label: str
+) -> tuple[float, float | None, float | None]:
+    """Validate legacy-optional, otherwise atomic reversible-scaling metadata."""
+    fields = ("amplitude_restore_gain", "canonical_peak", "storage_peak")
+    present = {field: field in value for field in fields}
+    if not any(present.values()):
+        return 1.0, None, None
+    if not all(present.values()):
+        raise PackingError(f"{label} fields must be present together")
+    if any(value[field] is None for field in fields):
+        raise PackingError(f"{label} fields must be finite numeric values")
+    gain = _optional_restore_gain(value["amplitude_restore_gain"], f"{label} restore gain")
+    canonical_peak = _optional_nonnegative_float(
+        value["canonical_peak"], f"{label} canonical peak"
+    )
+    storage_peak = _optional_nonnegative_float(value["storage_peak"], f"{label} storage peak")
+    if canonical_peak is None or storage_peak is None:  # guarded above; keeps validation explicit under -O.
+        raise PackingError(f"{label} fields must be finite numeric values")
+    if storage_peak > PCM16_STORAGE_PEAK:
+        raise PackingError(f"{label} storage peak exceeds PCM16 headroom")
+    if not math.isclose(
+        canonical_peak,
+        storage_peak * gain,
+        rel_tol=1.0e-6,
+        abs_tol=1.0e-12,
+    ):
+        raise PackingError(f"{label} gain and peaks are inconsistent")
+    return gain, canonical_peak, storage_peak
+
+
 def _merge_quantization(
     aggregate: dict[str, float | int], sample: dict[str, float | int]
 ) -> dict[str, float | int]:
@@ -876,8 +907,8 @@ def pack(args: argparse.Namespace) -> None:
         raise PackingError("--target-shard-size-gb must be between 0.5 and 2.0 GiB")
     if not 1 <= args.workers <= MAX_ENCODE_WORKERS:
         raise PackingError(f"--workers must be between 1 and {MAX_ENCODE_WORKERS}")
-    if args.progress_interval_seconds <= 0.0:
-        raise PackingError("--progress-interval-seconds must be positive")
+    if not math.isfinite(args.progress_interval_seconds) or args.progress_interval_seconds <= 0.0:
+        raise PackingError("--progress-interval-seconds must be a finite positive value")
     inventory = read_inventory(manifest_path)
     # A deterministic global shuffle mixes source datasets, speakers, and
     # durations statistically without reading audio twice or changing the split.
@@ -1168,15 +1199,7 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
             or row["json_member"] != f"samples/{expected_stem}.json"
         ):
             raise PackingError(f"member key does not match stable sample ID for {sample_id}")
-        _optional_restore_gain(row.get("amplitude_restore_gain"), f"index restore gain for {sample_id}")
-        row_canonical_peak = _optional_nonnegative_float(
-            row.get("canonical_peak"), f"index canonical peak for {sample_id}"
-        )
-        row_storage_peak = _optional_nonnegative_float(
-            row.get("storage_peak"), f"index storage peak for {sample_id}"
-        )
-        if (row_canonical_peak is None) != (row_storage_peak is None):
-            raise PackingError(f"index peak fields must both be present or absent for {sample_id}")
+        _optional_amplitude_metadata(row, f"index amplitude metadata for {sample_id}")
         if pathlib.PurePosixPath(row["flac_member"]).with_suffix("") != pathlib.PurePosixPath(
             row["json_member"]
         ).with_suffix(""):
@@ -1258,33 +1281,14 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
                         raise PackingError(f"metadata canonical fields mismatch for {row['sample_id']}")
                     if not isinstance(packed_meta.get("original"), dict):
                         raise PackingError(f"metadata original row missing for {row['sample_id']}")
-                    row_gain = _optional_restore_gain(
-                        row.get("amplitude_restore_gain"), f"index restore gain for {row['sample_id']}"
+                    row_gain, row_canonical_peak, row_storage_peak = _optional_amplitude_metadata(
+                        row, f"index amplitude metadata for {row['sample_id']}"
                     )
-                    packed_gain = _optional_restore_gain(
-                        packed.get("amplitude_restore_gain"),
-                        f"metadata restore gain for {row['sample_id']}",
+                    packed_gain, packed_canonical_peak, packed_storage_peak = _optional_amplitude_metadata(
+                        packed, f"metadata amplitude metadata for {row['sample_id']}"
                     )
                     if not math.isclose(row_gain, packed_gain, rel_tol=0.0, abs_tol=1e-12):
                         raise PackingError(f"restore gain mismatch for {row['sample_id']}")
-                    row_canonical_peak = _optional_nonnegative_float(
-                        row.get("canonical_peak"), f"index canonical peak for {row['sample_id']}"
-                    )
-                    packed_canonical_peak = _optional_nonnegative_float(
-                        packed.get("canonical_peak"),
-                        f"metadata canonical peak for {row['sample_id']}",
-                    )
-                    row_storage_peak = _optional_nonnegative_float(
-                        row.get("storage_peak"), f"index storage peak for {row['sample_id']}"
-                    )
-                    packed_storage_peak = _optional_nonnegative_float(
-                        packed.get("storage_peak"),
-                        f"metadata storage peak for {row['sample_id']}",
-                    )
-                    if (packed_canonical_peak is None) != (packed_storage_peak is None):
-                        raise PackingError(
-                            f"metadata peak fields must both be present or absent for {row['sample_id']}"
-                        )
                     if (row_canonical_peak is None) != (packed_canonical_peak is None) or (
                         row_storage_peak is None
                     ) != (packed_storage_peak is None):
@@ -1296,9 +1300,8 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
                         or not math.isclose(
                             row_storage_peak, packed_storage_peak, rel_tol=0.0, abs_tol=1e-12
                         )
-                        or packed_storage_peak > PCM16_STORAGE_PEAK
                     ):
-                        raise PackingError(f"peak metadata mismatch or unsafe storage peak for {row['sample_id']}")
+                        raise PackingError(f"peak metadata mismatch for {row['sample_id']}")
                     observed_scaling = _merge_amplitude_scaling(
                         observed_scaling,
                         _sample_amplitude_scaling(

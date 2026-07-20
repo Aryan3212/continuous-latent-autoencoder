@@ -44,6 +44,10 @@ class PackedLoaderTests(unittest.TestCase):
             packed_metadata_restore_gain(
                 {"amplitude_restore_gain": 0.9, "canonical_peak": 1.0, "storage_peak": 0.9}
             )
+        with self.assertRaisesRegex(PackedShardError, "inconsistent"):
+            packed_metadata_restore_gain(
+                {"amplitude_restore_gain": 2.0, "canonical_peak": 1.1, "storage_peak": 0.88}
+            )
 
     def test_scheduler_state_restores_only_for_matching_schedule_inputs(self) -> None:
         saved = train._ScheduleInputs(lr=1.0e-3, warmup_steps=5_000, total_steps=100_000, min_lr_ratio=0.0)

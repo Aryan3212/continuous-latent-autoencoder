@@ -221,8 +221,18 @@ def packed_metadata_restore_gain(packed: dict[str, Any]) -> float:
         raise PackedShardError("packed storage_peak exceeds PCM16 full scale")
     if canonical_peak < storage_peak:
         raise PackedShardError("packed canonical_peak cannot be below storage_peak")
-    if gain > 1.0 and canonical_peak <= storage_peak:
-        raise PackedShardError("scaled packed metadata has inconsistent peaks")
+    # The producer records the pre-encode storage peak, so it must describe the
+    # same reversible scaling as the gain.  Without this relationship a corrupt
+    # wrapper could pass the range checks yet apply an unrelated gain at load
+    # time.  Relative tolerance accommodates JSON/float round trips for very
+    # large finite canonical amplitudes.
+    if not math.isclose(
+        canonical_peak,
+        storage_peak * gain,
+        rel_tol=1.0e-6,
+        abs_tol=1.0e-12,
+    ):
+        raise PackedShardError("packed gain and peak metadata are inconsistent")
     return gain
 
 

@@ -97,8 +97,10 @@ loads YAML and dotted overrides. Closed choices use `Literal` fields.
 `DatasetConfig` in `data_loading.py` is a runtime dataclass, not YAML schema.
 
 Full configs: `exp0.yaml`, `exp_3m.yaml`, `exp_3m_gan.yaml`, `large_2kh.yaml`,
-`local_6gb.yaml`, and `local_13gb.yaml`. `kaggle_3m_gan.yaml` inherits from
-`exp_3m_gan.yaml` and contains Kaggle-specific overrides.
+`large_2kh_packed.yaml`, `local_6gb.yaml`, and `local_13gb.yaml`.
+`kaggle_3m_gan.yaml` inherits from `exp_3m_gan.yaml` with Kaggle-specific
+overrides; `large_2kh_packed.yaml` inherits from `large_2kh.yaml` with only
+packed-data loader overrides.
 
 ## Data
 
