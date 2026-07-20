@@ -119,9 +119,36 @@ uv run python scripts/prepare_audio_shards.py verify \
 ```
 
 This producer is backward-compatible with the current file-backed training
-workflow, but this revision does not yet make `train.py` consume shards.
-It accepts 1–8 packing workers (four is the HDD-safe starting point) and pins
-Torch intra-op work to one thread per worker to avoid CPU oversubscription.
+workflow. To train from the packed representation, use the compatible
+`large_2kh_packed.yaml` variant and the same step-40k checkpoint. It leaves
+the model, loss, optimizer, and schedule configuration unchanged while using
+whole-shard streaming, rank/worker-safe assignment, and buffered sample
+shuffle. The configured four persistent workers and 512 MiB compressed buffer
+per worker are an HDD-oriented starting point; adjust only the data-loader
+knobs after measuring the remote machine. The buffer is a compressed-byte
+budget plus, at most, one unusually large selected FLAC/JSON pair.
+
+```bash
+uv run python train.py \
+  --config configs/large_2kh_packed.yaml \
+  --resume /path/to/step_040000.pt \
+  run.run_id=large-2kh-packed-resume
+```
+
+`data.backend=files` remains the default and preserves the existing
+file-manifest loader exactly. For `data.backend=tar`, `data.train_manifest`
+remains required provenance while `data.shard_manifest` selects the packed
+inventory. The loader does not read `index.jsonl` during training. Each packed
+epoch uses a fresh deterministic shard order, assigns every shard to one global
+rank/worker consumer, emits an equal complete-batch quota per consumer, and
+starts a fresh randomized epoch after resume rather than replaying a sample
+position. Legacy shards without storage-scaling fields imply gain 1; newer
+shards restore their validated per-sample gain before crop/pad, so the file
+backend and effective training amplitude remain unchanged.
+
+The producer accepts 1–8 packing workers (four is the HDD-safe starting point)
+and pins Torch intra-op work to one thread per worker to avoid CPU
+oversubscription.
 
 ## Configs and overrides
 

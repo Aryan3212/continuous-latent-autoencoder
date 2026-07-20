@@ -1,0 +1,12 @@
+# Backward-compatible packed-data variant of large_2kh.yaml.  It changes only
+# data input and HDD loader tuning, so it can resume the large_2kh step-40k
+# checkpoint without changing model, loss, optimizer, or schedule settings.
+_base_: configs/large_2kh.yaml
+
+data:
+  backend: tar
+  shard_manifest: staging/packed/train/shard_manifest.json
+  num_workers: 4
+  persistent_workers: true
+  prefetch_factor: 4
+  shuffle_buffer_mb: 512

@@ -1,14 +1,19 @@
 """Dataset loading and waveform augmentation."""
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import math
+import multiprocessing as mp
 import os
 import pathlib
 import random
+import tarfile
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator, Sequence
 
+import soundfile as sf
 import torchaudio
 import torch
 import torch.nn.functional as F
@@ -22,6 +27,474 @@ class DatasetConfig:
     sample_rate: int = 16000
     segment_seconds: float = 2.0
     random_crop: bool = True
+
+
+class PackedShardError(RuntimeError):
+    """A packed-shard descriptor or TAR violated the producer contract."""
+
+
+_PACKED_KIND = "continuous-latent-ae-audio-tar-shards"
+_PACKED_FORMAT_VERSION = 1
+
+
+@dataclass(frozen=True)
+class PackedShard:
+    """A validated shard descriptor entry, without reading index.jsonl."""
+
+    path: pathlib.Path
+    relative_path: str
+    count: int
+
+
+def _packed_safe_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
+    if not isinstance(value, str):
+        raise PackedShardError(f"{label} must be a string")
+    path = pathlib.PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or str(path) in {"", "."}:
+        raise PackedShardError(f"unsafe {label}: {value!r}")
+    return path
+
+
+def load_packed_shard_manifest(
+    manifest_path: str,
+    *,
+    expected_sample_rate: int,
+) -> list[PackedShard]:
+    """Read only the small public descriptor; training never opens index.jsonl."""
+    descriptor_path = pathlib.Path(manifest_path).resolve()
+    if not descriptor_path.is_file():
+        raise PackedShardError(f"shard manifest does not exist: {descriptor_path}")
+    try:
+        value = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PackedShardError(f"cannot read shard manifest {descriptor_path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PackedShardError("shard manifest must be a JSON object")
+    if value.get("kind") != _PACKED_KIND:
+        raise PackedShardError(f"unsupported shard manifest kind: {value.get('kind')!r}")
+    if value.get("format_version") != _PACKED_FORMAT_VERSION:
+        raise PackedShardError(
+            f"unsupported shard manifest version: {value.get('format_version')!r}"
+        )
+    descriptor_rate = value.get("sample_rate")
+    if (
+        not isinstance(descriptor_rate, int)
+        or isinstance(descriptor_rate, bool)
+        or descriptor_rate != expected_sample_rate
+    ):
+        raise PackedShardError(
+            f"shard sample rate {descriptor_rate!r} does not match "
+            f"data.sample_rate={expected_sample_rate}"
+        )
+    entries = value.get("shards")
+    counts = value.get("counts")
+    if not isinstance(entries, list) or not entries:
+        raise PackedShardError("shard manifest has no shards")
+    total_samples = counts.get("samples") if isinstance(counts, dict) else None
+    if (
+        not isinstance(total_samples, int)
+        or isinstance(total_samples, bool)
+        or total_samples <= 0
+    ):
+        raise PackedShardError("shard manifest has no positive sample count")
+    root = descriptor_path.parent.resolve()
+    seen: set[str] = set()
+    shards: list[PackedShard] = []
+    total = 0
+    for number, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise PackedShardError(f"shard entry {number} is not an object")
+        relative = _packed_safe_relative_path(entry.get("path"), f"shard {number} path")
+        relative_text = str(relative)
+        if relative_text in seen:
+            raise PackedShardError(f"duplicate shard path: {relative_text}")
+        seen.add(relative_text)
+        if relative.suffix != ".tar":
+            raise PackedShardError(f"shard {number} is not a .tar file: {relative_text}")
+        count = entry.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise PackedShardError(f"shard {number} has invalid positive count: {count!r}")
+        candidate = (root / pathlib.Path(*relative.parts)).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise PackedShardError(f"shard path escapes descriptor directory: {relative_text}")
+        if not candidate.is_file():
+            raise PackedShardError(f"shard file does not exist: {candidate}")
+        shards.append(PackedShard(candidate, relative_text, count))
+        total += count
+    if total != total_samples:
+        raise PackedShardError(
+            f"descriptor shard counts total {total}, expected {total_samples} samples"
+        )
+    return shards
+
+
+def packed_epoch_assignment(
+    shards: Sequence[PackedShard],
+    *,
+    seed: int,
+    epoch: int,
+    total_consumers: int,
+    batch_size: int,
+) -> tuple[list[list[PackedShard]], int]:
+    """Deterministically shuffle and greedily balance whole shards by count.
+
+    The common quota is per global consumer, intentionally rounded to a full
+    DataLoader batch.  This makes every rank exhaust an epoch together even
+    though whole-shard balancing cannot be exact.
+    """
+    if total_consumers <= 0:
+        raise PackedShardError("total consumer count must be positive")
+    if batch_size <= 0:
+        raise PackedShardError("batch size must be positive")
+    if len(shards) < total_consumers:
+        raise PackedShardError(
+            f"packed training needs at least one shard per global consumer; found "
+            f"{len(shards)} shards for {total_consumers} consumers"
+        )
+    ordered = list(shards)
+    # Integer mixing avoids Python's salted hash and is stable across spawned workers.
+    rng = random.Random((int(seed) & ((1 << 63) - 1)) ^ (int(epoch) * 0x9E3779B1))
+    rng.shuffle(ordered)
+    groups: list[list[PackedShard]] = [[] for _ in range(total_consumers)]
+    loads = [0] * total_consumers
+    for shard in ordered:
+        consumer = min(range(total_consumers), key=lambda index: (loads[index], index))
+        groups[consumer].append(shard)
+        loads[consumer] += shard.count
+    quota = min(loads) // batch_size * batch_size
+    if quota < batch_size:
+        raise PackedShardError(
+            f"packed shard assignment yields only {min(loads)} samples for its smallest "
+            f"consumer, which cannot form one batch of {batch_size}"
+        )
+    paths = [shard.relative_path for group in groups for shard in group]
+    if len(paths) != len(set(paths)):
+        raise AssertionError("packed epoch assignment duplicated a shard")
+    return groups, quota
+
+
+def packed_worker_init(_: int) -> None:
+    """Avoid multiplying decode/resample-style CPU pools across workers."""
+    torch.set_num_threads(1)
+
+
+def _packed_buffer_requires_eviction(
+    *, item_count: int, buffered_bytes: int, byte_budget: int
+) -> bool:
+    """Keep the byte budget, except for one unavoidable oversized member."""
+    return item_count > 1 and buffered_bytes > byte_budget
+
+
+def packed_metadata_restore_gain(packed: dict[str, Any]) -> float:
+    """Validate optional v1 storage scaling and return its training-time inverse.
+
+    Finalized shards produced before reversible scaling have none of these
+    fields and therefore retain their original PCM16 behavior with gain 1.
+    New metadata is all-or-nothing so a partial/corrupt wrapper cannot silently
+    alter waveform amplitude.
+    """
+    field_names = ("amplitude_restore_gain", "canonical_peak", "storage_peak")
+    present = {name: name in packed for name in field_names}
+    if not any(present.values()):
+        return 1.0
+    if not all(present.values()):
+        raise PackedShardError("packed amplitude metadata must be present together")
+    gain = packed["amplitude_restore_gain"]
+    canonical_peak = packed["canonical_peak"]
+    storage_peak = packed["storage_peak"]
+    numeric = (gain, canonical_peak, storage_peak)
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in numeric):
+        raise PackedShardError("packed amplitude metadata must be numeric, not boolean")
+    gain = float(gain)
+    canonical_peak = float(canonical_peak)
+    storage_peak = float(storage_peak)
+    if not all(math.isfinite(value) for value in (gain, canonical_peak, storage_peak)):
+        raise PackedShardError("packed amplitude metadata must be finite")
+    if gain < 1.0:
+        raise PackedShardError("packed amplitude_restore_gain must be at least 1")
+    if canonical_peak < 0.0 or storage_peak < 0.0:
+        raise PackedShardError("packed peak metadata must be non-negative")
+    # PCM16 samples are normalized to at most full scale. The producer stores
+    # explicit headroom below it, but the loader intentionally does not require
+    # that producer-internal threshold to preserve the public v1 contract.
+    if storage_peak > 1.0:
+        raise PackedShardError("packed storage_peak exceeds PCM16 full scale")
+    if canonical_peak < storage_peak:
+        raise PackedShardError("packed canonical_peak cannot be below storage_peak")
+    # The producer records the pre-encode storage peak, so it must describe the
+    # same reversible scaling as the gain.  Without this relationship a corrupt
+    # wrapper could pass the range checks yet apply an unrelated gain at load
+    # time.  Relative tolerance accommodates JSON/float round trips for very
+    # large finite canonical amplitudes.
+    if not math.isclose(
+        canonical_peak,
+        storage_peak * gain,
+        rel_tol=1.0e-6,
+        abs_tol=1.0e-12,
+    ):
+        raise PackedShardError("packed gain and peak metadata are inconsistent")
+    return gain
+
+
+class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
+    """Streaming, duplicate-free TAR dataset for canonical PCM16 FLAC shards."""
+
+    def __init__(
+        self,
+        *,
+        shard_manifest: str,
+        sample_rate: int,
+        segment_seconds: float,
+        random_crop: bool,
+        shuffle_buffer_mb: int,
+        run_seed: int,
+        rank: int,
+        world_size: int,
+        workers_per_rank: int,
+        batch_size: int,
+    ):
+        super().__init__()
+        if world_size <= 0 or not 0 <= rank < world_size:
+            raise PackedShardError(f"invalid DDP rank/world_size: {rank}/{world_size}")
+        if workers_per_rank < 0:
+            raise PackedShardError("workers_per_rank cannot be negative")
+        if shuffle_buffer_mb <= 0:
+            raise PackedShardError("shuffle_buffer_mb must be positive")
+        self.shards = load_packed_shard_manifest(
+            shard_manifest, expected_sample_rate=sample_rate
+        )
+        self.sample_rate = sample_rate
+        self.num_samples = int(math.ceil(segment_seconds * sample_rate))
+        self.random_crop = random_crop
+        self.max_buffer_bytes = int(shuffle_buffer_mb) * 1024 * 1024
+        self.run_seed = int(run_seed)
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        self.workers_per_rank = max(1, int(workers_per_rank))
+        self.batch_size = int(batch_size)
+        # multiprocessing.Value is a spawn-pickleable shared primitive; workers
+        # retain it with persistent_workers and observe set_epoch without loader
+        # recreation.
+        # The DataLoader explicitly uses ``spawn``. Creating this SemLock from
+        # that same context makes the synchronized value pickleable into spawned
+        # workers on Linux as well as Windows/macOS; a default/fork-context Value
+        # can otherwise be rejected during worker process start.
+        self._epoch = mp.get_context("spawn").Value("q", 0, lock=True)
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("data epoch cannot be negative")
+        with self._epoch.get_lock():
+            self._epoch.value = int(epoch)
+
+    def _epoch_value(self) -> int:
+        with self._epoch.get_lock():
+            return int(self._epoch.value)
+
+    @staticmethod
+    def _safe_member_name(name: str, suffix: str) -> str:
+        path = pathlib.PurePosixPath(name)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or len(path.parts) != 2
+            or path.parts[0] != "samples"
+            or not path.name.endswith(suffix)
+        ):
+            raise PackedShardError(f"unsafe or unexpected TAR member name: {name!r}")
+        stem = path.name[: -len(suffix)]
+        if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+            raise PackedShardError(f"unexpected TAR member key: {name!r}")
+        return stem
+
+    @classmethod
+    def _read_pair(
+        cls, archive: tarfile.TarFile, first: tarfile.TarInfo, *, expected_sample_rate: int
+    ) -> tuple[bytes, dict[str, Any]]:
+        if not first.isfile():
+            raise PackedShardError(f"TAR member is not a regular file: {first.name!r}")
+        stem = cls._safe_member_name(first.name, ".flac")
+        audio_file = archive.extractfile(first)
+        if audio_file is None:
+            raise PackedShardError(f"cannot read TAR member: {first.name!r}")
+        audio = audio_file.read()
+        second = archive.next()
+        if second is None or not second.isfile():
+            raise PackedShardError(f"missing adjacent JSON member after {first.name!r}")
+        json_stem = cls._safe_member_name(second.name, ".json")
+        if json_stem != stem:
+            raise PackedShardError(f"TAR FLAC/JSON pair mismatch: {first.name!r}, {second.name!r}")
+        metadata_file = archive.extractfile(second)
+        if metadata_file is None:
+            raise PackedShardError(f"cannot read TAR member: {second.name!r}")
+        try:
+            wrapper = json.loads(metadata_file.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PackedShardError(f"invalid metadata JSON for {second.name!r}: {exc}") from exc
+        if not isinstance(wrapper, dict) or not isinstance(wrapper.get("original"), dict):
+            raise PackedShardError(f"invalid metadata wrapper for {second.name!r}")
+        original = wrapper["original"]
+        packed = wrapper.get("packed")
+        if not isinstance(packed, dict) or not isinstance(packed.get("sample_id"), str):
+            raise PackedShardError(f"metadata wrapper lacks packed sample ID for {second.name!r}")
+        source_dataset = str(original.get("dataset") or "unknown")
+        original_id = original.get("id")
+        if original_id is not None and str(original_id) != "":
+            expected_sample_id = f"{source_dataset}:{original_id}"
+        else:
+            try:
+                original_bytes = json.dumps(
+                    original,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise PackedShardError(f"invalid original metadata for {second.name!r}: {exc}") from exc
+            expected_sample_id = f"{source_dataset}:sha256:{hashlib.sha256(original_bytes).hexdigest()}"
+        if (
+            packed["sample_id"] != expected_sample_id
+            or packed.get("source_dataset") != source_dataset
+        ):
+            raise PackedShardError(f"wrapped metadata identity mismatch for {second.name!r}")
+        expected_stem = hashlib.sha256(expected_sample_id.encode("utf-8")).hexdigest()
+        if stem != expected_stem:
+            raise PackedShardError(f"metadata sample ID does not match TAR member key: {second.name!r}")
+        if (
+            packed.get("canonical_sample_rate") != expected_sample_rate
+            or packed.get("canonical_channels") != 1
+            or packed.get("canonical_subtype") != "PCM_16"
+            or not isinstance(packed.get("canonical_frame_count"), int)
+            or isinstance(packed.get("canonical_frame_count"), bool)
+            or packed["canonical_frame_count"] <= 0
+        ):
+            raise PackedShardError(f"invalid canonical metadata for {second.name!r}")
+        packed_metadata_restore_gain(packed)
+        return audio, wrapper
+
+    def _decode_and_crop(
+        self, audio: bytes, wrapper: dict[str, Any], rng: random.Random
+    ) -> dict[str, Any]:
+        try:
+            wav, rate = sf.read(io.BytesIO(audio), dtype="float32", always_2d=True)
+            info = sf.info(io.BytesIO(audio))
+        except Exception as exc:
+            raise PackedShardError(f"failed to decode packed FLAC: {exc}") from exc
+        packed = wrapper["packed"]
+        if (
+            int(rate) != self.sample_rate
+            or int(info.samplerate) != self.sample_rate
+            or int(info.channels) != 1
+            or str(info.subtype) != "PCM_16"
+            or wav.ndim != 2
+            or wav.shape[1] != 1
+            or wav.shape[0] != packed["canonical_frame_count"]
+        ):
+            raise PackedShardError(
+                "packed FLAC violates canonical rate/channel/frame contract for "
+                f"{packed.get('sample_id')!r}"
+            )
+        # This reverses storage-only PCM16 scaling before the exact existing
+        # crop/pad path. It is deliberately not a clamp or normalization.
+        wav = wav * packed_metadata_restore_gain(packed)
+        tensor = torch.from_numpy(wav[:, 0].copy())
+        if self.random_crop:
+            if tensor.numel() < self.num_samples:
+                tensor = F.pad(tensor, (0, self.num_samples - tensor.numel()))
+            else:
+                start = rng.randint(0, tensor.numel() - self.num_samples)
+                tensor = tensor[start : start + self.num_samples]
+        else:
+            tensor = _start_crop(tensor, self.num_samples)
+        return {"wav": tensor, "meta": wrapper["original"]}
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        worker = torch.utils.data.get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        actual_workers = worker.num_workers if worker is not None else 1
+        if actual_workers != self.workers_per_rank:
+            raise PackedShardError(
+                f"packed dataset was configured for {self.workers_per_rank} workers but "
+                f"DataLoader started {actual_workers}; rebuild it with matching data.num_workers"
+            )
+        epoch = self._epoch_value()
+        total_consumers = self.world_size * self.workers_per_rank
+        groups, quota = packed_epoch_assignment(
+            self.shards,
+            seed=self.run_seed,
+            epoch=epoch,
+            total_consumers=total_consumers,
+            batch_size=self.batch_size,
+        )
+        consumer_id = self.rank * self.workers_per_rank + worker_id
+        assigned = groups[consumer_id]
+        # The RNG serves only this consumer and epoch. It controls uniform quota
+        # selection, buffer eviction/drain, and crop locations without depending
+        # on DataLoader's global worker seed.
+        rng = random.Random(
+            ((self.run_seed & ((1 << 63) - 1)) << 17)
+            ^ (epoch * 0x85EBCA6B)
+            ^ (consumer_id * 0xC2B2AE35)
+        )
+        remaining_total = sum(shard.count for shard in assigned)
+        remaining_select = quota
+        buffer: list[tuple[bytes, dict[str, Any], int]] = []
+        buffered_bytes = 0
+        yielded = 0
+        for shard in assigned:
+            try:
+                archive = tarfile.open(shard.path, mode="r|")
+            except (OSError, tarfile.TarError) as exc:
+                raise PackedShardError(f"cannot open packed shard {shard.path}: {exc}") from exc
+            shard_seen = 0
+            with archive:
+                while True:
+                    member = archive.next()
+                    if member is None:
+                        break
+                    audio, wrapper = self._read_pair(
+                        archive, member, expected_sample_rate=self.sample_rate
+                    )
+                    shard_seen += 1
+                    if remaining_total <= 0:
+                        raise PackedShardError("descriptor count underflow while streaming shards")
+                    choose = remaining_select > 0 and rng.randrange(remaining_total) < remaining_select
+                    remaining_total -= 1
+                    if not choose:
+                        continue
+                    remaining_select -= 1
+                    cost = len(audio) + len(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"))
+                    buffer.append((audio, wrapper, cost))
+                    buffered_bytes += cost
+                    # A single member can legitimately exceed the nominal byte
+                    # budget. Keep at most that one member above the budget; this
+                    # is bounded by the largest selected FLAC+JSON pair rather
+                    # than silently rejecting a valid producer shard.
+                    while _packed_buffer_requires_eviction(
+                        item_count=len(buffer),
+                        buffered_bytes=buffered_bytes,
+                        byte_budget=self.max_buffer_bytes,
+                    ):
+                        index = rng.randrange(len(buffer))
+                        selected_audio, selected_wrapper, selected_cost = buffer.pop(index)
+                        buffered_bytes -= selected_cost
+                        yield self._decode_and_crop(selected_audio, selected_wrapper, rng)
+                        yielded += 1
+            if shard_seen != shard.count:
+                raise PackedShardError(
+                    f"shard {shard.relative_path} contains {shard_seen} samples, descriptor says {shard.count}"
+                )
+        if remaining_total != 0 or remaining_select != 0:
+            raise PackedShardError("packed shard sample counts did not match descriptor assignment")
+        while buffer:
+            index = rng.randrange(len(buffer))
+            audio, wrapper, cost = buffer.pop(index)
+            buffered_bytes -= cost
+            yield self._decode_and_crop(audio, wrapper, rng)
+            yielded += 1
+        if yielded != quota:
+            raise AssertionError(f"packed consumer yielded {yielded}, expected quota {quota}")
 
 
 def _read_manifest(paths: str | list[str]) -> list[tuple[dict[str, Any], pathlib.Path]]:

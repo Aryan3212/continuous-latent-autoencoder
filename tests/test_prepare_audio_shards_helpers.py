@@ -9,9 +9,11 @@ import unittest
 
 from scripts.prepare_audio_shards import (
     PCM16_STORAGE_PEAK,
+    PackingError,
     _amplitude_restore_gain,
     _current_preprocessing_contract,
     _legacy_preprocessing_contract,
+    _optional_amplitude_metadata,
     _optional_restore_gain,
     _same_amplitude_scaling,
 )
@@ -29,6 +31,28 @@ class AmplitudeScalingHelpersTest(unittest.TestCase):
 
     def test_legacy_gain_is_optional(self) -> None:
         self.assertEqual(_optional_restore_gain(None, "gain"), 1.0)
+
+    def test_optional_amplitude_metadata_is_atomic_and_reversible(self) -> None:
+        self.assertEqual(_optional_amplitude_metadata({}, "metadata"), (1.0, None, None))
+        self.assertEqual(
+            _optional_amplitude_metadata(
+                {"amplitude_restore_gain": 1.25, "canonical_peak": 1.1, "storage_peak": 0.88},
+                "metadata",
+            ),
+            (1.25, 1.1, 0.88),
+        )
+        with self.assertRaisesRegex(PackingError, "present together"):
+            _optional_amplitude_metadata({"amplitude_restore_gain": 1.25}, "metadata")
+        with self.assertRaisesRegex(PackingError, "finite numeric"):
+            _optional_amplitude_metadata(
+                {"amplitude_restore_gain": None, "canonical_peak": 1.1, "storage_peak": 0.88},
+                "metadata",
+            )
+        with self.assertRaisesRegex(PackingError, "inconsistent"):
+            _optional_amplitude_metadata(
+                {"amplitude_restore_gain": 2.0, "canonical_peak": 1.1, "storage_peak": 0.88},
+                "metadata",
+            )
 
     def test_legacy_and_current_contracts_are_distinct(self) -> None:
         self.assertNotEqual(_legacy_preprocessing_contract(), _current_preprocessing_contract())
