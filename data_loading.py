@@ -167,22 +167,12 @@ def packed_epoch_assignment(
             f"packed shard assignment yields only {min(loads)} samples for its smallest "
             f"consumer, which cannot form one batch of {batch_size}"
         )
-    paths = [shard.relative_path for group in groups for shard in group]
-    if len(paths) != len(set(paths)):
-        raise AssertionError("packed epoch assignment duplicated a shard")
     return groups, quota
 
 
 def packed_worker_init(_: int) -> None:
     """Avoid multiplying decode/resample-style CPU pools across workers."""
     torch.set_num_threads(1)
-
-
-def _packed_buffer_requires_eviction(
-    *, item_count: int, buffered_bytes: int, byte_budget: int
-) -> bool:
-    """Keep the byte budget, except for one unavoidable oversized member."""
-    return item_count > 1 and buffered_bytes > byte_budget
 
 
 def packed_metadata_restore_gain(packed: dict[str, Any]) -> float:
@@ -310,7 +300,7 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
     @classmethod
     def _read_pair(
         cls, archive: tarfile.TarFile, first: tarfile.TarInfo, *, expected_sample_rate: int
-    ) -> tuple[bytes, dict[str, Any]]:
+    ) -> tuple[bytes, dict[str, Any], int, float]:
         if not first.isfile():
             raise PackedShardError(f"TAR member is not a regular file: {first.name!r}")
         stem = cls._safe_member_name(first.name, ".flac")
@@ -327,8 +317,9 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
         metadata_file = archive.extractfile(second)
         if metadata_file is None:
             raise PackedShardError(f"cannot read TAR member: {second.name!r}")
+        metadata_bytes = metadata_file.read()
         try:
-            wrapper = json.loads(metadata_file.read().decode("utf-8"))
+            wrapper = json.loads(metadata_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PackedShardError(f"invalid metadata JSON for {second.name!r}: {exc}") from exc
         if not isinstance(wrapper, dict) or not isinstance(wrapper.get("original"), dict):
@@ -370,23 +361,31 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
             or packed["canonical_frame_count"] <= 0
         ):
             raise PackedShardError(f"invalid canonical metadata for {second.name!r}")
-        packed_metadata_restore_gain(packed)
-        return audio, wrapper
+        restore_gain = packed_metadata_restore_gain(packed)
+        return audio, wrapper, len(audio) + len(metadata_bytes), restore_gain
 
     def _decode_and_crop(
-        self, audio: bytes, wrapper: dict[str, Any], rng: random.Random
+        self,
+        audio: bytes,
+        wrapper: dict[str, Any],
+        restore_gain: float,
+        rng: random.Random,
     ) -> dict[str, Any]:
         try:
-            wav, rate = sf.read(io.BytesIO(audio), dtype="float32", always_2d=True)
-            info = sf.info(io.BytesIO(audio))
+            with sf.SoundFile(io.BytesIO(audio)) as audio_file:
+                rate = int(audio_file.samplerate)
+                channels = int(audio_file.channels)
+                subtype = str(audio_file.subtype)
+                frames = int(audio_file.frames)
+                wav = audio_file.read(dtype="float32", always_2d=True)
         except Exception as exc:
             raise PackedShardError(f"failed to decode packed FLAC: {exc}") from exc
         packed = wrapper["packed"]
         if (
-            int(rate) != self.sample_rate
-            or int(info.samplerate) != self.sample_rate
-            or int(info.channels) != 1
-            or str(info.subtype) != "PCM_16"
+            rate != self.sample_rate
+            or channels != 1
+            or subtype != "PCM_16"
+            or frames != packed["canonical_frame_count"]
             or wav.ndim != 2
             or wav.shape[1] != 1
             or wav.shape[0] != packed["canonical_frame_count"]
@@ -397,7 +396,7 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
             )
         # This reverses storage-only PCM16 scaling before the exact existing
         # crop/pad path. It is deliberately not a clamp or normalization.
-        wav = wav * packed_metadata_restore_gain(packed)
+        wav = wav * restore_gain
         tensor = torch.from_numpy(wav[:, 0].copy())
         if self.random_crop:
             if tensor.numel() < self.num_samples:
@@ -439,9 +438,8 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
         )
         remaining_total = sum(shard.count for shard in assigned)
         remaining_select = quota
-        buffer: list[tuple[bytes, dict[str, Any], int]] = []
+        buffer: list[tuple[bytes, dict[str, Any], int, float]] = []
         buffered_bytes = 0
-        yielded = 0
         for shard in assigned:
             try:
                 archive = tarfile.open(shard.path, mode="r|")
@@ -453,7 +451,7 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
                     member = archive.next()
                     if member is None:
                         break
-                    audio, wrapper = self._read_pair(
+                    audio, wrapper, cost, restore_gain = self._read_pair(
                         archive, member, expected_sample_rate=self.sample_rate
                     )
                     shard_seen += 1
@@ -464,23 +462,21 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
                     if not choose:
                         continue
                     remaining_select -= 1
-                    cost = len(audio) + len(json.dumps(wrapper, ensure_ascii=False).encode("utf-8"))
-                    buffer.append((audio, wrapper, cost))
+                    buffer.append((audio, wrapper, cost, restore_gain))
                     buffered_bytes += cost
                     # A single member can legitimately exceed the nominal byte
                     # budget. Keep at most that one member above the budget; this
                     # is bounded by the largest selected FLAC+JSON pair rather
                     # than silently rejecting a valid producer shard.
-                    while _packed_buffer_requires_eviction(
-                        item_count=len(buffer),
-                        buffered_bytes=buffered_bytes,
-                        byte_budget=self.max_buffer_bytes,
-                    ):
+                    while len(buffer) > 1 and buffered_bytes > self.max_buffer_bytes:
                         index = rng.randrange(len(buffer))
-                        selected_audio, selected_wrapper, selected_cost = buffer.pop(index)
+                        selected_audio, selected_wrapper, selected_cost, selected_gain = buffer.pop(
+                            index
+                        )
                         buffered_bytes -= selected_cost
-                        yield self._decode_and_crop(selected_audio, selected_wrapper, rng)
-                        yielded += 1
+                        yield self._decode_and_crop(
+                            selected_audio, selected_wrapper, selected_gain, rng
+                        )
             if shard_seen != shard.count:
                 raise PackedShardError(
                     f"shard {shard.relative_path} contains {shard_seen} samples, descriptor says {shard.count}"
@@ -489,12 +485,9 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
             raise PackedShardError("packed shard sample counts did not match descriptor assignment")
         while buffer:
             index = rng.randrange(len(buffer))
-            audio, wrapper, cost = buffer.pop(index)
+            audio, wrapper, cost, restore_gain = buffer.pop(index)
             buffered_bytes -= cost
-            yield self._decode_and_crop(audio, wrapper, rng)
-            yielded += 1
-        if yielded != quota:
-            raise AssertionError(f"packed consumer yielded {yielded}, expected quota {quota}")
+            yield self._decode_and_crop(audio, wrapper, restore_gain, rng)
 
 
 def _read_manifest(paths: str | list[str]) -> list[tuple[dict[str, Any], pathlib.Path]]:

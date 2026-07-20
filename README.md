@@ -126,7 +126,8 @@ whole-shard streaming, rank/worker-safe assignment, and buffered sample
 shuffle. The configured four persistent workers and 512 MiB compressed buffer
 per worker are an HDD-oriented starting point; adjust only the data-loader
 knobs after measuring the remote machine. The buffer is a compressed-byte
-budget plus, at most, one unusually large selected FLAC/JSON pair.
+budget measured from the actual buffered FLAC and JSON member payloads, plus at
+most one unusually large selected pair.
 
 ```bash
 uv run python train.py \

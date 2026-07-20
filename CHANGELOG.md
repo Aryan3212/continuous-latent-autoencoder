@@ -11,9 +11,9 @@ Date format: `YYYY-MM-DD`
   explicit headroom, rather than aborting or clipping. Packed metadata and the
   index record `amplitude_restore_gain` plus canonical/storage peaks; measured
   quantization error is calculated after decoding and restoring that gain. The
-  descriptor records per-shard and total scaling counts/maxima. The future
-  packed loader must restore the gain before its existing preprocessing, which
-  keeps this out of the training distribution.
+  descriptor records per-shard and total scaling counts/maxima. The packed
+  loader restores the gain before its existing preprocessing, which keeps this
+  out of the training distribution.
 - **Resume/verification**: `--resume` explicitly upgrades the original v1
   interrupted failure-on-peak state after removing only its active partial
   shard; finalized v1 shards/index parts remain valid with an implicit gain of
@@ -37,14 +37,20 @@ Date format: `YYYY-MM-DD`
   It restores optional validated per-sample storage scaling before crop/pad;
   legacy shards omit this metadata and imply gain 1, while `data.backend=files`
   remains unaffected.
-- **Resume**: future checkpoints now include scheduler state and packed data
-  epoch. Scheduler state restores only when schedule inputs still match;
-  legacy or changed-schedule resumes keep the current closed-form fallback.
-  Packed resumes intentionally start a fresh deterministic data epoch. No EMA
-  state exists in this project.
+- **Resume**: no packed-loader-specific checkpoint state is required. Model,
+  optimizer, AMP scaler, global step, and optional discriminator state retain
+  the established checkpoint format. The step-based scheduler is reconstructed
+  from global step and the current config; packed resumes use that step as a
+  fresh deterministic shuffle-epoch seed. No EMA state exists in this project.
 - **Configuration**: added `configs/large_2kh_packed.yaml`, a data-only
   `large_2kh` variant using four persistent workers and a 512 MiB compressed
   shuffle buffer per worker.
+- **Post-review simplification**: shuffle-buffer accounting now uses the exact
+  buffered TAR payload bytes, each selected FLAC is opened once, and amplitude
+  metadata is validated once before buffering. Removed redundant assignment
+  assertions, scheduler/data-epoch checkpoint plumbing, and the helper-only
+  packed-data test files; runtime validation that protects shard identity and
+  waveform amplitude remains.
 
 **Resumable canonical audio TAR-shard producer**
 

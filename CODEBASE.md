@@ -79,12 +79,11 @@ optional discriminator optimizer, and profiling.
 - LR is closed-form warmup plus cosine. Resume uses the completed step and the
   current schedule; changed LR inputs produce a warning instead of replaying
   or restoring scheduler state.
-- Checkpoints restore model/optimizer/scaler, matching-config scheduler state
-  when present, and optional discriminator state. Legacy checkpoints without
-  serialized scheduler state retain the closed-form resume path; changed schedule
-  inputs intentionally keep that current-config closed-form path. Future checkpoints record data epoch;
-  packed resumes deliberately begin a fresh randomized packed epoch rather than
-  attempting to restore a sample position. There is no EMA state in this codebase.
+- Checkpoints restore model, optimizer, AMP scaler, global step, and optional
+  discriminator state. The step-based scheduler is reconstructed from global
+  step and the current config; it has no separately restored state. Packed
+  resumes use global step as a fresh shuffle-epoch seed rather than attempting
+  to restore a sample position. There is no EMA state in this codebase.
 - AMP-overflow-skipped updates still advance the attempted-step counter.
 - There is no in-loop validation. `train.eval_interval_steps`,
   `train.val_batches`, and `eval.enabled` are currently unused;
@@ -113,9 +112,10 @@ mixed to mono, then cropped and padded to fixed length. `data.backend=tar`
 uses `PackedTarDataset`: it validates producer format v1 descriptors without
 loading `index.jsonl`, deterministically assigns whole uncompressed TAR shards
 uniquely to global `(rank, worker)` consumers, streams adjacent FLAC/JSON pairs,
-selects an equal full-batch quota with a byte-budgeted compressed shuffle
-buffer (plus at most one oversized selected member), decodes PCM16 FLAC through libFLAC, and applies the same crop/pad
-semantics. Its shared epoch counter is visible to spawned persistent workers.
+selects an equal full-batch quota with an exact TAR-payload-byte shuffle buffer
+(plus at most one oversized selected member), decodes each PCM16 FLAC through
+one libFLAC handle, and applies the same crop/pad semantics. Its shared epoch
+counter is visible to spawned persistent workers.
 
 `scripts/prepare_audio_shards.py` is the optional CPU-side producer for the
 packed streaming backend. It treats an existing combined training JSONL as
@@ -129,10 +129,10 @@ per-sample storage scale (recorded as `amplitude_restore_gain` alongside
 canonical/storage peaks); `PackedTarDataset` restores it before normal
 training preprocessing, so no loudness normalization or training-distribution
 change is introduced. Legacy shards omit those optional fields and use gain 1;
-the default file backend is unaffected. Non-finite/corrupt/missing sources still fail rather than
-being silently dropped. `--resume` is safe start-or-resume for an empty or
-matching interrupted output only; it migrates the original v1 interrupted
-failure-on-peak state without redoing finalized shards. The optional
+the default file backend is unaffected. Non-finite/corrupt/missing sources still
+fail rather than being silently dropped. `--resume` is safe start-or-resume for
+an empty or matching interrupted output only; it migrates the original v1
+interrupted failure-on-peak state without redoing finalized shards. The optional
 `data.backend=tar` training path consumes its `shard_manifest.json`;
 `data.backend=files` remains unchanged.
 

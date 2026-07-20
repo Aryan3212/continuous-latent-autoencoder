@@ -109,11 +109,6 @@ def _warn_schedule_change(saved: _ScheduleInputs, current: _ScheduleInputs) -> N
         )
 
 
-def _schedule_inputs_match(saved: _ScheduleInputs, current: _ScheduleInputs) -> bool:
-    """Whether serialized scheduler state is safe to restore under this config."""
-    return saved == current
-
-
 def _now_run_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
@@ -189,8 +184,6 @@ def save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scaler: torch.cuda.amp.GradScaler | None,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    data_epoch: int,
     cfg: Config,
     disc: torch.nn.Module | None = None,
     optimizer_d: torch.optim.Optimizer | None = None,
@@ -203,8 +196,6 @@ def save_checkpoint(
         "model": _clean_state_dict(model),
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
-        "scheduler": scheduler.state_dict(),
-        "data_epoch": int(data_epoch),
         "cfg": cfg.model_dump(),
     }
     if disc is not None:
@@ -346,7 +337,7 @@ def _restore_checkpoint(
     disc: torch.nn.Module | None,
     optimizer_d: torch.optim.Optimizer | None,
     scaler_d: torch.cuda.amp.GradScaler | None,
-) -> tuple[int, _ScheduleInputs | None, dict[str, Any] | None, int | None]:
+) -> tuple[int, _ScheduleInputs | None]:
     state = torch.load(path, map_location="cpu")
     model.load_state_dict(state["model"], strict=True)
     optimizer.load_state_dict(state["optimizer"])
@@ -358,18 +349,7 @@ def _restore_checkpoint(
             optimizer_d.load_state_dict(state["optimizer_d"])
         if state.get("scaler_d") and scaler_d is not None and scaler_d.is_enabled():
             scaler_d.load_state_dict(state["scaler_d"])
-    scheduler_state = state.get("scheduler")
-    if scheduler_state is not None and not isinstance(scheduler_state, dict):
-        raise RuntimeError("checkpoint scheduler state is not a dictionary")
-    data_epoch = state.get("data_epoch")
-    if data_epoch is not None and (not isinstance(data_epoch, int) or data_epoch < 0):
-        raise RuntimeError("checkpoint data_epoch is not a non-negative integer")
-    return (
-        int(state.get("step", 0)),
-        _checkpoint_schedule_inputs(state),
-        scheduler_state,
-        data_epoch,
-    )
+    return int(state.get("step", 0)), _checkpoint_schedule_inputs(state)
 
 
 def main() -> None:
@@ -594,11 +574,9 @@ def main() -> None:
         scaler_d = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     step = 0
-    restored_scheduler_state: dict[str, Any] | None = None
-    restored_data_epoch: int | None = None
     saved_schedule_inputs: _ScheduleInputs | None = None
     if args.resume:
-        step, saved_schedule_inputs, restored_scheduler_state, restored_data_epoch = _restore_checkpoint(
+        step, saved_schedule_inputs = _restore_checkpoint(
             args.resume,
             model=model,
             optimizer=optimizer,
@@ -618,20 +596,6 @@ def main() -> None:
         min_lr_ratio=schedule_inputs.min_lr_ratio,
         completed_steps=step,
     )
-    # Old checkpoints did not serialize scheduler state. Their closed-form
-    # constructor above remains the compatibility path. A serialized scheduler
-    # state is restored only when its schedule inputs still match: the existing
-    # documented behavior is that changed inputs make the *current* config win,
-    # not a hybrid of current closed-form construction and old scheduler state.
-    if (
-        restored_scheduler_state is not None
-        and (
-            saved_schedule_inputs is None
-            or _schedule_inputs_match(saved_schedule_inputs, schedule_inputs)
-        )
-    ):
-        scheduler.load_state_dict(restored_scheduler_state)
-
     # Wrap param-bearing submodules in DDP AFTER any resume-load (so the clean
     # single-GPU checkpoint format loads into the raw modules). The Gaussianisation
     # module (sigreg/visreg) has no learnable params, so it is never wrapped. DDP
@@ -705,17 +669,11 @@ def main() -> None:
     max_seconds = args.max_hours * 3600.0 if args.max_hours else None
 
     epoch = 0
-    # A packed iterator intentionally starts a new randomized data epoch on
-    # resume.  It never tries to reproduce sample 40,001: that position was not
-    # part of old checkpoints. New checkpoints advance the saved epoch; legacy
-    # checkpoints derive a deterministic fresh epoch from the completed step.
-    data_epoch = 0
+    # Packed resume intentionally starts a fresh randomized data epoch instead
+    # of trying to reconstruct the sample after the checkpoint. The completed
+    # optimizer step is already checkpointed and supplies a deterministic seed.
+    data_epoch = max(0, step) if dcfg.backend == "tar" else 0
     if dcfg.backend == "tar":
-        data_epoch = (
-            restored_data_epoch + 1
-            if restored_data_epoch is not None
-            else max(0, step)
-        )
         assert isinstance(train_ds, PackedTarDataset)
         train_ds.set_epoch(data_epoch)
     if train_sampler is not None:
@@ -1106,8 +1064,6 @@ def main() -> None:
                 model=model,
                 optimizer=optimizer,
                 scaler=scaler if scaler.is_enabled() else None,
-                scheduler=scheduler,
-                data_epoch=data_epoch,
                 cfg=cfg,
                 disc=disc,
                 optimizer_d=optimizer_d,
@@ -1128,8 +1084,6 @@ def main() -> None:
             model=model,
             optimizer=optimizer,
             scaler=scaler if scaler.is_enabled() else None,
-            scheduler=scheduler,
-            data_epoch=data_epoch,
             cfg=cfg,
             disc=disc,
             optimizer_d=optimizer_d,
