@@ -75,6 +75,43 @@ Each JSONL row must contain `audio_filepath`. Relative paths resolve from the
 manifest directory, or its parent when manifests live in `<root>/manifests/`.
 Transcripts, durations, dataset names, and labels are optional.
 
+### Optional packed training inventory
+
+The existing combined training manifest is the authoritative inventory for
+optional packed storage; do not re-enumerate datasets or create new splits.
+On the machine that holds the audio, create uncompressed TAR shards containing
+16 kHz mono PCM16 FLAC members directly from that manifest:
+
+```bash
+uv run python scripts/prepare_audio_shards.py pack \
+  --manifest staging/manifests/train.jsonl \
+  --output-dir staging/packed/train \
+  --sample-rate 16000 \
+  --target-shard-size-gb 1.0 \
+  --workers 4 \
+  --seed 42 \
+  --resume
+```
+
+The command stores `shard_manifest.json`, `index.jsonl`, and uncompressed TARs
+under `shards/`. It preserves full utterances and original row metadata, mixes
+the existing rows with a deterministic seed, rejects non-finite or
+PCM16-out-of-range audio rather than clipping it, records PCM16 quantization
+statistics, and structurally verifies the finished output. `--resume` starts a
+new pack when the output directory is absent or empty; otherwise it accepts
+only the same interrupted manifest fingerprint and pack settings. Verify later
+without the source datasets using:
+
+```bash
+uv run python scripts/prepare_audio_shards.py verify \
+  --output-dir staging/packed/train
+```
+
+This producer is backward-compatible with the current file-backed training
+workflow, but this revision does not yet make `train.py` consume shards.
+It accepts 1–8 packing workers (four is the HDD-safe starting point) and pins
+Torch intra-op work to one thread per worker to avoid CPU oversubscription.
+
 ## Configs and overrides
 
 Use a full config from `configs/`; `kaggle_3m_gan.yaml` is the only inherited

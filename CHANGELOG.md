@@ -2,6 +2,22 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-20
+
+**Resumable canonical audio TAR-shard producer**
+
+- **`scripts/prepare_audio_shards.py`**: added an opt-in, manifest-authoritative
+  producer for a future packed streaming backend. It keeps the current
+  torchaudio load → mono mean → default resample order, stores full utterances
+  directly as 16 kHz mono PCM16 FLAC members in uncompressed TAR files, writes
+  versioned descriptor/index metadata, records measured PCM16 quantization
+  error, and rejects non-finite or would-clip audio instead of altering it.
+  Packing is deterministically shuffled, bounded-worker, crash-resumable, and
+  performs a final archive/member/FLAC structural verification.
+- **Documentation**: documented the remote producer and verifier commands.
+  Current file-backed training remains unchanged; shard consumption is a
+  separate follow-up integration.
+
 ## 2026-07-18
 
 **Supervisor-facing large_2kh research report**
