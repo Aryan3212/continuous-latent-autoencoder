@@ -95,12 +95,23 @@ uv run python scripts/prepare_audio_shards.py pack \
 
 The command stores `shard_manifest.json`, `index.jsonl`, and uncompressed TARs
 under `shards/`. It preserves full utterances and original row metadata, mixes
-the existing rows with a deterministic seed, rejects non-finite or
-PCM16-out-of-range audio rather than clipping it, records PCM16 quantization
-statistics, and structurally verifies the finished output. `--resume` starts a
-new pack when the output directory is absent or empty; otherwise it accepts
-only the same interrupted manifest fingerprint and pack settings. Verify later
-without the source datasets using:
+the existing rows with a deterministic seed, records PCM16 quantization
+statistics, and structurally verifies the finished output. Non-finite audio,
+decode/encode failures, missing sources, and I/O failures still stop packing;
+they are never silently dropped. A finite waveform above PCM16 full scale is
+instead stored with a reversible per-sample `amplitude_restore_gain` and
+explicit headroom. The packed streaming loader restores that gain before its
+normal training preprocessing, so this is storage representation only—not
+loudness normalization or a training-distribution change. Every 30 seconds the
+producer reports records, rate, ETA, audio hours, current shard size, and
+scaling totals; adjust it with `--progress-interval-seconds`.
+
+`--resume` starts a new pack when the output directory is absent or empty;
+otherwise it accepts only the same interrupted manifest fingerprint and pack
+settings. Interrupted output made by the original v1 producer (which stopped
+on a peak above one) is migrated in place: only its recorded active partial
+shard is removed, finalized legacy shards/index parts remain intact, and their
+implicit restore gain is one. Verify later without the source datasets using:
 
 ```bash
 uv run python scripts/prepare_audio_shards.py verify \

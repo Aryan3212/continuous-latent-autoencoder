@@ -25,6 +25,7 @@ import pathlib
 import random
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -47,6 +48,11 @@ MAX_SHARD_BYTES = 2 * 1024**3
 # full record, not merely the two blocks, when enforcing the hard 2 GiB cap.
 TAR_FINAL_RECORD_BYTES = tarfile.RECORDSIZE
 MAX_ENCODE_WORKERS = 8
+# Keep explicit headroom below full scale, rather than depending on a backend's
+# treatment of exactly +1.0.  0.1% is far larger than float roundoff but far
+# below any meaningful audio-level change once the loader restores the gain.
+PCM16_STORAGE_PEAK = 0.999
+SCALING_EXAMPLE_LIMIT = 3
 
 
 class PackingError(RuntimeError):
@@ -71,6 +77,9 @@ class EncodedSample:
     frame_count: int
     duration_seconds: float
     quantization: dict[str, float | int]
+    amplitude_restore_gain: float
+    canonical_peak: float
+    storage_peak: float
 
 
 def _strict_json_bytes(value: Any) -> bytes:
@@ -217,6 +226,98 @@ def _empty_quantization() -> dict[str, float | int]:
     }
 
 
+def _empty_amplitude_scaling() -> dict[str, float | int]:
+    """Aggregate reversible PCM16 storage scaling without changing audio semantics."""
+    return {
+        "scaled_sample_count": 0,
+        "max_restore_gain": 1.0,
+        "max_canonical_peak": 0.0,
+    }
+
+
+def _merge_amplitude_scaling(
+    aggregate: dict[str, float | int], sample: dict[str, float | int]
+) -> dict[str, float | int]:
+    return {
+        "scaled_sample_count": int(aggregate["scaled_sample_count"])
+        + int(sample["scaled_sample_count"]),
+        "max_restore_gain": max(
+            float(aggregate["max_restore_gain"]), float(sample["max_restore_gain"])
+        ),
+        "max_canonical_peak": max(
+            float(aggregate["max_canonical_peak"]), float(sample["max_canonical_peak"])
+        ),
+    }
+
+
+def _sample_amplitude_scaling(
+    amplitude_restore_gain: float, canonical_peak: float
+) -> dict[str, float | int]:
+    return {
+        "scaled_sample_count": int(amplitude_restore_gain > 1.0),
+        "max_restore_gain": amplitude_restore_gain,
+        "max_canonical_peak": canonical_peak,
+    }
+
+
+def _same_amplitude_scaling(
+    left: dict[str, float | int], right: dict[str, float | int]
+) -> bool:
+    return (
+        int(left["scaled_sample_count"]) == int(right["scaled_sample_count"])
+        and math.isclose(
+            float(left["max_restore_gain"]),
+            float(right["max_restore_gain"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            float(left["max_canonical_peak"]),
+            float(right["max_canonical_peak"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    )
+
+
+def _amplitude_restore_gain(canonical_peak: float) -> float:
+    """Return the reversible gain needed to keep PCM16 storage below full scale."""
+    if not math.isfinite(canonical_peak) or canonical_peak < 0.0:
+        raise PackingError(f"invalid canonical peak for PCM16 storage scaling: {canonical_peak!r}")
+    if canonical_peak <= PCM16_STORAGE_PEAK:
+        return 1.0
+    # A deliberately larger-than-roundoff cushion keeps float32 source values
+    # below the stated storage peak as well as float64 values.  Storage itself
+    # is calculated in float64 below, so this cannot be lost by a Torch scalar
+    # cast.  The gain is reversed by the packed loader.
+    return math.nextafter(
+        (canonical_peak / PCM16_STORAGE_PEAK) * (1.0 + 1.0e-6), math.inf
+    )
+
+
+def _optional_restore_gain(value: Any, label: str) -> float:
+    """Read a legacy-optional gain while rejecting malformed new metadata."""
+    if value is None:
+        return 1.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PackingError(f"{label} must be a finite numeric value >= 1.0")
+    gain = float(value)
+    if not math.isfinite(gain) or gain < 1.0:
+        raise PackingError(f"{label} must be a finite numeric value >= 1.0")
+    return gain
+
+
+def _optional_nonnegative_float(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PackingError(f"{label} must be a finite non-negative numeric value")
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0:
+        raise PackingError(f"{label} must be a finite non-negative numeric value")
+    return number
+
+
 def _merge_quantization(
     aggregate: dict[str, float | int], sample: dict[str, float | int]
 ) -> dict[str, float | int]:
@@ -275,17 +376,22 @@ def _encode_one(record: InputRecord, sample_rate: int) -> EncodedSample:
         raise PackingError(f"empty waveform for sample {record.sample_id!r} ({record.source_path})")
     if not bool(torch.isfinite(waveform).all().item()):
         raise PackingError(f"non-finite canonical waveform for {record.sample_id!r} ({record.source_path})")
-    peak = float(waveform.abs().max().item())
-    if peak > 1.0:
-        raise PackingError(
-            f"PCM16 would require clipping for {record.sample_id!r} ({record.source_path}); "
-            f"canonical peak is {peak:.9g}, above 1.0"
-        )
-
+    canonical_peak = float(waveform.abs().max().item())
     canonical = waveform.detach().cpu().numpy().astype(np.float64, copy=False)
+    amplitude_restore_gain = _amplitude_restore_gain(canonical_peak)
+    # Store a uniformly scaled copy only when PCM16 needs extra headroom.  The
+    # loader restores this gain before crop/pad/augmentation, so this is not
+    # loudness normalization and does not alter the effective training sample.
+    storage = canonical / amplitude_restore_gain
+    storage_peak = float(np.max(np.abs(storage)))
+    if storage_peak > PCM16_STORAGE_PEAK:
+        raise PackingError(
+            f"internal PCM16 storage scaling failed for {record.sample_id!r}: "
+            f"storage peak {storage_peak:.9g} exceeds {PCM16_STORAGE_PEAK:.9g}"
+        )
     encoded_buffer = io.BytesIO()
     try:
-        sf.write(encoded_buffer, canonical, sample_rate, format="FLAC", subtype="PCM_16")
+        sf.write(encoded_buffer, storage, sample_rate, format="FLAC", subtype="PCM_16")
         encoded = encoded_buffer.getvalue()
         # Decode what was encoded, rather than estimating error from an assumed
         # PCM mapping.  This catches encoder/backend changes as well.
@@ -306,7 +412,8 @@ def _encode_one(record: InputRecord, sample_rate: int) -> EncodedSample:
             f"rate={info.samplerate}, channels={info.channels}, subtype={info.subtype}, "
             f"decoded_frames={decoded.size}, expected_frames={canonical.size}"
         )
-    difference = decoded - canonical
+    restored = decoded * amplitude_restore_gain
+    difference = restored - canonical
     squared_error = float(np.dot(difference, difference))
     squared_signal = float(np.dot(canonical, canonical))
     quantization = {
@@ -330,6 +437,9 @@ def _encode_one(record: InputRecord, sample_rate: int) -> EncodedSample:
             "canonical_subtype": "PCM_16",
             "canonical_frame_count": int(canonical.size),
             "canonical_duration_seconds": float(canonical.size / sample_rate),
+            "canonical_peak": canonical_peak,
+            "storage_peak": storage_peak,
+            "amplitude_restore_gain": amplitude_restore_gain,
         },
     }
     return EncodedSample(
@@ -339,6 +449,9 @@ def _encode_one(record: InputRecord, sample_rate: int) -> EncodedSample:
         frame_count=int(canonical.size),
         duration_seconds=float(canonical.size / sample_rate),
         quantization=quantization,
+        amplitude_restore_gain=amplitude_restore_gain,
+        canonical_peak=canonical_peak,
+        storage_peak=storage_peak,
     )
 
 
@@ -394,17 +507,32 @@ def _state_contract(
         "target_shard_size_bytes": target_shard_size_bytes,
         "seed": seed,
         "record_count": record_count,
-        "preprocessing": {
-            "decode": "torchaudio.load",
-            "channel_conversion": "mean channels to mono before resampling",
-            "resample": "torchaudio.transforms.Resample(source_rate, target_rate) defaults",
-            "crop_or_pad": "none; full utterance is stored",
-            "normalization": "none",
-            "silence_removal": "none",
-            "filtering": "none",
-            "output": "FLAC PCM_16, mono, target sample rate",
-            "out_of_range_policy": "fail if canonical absolute peak exceeds 1.0; never clip",
-        },
+        "preprocessing": _current_preprocessing_contract(),
+    }
+
+
+def _legacy_preprocessing_contract() -> dict[str, str]:
+    """The published v1 contract before reversible PCM16 storage scaling."""
+    return {
+        "decode": "torchaudio.load",
+        "channel_conversion": "mean channels to mono before resampling",
+        "resample": "torchaudio.transforms.Resample(source_rate, target_rate) defaults",
+        "crop_or_pad": "none; full utterance is stored",
+        "normalization": "none",
+        "silence_removal": "none",
+        "filtering": "none",
+        "output": "FLAC PCM_16, mono, target sample rate",
+        "out_of_range_policy": "fail if canonical absolute peak exceeds 1.0; never clip",
+    }
+
+
+def _current_preprocessing_contract() -> dict[str, str]:
+    return {
+        **_legacy_preprocessing_contract(),
+        "out_of_range_policy": (
+            "reversible per-sample storage scaling below PCM16 full scale; never clip"
+        ),
+        "storage_peak_limit": f"{PCM16_STORAGE_PEAK:.9g}",
     }
 
 
@@ -418,7 +546,7 @@ def _new_state(contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _assert_resume_contract(state: dict[str, Any], contract: dict[str, Any]) -> None:
+def _resume_preprocessing_version(state: dict[str, Any], contract: dict[str, Any]) -> str:
     for field in (
         "format_version",
         "manifest_sha256",
@@ -426,13 +554,56 @@ def _assert_resume_contract(state: dict[str, Any], contract: dict[str, Any]) -> 
         "target_shard_size_bytes",
         "seed",
         "record_count",
-        "preprocessing",
     ):
         if state.get(field) != contract.get(field):
             raise PackingError(
                 f"cannot resume: {field} differs from the interrupted packing state; "
                 "use the original manifest and pack settings, or choose a new output directory"
             )
+    preprocessing = state.get("preprocessing")
+    if preprocessing == contract["preprocessing"]:
+        return "current"
+    if preprocessing == _legacy_preprocessing_contract():
+        return "legacy"
+    raise PackingError(
+        "cannot resume: preprocessing differs from the supported packing contracts; "
+        "use a new output directory"
+    )
+
+
+def _normalise_legacy_scaling_stats(shard: dict[str, Any]) -> None:
+    """Add zero/one defaults for v1 shards that predate storage scaling."""
+    scaling = shard.get("amplitude_scaling")
+    if scaling is None:
+        shard["amplitude_scaling"] = _empty_amplitude_scaling()
+        return
+    if not isinstance(scaling, dict):
+        raise PackingError("invalid amplitude_scaling in interrupted packing state")
+    try:
+        scaled_count = int(scaling["scaled_sample_count"])
+        max_gain = float(scaling["max_restore_gain"])
+        max_peak = float(scaling["max_canonical_peak"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PackingError("invalid amplitude_scaling in interrupted packing state") from exc
+    if scaled_count < 0 or not math.isfinite(max_gain) or max_gain < 1.0 or not math.isfinite(max_peak):
+        raise PackingError("invalid amplitude_scaling in interrupted packing state")
+
+
+def _migrate_legacy_interrupted_state(state: dict[str, Any], contract: dict[str, Any]) -> None:
+    """Upgrade the known v1 failure-on-peak state without redoing finalized shards."""
+    shards = state.get("shards")
+    if not isinstance(shards, list):
+        raise PackingError("invalid shards in interrupted packing state")
+    for shard in shards:
+        if not isinstance(shard, dict):
+            raise PackingError("invalid shard in interrupted packing state")
+        _normalise_legacy_scaling_stats(shard)
+    state["preprocessing"] = contract["preprocessing"]
+    print(
+        "[packed-shards] migrating interrupted legacy v1 state to reversible PCM16 "
+        "storage scaling; finalized shards remain unchanged",
+        flush=True,
+    )
 
 
 def _remove_active_partial(output_dir: pathlib.Path, state: dict[str, Any]) -> None:
@@ -473,14 +644,22 @@ def _initialize_output(
         # populated directory is unrelated and is never reused.
         if descriptor_path.exists():
             descriptor = _load_json(descriptor_path)
-            _assert_resume_contract(descriptor, contract)
+            version = _resume_preprocessing_version(descriptor, contract)
+            if version == "legacy":
+                print(
+                    "[packed-shards] existing legacy v1 output has no reversible scaling metadata; "
+                    "verifying it unchanged with restore gain defaulting to 1.0",
+                    flush=True,
+                )
             return {"complete": True, "descriptor": descriptor}
 
         # Case 2: a matching state file means a prior pack was interrupted.
         # Reconcile only the producer-owned active shard named by that state.
         if state_path.is_file():
             state = _load_json(state_path)
-            _assert_resume_contract(state, contract)
+            version = _resume_preprocessing_version(state, contract)
+            if version == "legacy":
+                _migrate_legacy_interrupted_state(state, contract)
             _remove_active_partial(output_dir, state)
             _atomic_write_json(state_path, state)
             return state
@@ -533,6 +712,7 @@ def _finalize_shard(
     payload_bytes: int,
     duration_seconds: float,
     quantization: dict[str, float | int],
+    amplitude_scaling: dict[str, float | int],
 ) -> None:
     temp_path = output_dir / SHARDS_DIRNAME / f".{name}.tar.tmp"
     archive.close()
@@ -560,6 +740,7 @@ def _finalize_shard(
         "tar_bytes": tar_bytes,
         "duration_seconds": duration_seconds,
         "quantization": quantization,
+        "amplitude_scaling": amplitude_scaling,
     }
     state["shards"].append(shard)
     state["next_record"] = int(state["next_record"]) + len(index_rows)
@@ -633,8 +814,13 @@ def _build_descriptor(contract: dict[str, Any], state: dict[str, Any]) -> dict[s
         for shard in state["shards"]
     ]
     raw_quantization = _empty_quantization()
+    raw_amplitude_scaling = _empty_amplitude_scaling()
     for shard in shards:
         raw_quantization = _merge_quantization(raw_quantization, shard["quantization"])
+        raw_amplitude_scaling = _merge_amplitude_scaling(
+            raw_amplitude_scaling,
+            _shard_amplitude_scaling(shard),
+        )
     return {
         **contract,
         "kind": "continuous-latent-ae-audio-tar-shards",
@@ -649,9 +835,36 @@ def _build_descriptor(contract: dict[str, Any], state: dict[str, Any]) -> dict[s
             "total_audio_payload_bytes": sum(int(shard["audio_payload_bytes"]) for shard in shards),
         },
         "quantization": _finalize_quantization(raw_quantization),
+        "amplitude_scaling": raw_amplitude_scaling,
         "shards": shards,
         "index": INDEX_FILENAME,
     }
+
+
+def _shard_amplitude_scaling(shard: dict[str, Any]) -> dict[str, float | int]:
+    """Legacy finalized v1 shards have no scaling fields and imply gain 1.0."""
+    scaling = shard.get("amplitude_scaling")
+    if scaling is None:
+        return _empty_amplitude_scaling()
+    if not isinstance(scaling, dict):
+        raise PackingError("invalid amplitude_scaling in shard metadata")
+    try:
+        normalized = {
+            "scaled_sample_count": int(scaling["scaled_sample_count"]),
+            "max_restore_gain": float(scaling["max_restore_gain"]),
+            "max_canonical_peak": float(scaling["max_canonical_peak"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PackingError("invalid amplitude_scaling in shard metadata") from exc
+    if (
+        normalized["scaled_sample_count"] < 0
+        or not math.isfinite(float(normalized["max_restore_gain"]))
+        or float(normalized["max_restore_gain"]) < 1.0
+        or not math.isfinite(float(normalized["max_canonical_peak"]))
+        or float(normalized["max_canonical_peak"]) < 0.0
+    ):
+        raise PackingError("invalid amplitude_scaling in shard metadata")
+    return normalized
 
 
 def pack(args: argparse.Namespace) -> None:
@@ -663,6 +876,8 @@ def pack(args: argparse.Namespace) -> None:
         raise PackingError("--target-shard-size-gb must be between 0.5 and 2.0 GiB")
     if not 1 <= args.workers <= MAX_ENCODE_WORKERS:
         raise PackingError(f"--workers must be between 1 and {MAX_ENCODE_WORKERS}")
+    if args.progress_interval_seconds <= 0.0:
+        raise PackingError("--progress-interval-seconds must be positive")
     inventory = read_inventory(manifest_path)
     # A deterministic global shuffle mixes source datasets, speakers, and
     # durations statistically without reading audio twice or changing the split.
@@ -680,7 +895,7 @@ def pack(args: argparse.Namespace) -> None:
     state = _initialize_output(output_dir, contract, args.resume)
     if state.get("complete"):
         verify_output(output_dir)
-        print(f"[packed-shards] existing verified output: {output_dir}")
+        print(f"[packed-shards] existing verified output: {output_dir}", flush=True)
         return
 
     start = int(state["next_record"])
@@ -690,6 +905,17 @@ def pack(args: argparse.Namespace) -> None:
     # one-thread intra-op pool prevents four workers from multiplying into the
     # host's full CPU thread count.  This is set before any worker is created.
     torch.set_num_threads(1)
+    prior_duration_seconds = sum(float(shard["duration_seconds"]) for shard in state["shards"])
+    prior_scaling = _empty_amplitude_scaling()
+    for shard in state["shards"]:
+        prior_scaling = _merge_amplitude_scaling(prior_scaling, _shard_amplitude_scaling(shard))
+    print(
+        "[packed-shards] start: "
+        f"records={len(inventory)}, resume_record={start}, workers={args.workers}, "
+        f"target_shard_gib={target_bytes / 1024**3:.3f}, "
+        f"manifest_sha256={contract['manifest_sha256']}, output={output_dir}",
+        flush=True,
+    )
     encoder = OrderedEncoder(inventory, start, args.sample_rate, args.workers)
     name: str | None = None
     tar_path: pathlib.Path | None = None
@@ -700,10 +926,43 @@ def pack(args: argparse.Namespace) -> None:
     estimated_bytes = 0
     duration_seconds = 0.0
     quantization = _empty_quantization()
+    amplitude_scaling = _empty_amplitude_scaling()
+    started_at = time.monotonic()
+    next_progress_at = started_at + args.progress_interval_seconds
+    processed_since_start = 0
+    scaled_examples_logged = 0
+
+    def log_progress(force: bool = False) -> None:
+        nonlocal next_progress_at
+        now = time.monotonic()
+        if not force and now < next_progress_at:
+            return
+        elapsed = max(now - started_at, EPSILON)
+        processed = start + processed_since_start
+        rate = processed_since_start / elapsed
+        remaining = len(inventory) - processed
+        eta = (remaining / rate) if rate > 0.0 else None
+        total_duration = prior_duration_seconds + duration_seconds
+        total_scaling = _merge_amplitude_scaling(prior_scaling, amplitude_scaling)
+        eta_text = f"{eta / 60.0:.1f}m" if eta is not None else "estimating"
+        current_gib = estimated_bytes / 1024**3
+        print(
+            "[packed-shards] progress: "
+            f"{processed}/{len(inventory)} ({(100.0 * processed / len(inventory)):.2f}%), "
+            f"{rate:.2f} samples/s, elapsed={elapsed / 60.0:.1f}m, eta={eta_text}, "
+            f"audio={total_duration / 3600.0:.2f}h, completed_shards={len(state['shards'])}, "
+            f"current_shard={current_gib:.3f} GiB, "
+            f"scaled={int(total_scaling['scaled_sample_count'])}, "
+            f"max_gain={float(total_scaling['max_restore_gain']):.7g}",
+            flush=True,
+        )
+        while next_progress_at <= now:
+            next_progress_at += args.progress_interval_seconds
 
     def finish_current() -> None:
         nonlocal name, tar_path, part_path, archive, index_rows, payload_bytes
-        nonlocal estimated_bytes, duration_seconds, quantization
+        nonlocal estimated_bytes, duration_seconds, quantization, amplitude_scaling
+        nonlocal prior_duration_seconds, prior_scaling
         if archive is None or name is None or tar_path is None or part_path is None:
             return
         _finalize_shard(
@@ -717,17 +976,27 @@ def pack(args: argparse.Namespace) -> None:
             payload_bytes,
             duration_seconds,
             quantization,
+            amplitude_scaling,
         )
-        print(f"[packed-shards] finalized {name}: {len(index_rows)} samples")
+        tar_gib = (output_dir / SHARDS_DIRNAME / f"{name}.tar").stat().st_size / 1024**3
+        print(
+            f"[packed-shards] finalized {name}: {len(index_rows)} samples, "
+            f"{tar_gib:.3f} GiB TAR, {duration_seconds / 3600.0:.2f} audio hours",
+            flush=True,
+        )
+        prior_duration_seconds += duration_seconds
+        prior_scaling = _merge_amplitude_scaling(prior_scaling, amplitude_scaling)
         name = tar_path = part_path = archive = None
         index_rows = []
         payload_bytes = 0
         estimated_bytes = 0
         duration_seconds = 0.0
         quantization = _empty_quantization()
+        amplitude_scaling = _empty_amplitude_scaling()
 
     try:
         for sample in encoder:
+            processed_since_start += 1
             proposed_bytes = _estimated_member_bytes(sample)
             if proposed_bytes + TAR_FINAL_RECORD_BYTES > MAX_SHARD_BYTES:
                 raise PackingError(
@@ -757,12 +1026,29 @@ def pack(args: argparse.Namespace) -> None:
                     "source_dataset": sample.record.source_dataset,
                     "frame_count": sample.frame_count,
                     "encoded_byte_size": len(sample.audio),
+                    "amplitude_restore_gain": sample.amplitude_restore_gain,
+                    "canonical_peak": sample.canonical_peak,
+                    "storage_peak": sample.storage_peak,
                 }
             )
             payload_bytes += len(sample.audio)
             estimated_bytes += proposed_bytes
             duration_seconds += sample.duration_seconds
             quantization = _merge_quantization(quantization, sample.quantization)
+            amplitude_scaling = _merge_amplitude_scaling(
+                amplitude_scaling,
+                _sample_amplitude_scaling(sample.amplitude_restore_gain, sample.canonical_peak),
+            )
+            if sample.amplitude_restore_gain > 1.0 and scaled_examples_logged < SCALING_EXAMPLE_LIMIT:
+                print(
+                    "[packed-shards] scaled storage example: "
+                    f"id={sample.record.sample_id!r}, path={sample.record.source_path}, "
+                    f"canonical_peak={sample.canonical_peak:.7g}, "
+                    f"restore_gain={sample.amplitude_restore_gain:.7g}",
+                    flush=True,
+                )
+                scaled_examples_logged += 1
+            log_progress()
         finish_current()
     except BaseException:
         if archive is not None:
@@ -783,8 +1069,12 @@ def pack(args: argparse.Namespace) -> None:
     os.replace(pending_descriptor, output_dir / DESCRIPTOR_FILENAME)
     _cleanup_completed_state(output_dir, state)
     print(
-        f"[packed-shards] verified {descriptor['counts']['samples']} samples in "
-        f"{descriptor['counts']['shards']} shards: {output_dir}"
+        f"[packed-shards] complete: {descriptor['counts']['samples']} samples in "
+        f"{descriptor['counts']['shards']} shards, "
+        f"{descriptor['counts']['total_duration_seconds'] / 3600.0:.2f} audio hours, "
+        f"scaled={descriptor['amplitude_scaling']['scaled_sample_count']}, "
+        f"max_gain={descriptor['amplitude_scaling']['max_restore_gain']:.7g}: {output_dir}",
+        flush=True,
     )
 
 
@@ -878,6 +1168,15 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
             or row["json_member"] != f"samples/{expected_stem}.json"
         ):
             raise PackingError(f"member key does not match stable sample ID for {sample_id}")
+        _optional_restore_gain(row.get("amplitude_restore_gain"), f"index restore gain for {sample_id}")
+        row_canonical_peak = _optional_nonnegative_float(
+            row.get("canonical_peak"), f"index canonical peak for {sample_id}"
+        )
+        row_storage_peak = _optional_nonnegative_float(
+            row.get("storage_peak"), f"index storage peak for {sample_id}"
+        )
+        if (row_canonical_peak is None) != (row_storage_peak is None):
+            raise PackingError(f"index peak fields must both be present or absent for {sample_id}")
         if pathlib.PurePosixPath(row["flac_member"]).with_suffix("") != pathlib.PurePosixPath(
             row["json_member"]
         ).with_suffix(""):
@@ -889,6 +1188,7 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
     descriptor_paths: set[str] = set()
     total_duration = 0.0
     total_tar_bytes = 0
+    total_amplitude_scaling = _empty_amplitude_scaling()
     for shard in shards:
         if not isinstance(shard, dict):
             raise PackingError("descriptor shard entry is not an object")
@@ -899,6 +1199,9 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
         rows = referenced_by_shard.get(relative, [])
         if len(rows) != shard.get("count"):
             raise PackingError(f"index count mismatch for {relative}")
+        shard_scaling = _shard_amplitude_scaling(shard)
+        if int(shard_scaling["scaled_sample_count"]) > int(shard["count"]):
+            raise PackingError(f"scaled sample count exceeds shard sample count for {relative}")
         tar_path = output_dir / relative
         if not tar_path.is_file():
             raise PackingError(f"missing shard: {tar_path}")
@@ -915,6 +1218,7 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
                 expected = {row["flac_member"] for row in rows} | {row["json_member"] for row in rows}
                 if set(names) != expected:
                     raise PackingError(f"TAR members do not match index for {relative}")
+                observed_scaling = _empty_amplitude_scaling()
                 for row in rows:
                     flac = archive.getmember(row["flac_member"])
                     metadata = archive.getmember(row["json_member"])
@@ -954,8 +1258,61 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
                         raise PackingError(f"metadata canonical fields mismatch for {row['sample_id']}")
                     if not isinstance(packed_meta.get("original"), dict):
                         raise PackingError(f"metadata original row missing for {row['sample_id']}")
+                    row_gain = _optional_restore_gain(
+                        row.get("amplitude_restore_gain"), f"index restore gain for {row['sample_id']}"
+                    )
+                    packed_gain = _optional_restore_gain(
+                        packed.get("amplitude_restore_gain"),
+                        f"metadata restore gain for {row['sample_id']}",
+                    )
+                    if not math.isclose(row_gain, packed_gain, rel_tol=0.0, abs_tol=1e-12):
+                        raise PackingError(f"restore gain mismatch for {row['sample_id']}")
+                    row_canonical_peak = _optional_nonnegative_float(
+                        row.get("canonical_peak"), f"index canonical peak for {row['sample_id']}"
+                    )
+                    packed_canonical_peak = _optional_nonnegative_float(
+                        packed.get("canonical_peak"),
+                        f"metadata canonical peak for {row['sample_id']}",
+                    )
+                    row_storage_peak = _optional_nonnegative_float(
+                        row.get("storage_peak"), f"index storage peak for {row['sample_id']}"
+                    )
+                    packed_storage_peak = _optional_nonnegative_float(
+                        packed.get("storage_peak"),
+                        f"metadata storage peak for {row['sample_id']}",
+                    )
+                    if (packed_canonical_peak is None) != (packed_storage_peak is None):
+                        raise PackingError(
+                            f"metadata peak fields must both be present or absent for {row['sample_id']}"
+                        )
+                    if (row_canonical_peak is None) != (packed_canonical_peak is None) or (
+                        row_storage_peak is None
+                    ) != (packed_storage_peak is None):
+                        raise PackingError(f"peak metadata presence mismatch for {row['sample_id']}")
+                    if row_canonical_peak is not None and (
+                        not math.isclose(
+                            row_canonical_peak, packed_canonical_peak, rel_tol=0.0, abs_tol=1e-12
+                        )
+                        or not math.isclose(
+                            row_storage_peak, packed_storage_peak, rel_tol=0.0, abs_tol=1e-12
+                        )
+                        or packed_storage_peak > PCM16_STORAGE_PEAK
+                    ):
+                        raise PackingError(f"peak metadata mismatch or unsafe storage peak for {row['sample_id']}")
+                    observed_scaling = _merge_amplitude_scaling(
+                        observed_scaling,
+                        _sample_amplitude_scaling(
+                            packed_gain,
+                            packed_canonical_peak if packed_canonical_peak is not None else 0.0,
+                        ),
+                    )
         except tarfile.TarError as exc:
             raise PackingError(f"invalid or compressed TAR {relative}: {exc}") from exc
+        if not _same_amplitude_scaling(shard_scaling, observed_scaling):
+            raise PackingError(f"declared amplitude scaling does not match samples in {relative}")
+        total_amplitude_scaling = _merge_amplitude_scaling(
+            total_amplitude_scaling, observed_scaling
+        )
         total_duration += float(shard["duration_seconds"])
         total_tar_bytes += int(shard["tar_bytes"])
     if set(referenced_by_shard) != descriptor_paths:
@@ -964,6 +1321,11 @@ def verify_output(output_dir: pathlib.Path, descriptor_path: pathlib.Path | None
         raise PackingError("descriptor total duration does not match shards")
     if total_tar_bytes != int(counts["total_tar_bytes"]):
         raise PackingError("descriptor total TAR bytes do not match shards")
+    descriptor_scaling = descriptor.get("amplitude_scaling")
+    if descriptor_scaling is not None:
+        declared_scaling = _shard_amplitude_scaling({"amplitude_scaling": descriptor_scaling})
+        if not _same_amplitude_scaling(declared_scaling, total_amplitude_scaling):
+            raise PackingError("descriptor amplitude scaling does not match shards")
     print(f"[packed-shards] verification passed: {len(index_rows)} samples, {len(shards)} shards")
 
 
@@ -977,6 +1339,12 @@ def build_parser() -> argparse.ArgumentParser:
     pack_parser.add_argument("--target-shard-size-gb", type=float, default=1.0)
     pack_parser.add_argument("--workers", type=int, default=4, help="bounded CPU decode/encode workers")
     pack_parser.add_argument("--seed", type=int, default=42, help="deterministic manifest shuffle seed")
+    pack_parser.add_argument(
+        "--progress-interval-seconds",
+        type=float,
+        default=30.0,
+        help="emit elapsed/rate/ETA packing progress at this positive interval (default: 30)",
+    )
     pack_parser.add_argument(
         "--resume",
         action="store_true",

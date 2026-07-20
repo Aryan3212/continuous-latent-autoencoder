@@ -110,11 +110,17 @@ future streaming data backend. It treats an existing combined training JSONL as
 the sole inventory, performs the current load → channel-mean → default
 torchaudio resample sequence on each complete utterance, and writes mono 16 kHz
 PCM16 FLAC members into uncompressed TAR shards. It records a versioned
-`shard_manifest.json` plus `index.jsonl`, rejects values that would need PCM16
-clipping, records actual encode/decode quantization error, supports safe resume,
-and verifies finished archives. `--resume` is safe start-or-resume for an empty
-or matching interrupted output only. It does not alter the current training loader
-or make `train.py` consume shards yet.
+`shard_manifest.json` plus `index.jsonl`, records actual encode/decode
+quantization error, supports safe resume, and verifies finished archives.
+Finite canonical peaks outside PCM16's range are held in a reversible
+per-sample storage scale (recorded as `amplitude_restore_gain` alongside
+canonical/storage peaks); the planned packed loader restores it before normal
+training preprocessing, so no loudness normalization or training-distribution
+change is introduced. Non-finite/corrupt/missing sources still fail rather than
+being silently dropped. `--resume` is safe start-or-resume for an empty or
+matching interrupted output only; it migrates the original v1 interrupted
+failure-on-peak state without redoing finalized shards. It does not alter the
+current training loader or make `train.py` consume shards yet.
 
 `scripts/housekeeping.py make-manifests` is also the combined data-preparation
 path. It uses bounded thread pools for dataset downloads, OpenSLR shards,

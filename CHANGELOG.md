@@ -4,6 +4,27 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-20
 
+**Reversible PCM16 shard storage scaling and packing progress**
+
+- **`scripts/prepare_audio_shards.py`**: finite canonical waveforms that exceed
+  PCM16 full scale now receive a reversible per-sample storage scale with
+  explicit headroom, rather than aborting or clipping. Packed metadata and the
+  index record `amplitude_restore_gain` plus canonical/storage peaks; measured
+  quantization error is calculated after decoding and restoring that gain. The
+  descriptor records per-shard and total scaling counts/maxima. The future
+  packed loader must restore the gain before its existing preprocessing, which
+  keeps this out of the training distribution.
+- **Resume/verification**: `--resume` explicitly upgrades the original v1
+  interrupted failure-on-peak state after removing only its active partial
+  shard; finalized v1 shards/index parts remain valid with an implicit gain of
+  one. Completed legacy descriptors continue to verify. Corrupt, non-finite,
+  missing, decode, encode, and I/O failures remain fail-fast and are never
+  silently skipped.
+- **Observability**: packing now logs startup provenance, periodic throughput,
+  ETA, audio hours, shard size, and scaling totals, plus a bounded number of
+  scaled examples and detailed shard/completion summaries. Added
+  `--progress-interval-seconds` (30 seconds by default).
+
 **Resumable canonical audio TAR-shard producer**
 
 - **`scripts/prepare_audio_shards.py`**: added an opt-in, manifest-authoritative
