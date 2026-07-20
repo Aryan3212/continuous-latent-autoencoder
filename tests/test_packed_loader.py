@@ -12,6 +12,7 @@ from data_loading import (
     PackedTarDataset,
     _packed_buffer_requires_eviction,
     _packed_safe_relative_path,
+    packed_metadata_restore_gain,
     packed_epoch_assignment,
 )
 from schema import DataCfg
@@ -25,6 +26,25 @@ def _shards(counts: list[int]) -> list[PackedShard]:
 
 
 class PackedLoaderTests(unittest.TestCase):
+    def test_optional_storage_gain_is_legacy_safe_and_strict_when_present(self) -> None:
+        self.assertEqual(packed_metadata_restore_gain({}), 1.0)
+        metadata = {
+            "amplitude_restore_gain": 1.25,
+            "canonical_peak": 1.1,
+            "storage_peak": 0.88,
+        }
+        self.assertEqual(packed_metadata_restore_gain(metadata), 1.25)
+        with self.assertRaisesRegex(PackedShardError, "present together"):
+            packed_metadata_restore_gain({"amplitude_restore_gain": 1.25})
+        with self.assertRaisesRegex(PackedShardError, "numeric"):
+            packed_metadata_restore_gain(
+                {"amplitude_restore_gain": True, "canonical_peak": 1.0, "storage_peak": 0.9}
+            )
+        with self.assertRaisesRegex(PackedShardError, "at least 1"):
+            packed_metadata_restore_gain(
+                {"amplitude_restore_gain": 0.9, "canonical_peak": 1.0, "storage_peak": 0.9}
+            )
+
     def test_scheduler_state_restores_only_for_matching_schedule_inputs(self) -> None:
         saved = train._ScheduleInputs(lr=1.0e-3, warmup_steps=5_000, total_steps=100_000, min_lr_ratio=0.0)
         self.assertTrue(train._schedule_inputs_match(saved, saved))

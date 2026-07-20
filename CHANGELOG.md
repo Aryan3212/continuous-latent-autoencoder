@@ -34,6 +34,9 @@ Date format: `YYYY-MM-DD`
   byte-budgeted compressed shuffle, and emits equal complete-batch quotas so
   DDP ranks exhaust together. It verifies canonical 16 kHz mono PCM16 FLAC,
   then retains established crop/pad behavior and original manifest metadata.
+  It restores optional validated per-sample storage scaling before crop/pad;
+  legacy shards omit this metadata and imply gain 1, while `data.backend=files`
+  remains unaffected.
 - **Resume**: future checkpoints now include scheduler state and packed data
   epoch. Scheduler state restores only when schedule inputs still match;
   legacy or changed-schedule resumes keep the current closed-form fallback.

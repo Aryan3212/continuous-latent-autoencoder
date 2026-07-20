@@ -185,6 +185,47 @@ def _packed_buffer_requires_eviction(
     return item_count > 1 and buffered_bytes > byte_budget
 
 
+def packed_metadata_restore_gain(packed: dict[str, Any]) -> float:
+    """Validate optional v1 storage scaling and return its training-time inverse.
+
+    Finalized shards produced before reversible scaling have none of these
+    fields and therefore retain their original PCM16 behavior with gain 1.
+    New metadata is all-or-nothing so a partial/corrupt wrapper cannot silently
+    alter waveform amplitude.
+    """
+    field_names = ("amplitude_restore_gain", "canonical_peak", "storage_peak")
+    present = {name: name in packed for name in field_names}
+    if not any(present.values()):
+        return 1.0
+    if not all(present.values()):
+        raise PackedShardError("packed amplitude metadata must be present together")
+    gain = packed["amplitude_restore_gain"]
+    canonical_peak = packed["canonical_peak"]
+    storage_peak = packed["storage_peak"]
+    numeric = (gain, canonical_peak, storage_peak)
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in numeric):
+        raise PackedShardError("packed amplitude metadata must be numeric, not boolean")
+    gain = float(gain)
+    canonical_peak = float(canonical_peak)
+    storage_peak = float(storage_peak)
+    if not all(math.isfinite(value) for value in (gain, canonical_peak, storage_peak)):
+        raise PackedShardError("packed amplitude metadata must be finite")
+    if gain < 1.0:
+        raise PackedShardError("packed amplitude_restore_gain must be at least 1")
+    if canonical_peak < 0.0 or storage_peak < 0.0:
+        raise PackedShardError("packed peak metadata must be non-negative")
+    # PCM16 samples are normalized to at most full scale. The producer stores
+    # explicit headroom below it, but the loader intentionally does not require
+    # that producer-internal threshold to preserve the public v1 contract.
+    if storage_peak > 1.0:
+        raise PackedShardError("packed storage_peak exceeds PCM16 full scale")
+    if canonical_peak < storage_peak:
+        raise PackedShardError("packed canonical_peak cannot be below storage_peak")
+    if gain > 1.0 and canonical_peak <= storage_peak:
+        raise PackedShardError("scaled packed metadata has inconsistent peaks")
+    return gain
+
+
 class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
     """Streaming, duplicate-free TAR dataset for canonical PCM16 FLAC shards."""
 
@@ -319,6 +360,7 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
             or packed["canonical_frame_count"] <= 0
         ):
             raise PackedShardError(f"invalid canonical metadata for {second.name!r}")
+        packed_metadata_restore_gain(packed)
         return audio, wrapper
 
     def _decode_and_crop(
@@ -343,6 +385,9 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
                 "packed FLAC violates canonical rate/channel/frame contract for "
                 f"{packed.get('sample_id')!r}"
             )
+        # This reverses storage-only PCM16 scaling before the exact existing
+        # crop/pad path. It is deliberately not a clamp or normalization.
+        wav = wav * packed_metadata_restore_gain(packed)
         tensor = torch.from_numpy(wav[:, 0].copy())
         if self.random_crop:
             if tensor.numel() < self.num_samples:

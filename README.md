@@ -142,7 +142,9 @@ inventory. The loader does not read `index.jsonl` during training. Each packed
 epoch uses a fresh deterministic shard order, assigns every shard to one global
 rank/worker consumer, emits an equal complete-batch quota per consumer, and
 starts a fresh randomized epoch after resume rather than replaying a sample
-position.
+position. Legacy shards without storage-scaling fields imply gain 1; newer
+shards restore their validated per-sample gain before crop/pad, so the file
+backend and effective training amplitude remain unchanged.
 
 The producer accepts 1–8 packing workers (four is the HDD-safe starting point)
 and pins Torch intra-op work to one thread per worker to avoid CPU

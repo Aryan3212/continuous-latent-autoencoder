@@ -126,7 +126,8 @@ Finite canonical peaks outside PCM16's range are held in a reversible
 per-sample storage scale (recorded as `amplitude_restore_gain` alongside
 canonical/storage peaks); `PackedTarDataset` restores it before normal
 training preprocessing, so no loudness normalization or training-distribution
-change is introduced. Non-finite/corrupt/missing sources still fail rather than
+change is introduced. Legacy shards omit those optional fields and use gain 1;
+the default file backend is unaffected. Non-finite/corrupt/missing sources still fail rather than
 being silently dropped. `--resume` is safe start-or-resume for an empty or
 matching interrupted output only; it migrates the original v1 interrupted
 failure-on-peak state without redoing finalized shards. The optional
