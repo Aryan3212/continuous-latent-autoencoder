@@ -4,6 +4,15 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-20
 
+**Packed source-parity audit**
+
+- **`scripts/prepare_audio_shards.py audit`**: added a read-only,
+  deterministic reservoir-sampling audit for packed outputs whose original
+  sources remain mounted. It decodes each selected FLAC exactly as the TAR
+  loader does, restores the validated storage gain, re-applies the producer's
+  source load → mono → resample path, and reports the exact sample ID, shard,
+  and source path for waveforms over the configurable error threshold.
+
 **Reversible PCM16 shard storage scaling and packing progress**
 
 - **`scripts/prepare_audio_shards.py`**: finite canonical waveforms that exceed

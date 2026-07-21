@@ -118,6 +118,23 @@ uv run python scripts/prepare_audio_shards.py verify \
   --output-dir staging/packed/train
 ```
 
+When the original source files are still mounted, compare a deterministic
+sample of the training-time TAR decode against the exact source load → mono →
+resample path. This is read-only; run it while the training loader is idle so
+it does not contend for disk bandwidth:
+
+```bash
+uv run python scripts/prepare_audio_shards.py audit \
+  --output-dir staging/packed/train \
+  --samples 256 \
+  --seed 42
+```
+
+The command scopes its default sample to one deterministic random shard, so it
+does not scan the whole archive set. Increase `--shards` after an initial pass.
+It prints aggregate max/RMS waveform error and names every sampled record above
+its `--max-abs-error` threshold (default `1e-3`).
+
 This producer is backward-compatible with the current file-backed training
 workflow. To train from the packed representation, use the compatible
 `large_2kh_packed.yaml` variant and the same step-40k checkpoint. It leaves

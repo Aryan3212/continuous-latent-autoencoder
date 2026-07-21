@@ -390,25 +390,9 @@ def _finalize_quantization(raw: dict[str, float | int]) -> dict[str, float | int
 
 def _encode_one(record: InputRecord, sample_rate: int) -> EncodedSample:
     """Canonicalize one complete utterance using the current loader's order."""
-    try:
-        waveform, source_rate = torchaudio.load(str(record.source_path))
-    except Exception as exc:  # pragma: no cover - exercised on remote audio files
-        raise PackingError(
-            f"failed to decode sample {record.sample_id!r} from {record.source_path}: {exc}"
-        ) from exc
-    if waveform.ndim > 1:
-        waveform = waveform.mean(dim=0)
-    else:
-        waveform = waveform.flatten()
-    if int(source_rate) != sample_rate:
-        waveform = torchaudio.transforms.Resample(int(source_rate), sample_rate)(waveform)
-    waveform = waveform.contiguous()
-    if waveform.numel() == 0:
-        raise PackingError(f"empty waveform for sample {record.sample_id!r} ({record.source_path})")
-    if not bool(torch.isfinite(waveform).all().item()):
-        raise PackingError(f"non-finite canonical waveform for {record.sample_id!r} ({record.source_path})")
-    canonical_peak = float(waveform.abs().max().item())
-    canonical = waveform.detach().cpu().numpy().astype(np.float64, copy=False)
+    waveform = _load_canonical_waveform(record, sample_rate)
+    canonical_peak = float(np.max(np.abs(waveform)))
+    canonical = waveform.astype(np.float64, copy=False)
     amplitude_restore_gain = _amplitude_restore_gain(canonical_peak)
     # Store a uniformly scaled copy only when PCM16 needs extra headroom.  The
     # loader restores this gain before crop/pad/augmentation, so this is not
@@ -484,6 +468,31 @@ def _encode_one(record: InputRecord, sample_rate: int) -> EncodedSample:
         canonical_peak=canonical_peak,
         storage_peak=storage_peak,
     )
+
+
+def _load_canonical_waveform(record: InputRecord, sample_rate: int) -> np.ndarray:
+    """Load a source exactly as the file-backed loader and packer do."""
+    try:
+        waveform, source_rate = torchaudio.load(str(record.source_path))
+    except Exception as exc:  # pragma: no cover - exercised on remote audio files
+        raise PackingError(
+            f"failed to decode sample {record.sample_id!r} from {record.source_path}: {exc}"
+        ) from exc
+    if waveform.ndim > 1:
+        waveform = waveform.mean(dim=0)
+    else:
+        waveform = waveform.flatten()
+    if int(source_rate) != sample_rate:
+        waveform = torchaudio.transforms.Resample(int(source_rate), sample_rate)(waveform)
+    waveform = waveform.contiguous()
+    if waveform.numel() == 0:
+        raise PackingError(f"empty waveform for sample {record.sample_id!r} ({record.source_path})")
+    if not bool(torch.isfinite(waveform).all().item()):
+        raise PackingError(f"non-finite canonical waveform for {record.sample_id!r} ({record.source_path})")
+    # Preserve the decoded tensor dtype here. The producer historically promoted
+    # this array to float64 only at encode time; retaining that behaviour keeps
+    # a new audit helper from subtly changing produced shards.
+    return waveform.detach().cpu().numpy()
 
 
 def _tar_add_bytes(archive: tarfile.TarFile, name: str, payload: bytes) -> None:
@@ -1125,6 +1134,209 @@ def _read_index(path: pathlib.Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _sample_index_rows(
+    path: pathlib.Path, *, sample_count: int, seed: int, allowed_shards: set[str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Reservoir-sample selected shards without retaining the full JSONL in memory."""
+    if sample_count <= 0:
+        raise PackingError("--samples must be positive")
+    rng = random.Random(seed)
+    selected: list[dict[str, Any]] = []
+    total = 0
+    with path.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise PackingError(f"invalid index JSON at {path}:{line_number}: {exc}") from exc
+            if not isinstance(row, dict):
+                raise PackingError(f"index row {line_number} is not an object")
+            shard = str(_safe_relative_path(row.get("shard"), "audit index shard"))
+            if shard not in allowed_shards:
+                continue
+            if total < sample_count:
+                selected.append(row)
+            else:
+                replacement = rng.randrange(total + 1)
+                if replacement < sample_count:
+                    selected[replacement] = row
+            total += 1
+    if total == 0:
+        raise PackingError(f"index contains no records: {path}")
+    return selected, total
+
+
+def _select_audit_shards(descriptor: dict[str, Any], *, shard_count: int, seed: int) -> dict[str, int]:
+    """Choose a bounded random shard scope so an audit does not scan the full archive set."""
+    if shard_count <= 0:
+        raise PackingError("--shards must be positive")
+    entries = descriptor.get("shards")
+    if not isinstance(entries, list) or not entries:
+        raise PackingError("audit descriptor lacks shards")
+    choices: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PackingError("audit descriptor shard entry is not an object")
+        relative = str(_safe_relative_path(entry.get("path"), "audit descriptor shard path"))
+        count = entry.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise PackingError(f"audit descriptor shard has invalid count: {relative}")
+        if relative in choices:
+            raise PackingError(f"audit descriptor has duplicate shard path: {relative}")
+        choices[relative] = count
+    selected_paths = random.Random(seed).sample(list(choices), min(shard_count, len(choices)))
+    return {path: choices[path] for path in selected_paths}
+
+
+def _read_audited_packed_waveform(
+    archive: tarfile.TarFile,
+    row: dict[str, Any],
+    *,
+    sample_rate: int,
+) -> tuple[np.ndarray, InputRecord]:
+    """Read one packed sample in the same dtype/order as ``PackedTarDataset``."""
+    required = {"sample_id", "flac_member", "json_member", "source_dataset", "frame_count"}
+    missing = required - row.keys()
+    if missing:
+        raise PackingError(f"audit index row lacks required fields: {sorted(missing)}")
+    sample_id = row["sample_id"]
+    if not isinstance(sample_id, str):
+        raise PackingError("audit index sample_id must be a string")
+    try:
+        flac_member = archive.getmember(str(row["flac_member"]))
+        metadata_member = archive.getmember(str(row["json_member"]))
+    except KeyError as exc:
+        raise PackingError(f"audit TAR member is missing for {sample_id!r}: {exc}") from exc
+    flac_file = archive.extractfile(flac_member)
+    metadata_file = archive.extractfile(metadata_member)
+    if flac_file is None or metadata_file is None:
+        raise PackingError(f"cannot read audit TAR member for {sample_id!r}")
+    try:
+        wrapper = json.loads(metadata_file.read().decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PackingError(f"invalid audit metadata for {sample_id!r}: {exc}") from exc
+    if not isinstance(wrapper, dict) or not isinstance(wrapper.get("original"), dict):
+        raise PackingError(f"audit metadata lacks original row for {sample_id!r}")
+    packed = wrapper.get("packed")
+    if not isinstance(packed, dict) or packed.get("sample_id") != sample_id:
+        raise PackingError(f"audit metadata identity mismatch for {sample_id!r}")
+    source_path = packed.get("source_path")
+    if not isinstance(source_path, str) or not source_path:
+        raise PackingError(f"audit metadata lacks source path for {sample_id!r}")
+    original = wrapper["original"]
+    expected_id, source_dataset = _sample_id(original)
+    if expected_id != sample_id or source_dataset != row["source_dataset"]:
+        raise PackingError(f"audit metadata source identity mismatch for {sample_id!r}")
+    record = InputRecord(
+        row=original,
+        source_path=pathlib.Path(source_path),
+        sample_id=sample_id,
+        source_dataset=source_dataset,
+    )
+    if not record.source_path.is_file():
+        raise PackingError(f"audit source file no longer exists for {sample_id!r}: {record.source_path}")
+    restore_gain, _, _ = _optional_amplitude_metadata(packed, f"audit metadata for {sample_id}")
+    try:
+        with sf.SoundFile(io.BytesIO(flac_file.read())) as audio_file:
+            rate = int(audio_file.samplerate)
+            channels = int(audio_file.channels)
+            subtype = str(audio_file.subtype)
+            frames = int(audio_file.frames)
+            packed_wav = audio_file.read(dtype="float32", always_2d=True)
+    except Exception as exc:  # pragma: no cover - backend failure is remote-specific
+        raise PackingError(f"failed to decode audit FLAC for {sample_id!r}: {exc}") from exc
+    if (
+        rate != sample_rate
+        or channels != 1
+        or subtype != "PCM_16"
+        or frames != row["frame_count"]
+        or packed_wav.shape != (frames, 1)
+    ):
+        raise PackingError(f"audit FLAC contract mismatch for {sample_id!r}")
+    return packed_wav[:, 0] * restore_gain, record
+
+
+def audit_source_parity(args: argparse.Namespace) -> None:
+    """Compare sampled packed waveforms with their still-available original files."""
+    if not math.isfinite(args.max_abs_error) or args.max_abs_error <= 0.0:
+        raise PackingError("--max-abs-error must be a finite positive value")
+    output_dir = pathlib.Path(args.output_dir).resolve()
+    descriptor = _load_json(output_dir / DESCRIPTOR_FILENAME)
+    sample_rate = descriptor.get("sample_rate")
+    counts = descriptor.get("counts")
+    if not isinstance(sample_rate, int) or sample_rate <= 0 or not isinstance(counts, dict):
+        raise PackingError("audit descriptor lacks a valid sample rate/counts")
+    index_name = _safe_relative_path(descriptor.get("index"), "descriptor index")
+    selected_shards = _select_audit_shards(descriptor, shard_count=args.shards, seed=args.seed)
+    selected, total = _sample_index_rows(
+        output_dir / index_name,
+        sample_count=args.samples,
+        seed=args.seed ^ 0x9E3779B1,
+        allowed_shards=set(selected_shards),
+    )
+    if total != sum(selected_shards.values()):
+        raise PackingError("audit index row count does not match its selected descriptor shards")
+    by_shard: dict[str, list[dict[str, Any]]] = {}
+    for row in selected:
+        shard = str(_safe_relative_path(row.get("shard"), "audit index shard"))
+        by_shard.setdefault(shard, []).append(row)
+
+    max_abs_error = 0.0
+    sum_squared_error = 0.0
+    frame_count = 0
+    failures: list[dict[str, Any]] = []
+    for shard, rows in sorted(by_shard.items()):
+        shard_path = output_dir / shard
+        if not shard_path.is_file():
+            raise PackingError(f"audit shard does not exist: {shard_path}")
+        try:
+            with tarfile.open(shard_path, mode="r:") as archive:
+                for row in rows:
+                    packed_wav, record = _read_audited_packed_waveform(
+                        archive, row, sample_rate=sample_rate
+                    )
+                    source_wav = _load_canonical_waveform(record, sample_rate)
+                    if packed_wav.shape != source_wav.shape:
+                        raise PackingError(
+                            f"audit frame-count mismatch for {record.sample_id!r}: "
+                            f"packed={packed_wav.size}, source={source_wav.size}"
+                        )
+                    difference = packed_wav.astype(np.float64) - source_wav.astype(np.float64)
+                    sample_max = float(np.max(np.abs(difference)))
+                    max_abs_error = max(max_abs_error, sample_max)
+                    sum_squared_error += float(np.dot(difference, difference))
+                    frame_count += int(difference.size)
+                    if sample_max > args.max_abs_error:
+                        failures.append(
+                            {
+                                "sample_id": record.sample_id,
+                                "shard": shard,
+                                "source_path": str(record.source_path),
+                                "max_abs_error": sample_max,
+                                "source_peak": float(np.max(np.abs(source_wav))),
+                                "packed_peak": float(np.max(np.abs(packed_wav))),
+                            }
+                        )
+        except tarfile.TarError as exc:
+            raise PackingError(f"invalid audit TAR {shard}: {exc}") from exc
+    rms_error = math.sqrt(sum_squared_error / frame_count) if frame_count else 0.0
+    print(
+        "[packed-shards] source-parity audit: "
+        f"sampled={len(selected)}/{total}, shards={len(by_shard)}/{len(selected_shards)}, "
+        f"max_abs_error={max_abs_error:.9g}, rms_error={rms_error:.9g}, "
+        f"threshold={args.max_abs_error:.9g}",
+        flush=True,
+    )
+    if failures:
+        for failure in failures[:20]:
+            print("[packed-shards] source-parity mismatch: " + json.dumps(failure, sort_keys=True), flush=True)
+        if len(failures) > 20:
+            print(f"[packed-shards] source-parity mismatches omitted: {len(failures) - 20}", flush=True)
+        raise PackingError(f"source-parity audit found {len(failures)} samples above threshold")
+
+
 def _safe_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
     if not isinstance(value, str):
         raise PackingError(f"{label} must be a string")
@@ -1355,6 +1567,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_parser = subparsers.add_parser("verify", help="verify an existing packed output without sources")
     verify_parser.add_argument("--output-dir", required=True)
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="compare sampled packed waveforms with their original source files",
+    )
+    audit_parser.add_argument("--output-dir", required=True)
+    audit_parser.add_argument(
+        "--samples",
+        type=int,
+        default=256,
+        help="deterministically sample this many rows from the selected shards (default: 256)",
+    )
+    audit_parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="deterministic index-sampling seed (default: 42)",
+    )
+    audit_parser.add_argument(
+        "--shards",
+        type=int,
+        default=1,
+        help="number of random shards to audit; bounds disk reads (default: 1)",
+    )
+    audit_parser.add_argument(
+        "--max-abs-error",
+        type=float,
+        default=1.0e-3,
+        help="fail if a sampled waveform differs by more than this amount (default: 1e-3)",
+    )
     return parser
 
 
@@ -1365,6 +1606,8 @@ def main() -> None:
             pack(args)
         elif args.command == "verify":
             verify_output(pathlib.Path(args.output_dir))
+        elif args.command == "audit":
+            audit_source_parity(args)
         else:  # argparse enforces this; keep the branch explicit for type checkers.
             raise AssertionError(f"unknown command {args.command}")
     except (PackingError, OSError, ValueError) as exc:
