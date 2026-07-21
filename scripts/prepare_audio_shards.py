@@ -82,6 +82,17 @@ class EncodedSample:
     storage_peak: float
 
 
+@dataclass
+class SourceParityAuditStats:
+    """Running source-vs-packed waveform comparison totals."""
+
+    records: int = 0
+    frames: int = 0
+    sum_squared_error: float = 0.0
+    max_abs_error: float = 0.0
+    failures: int = 0
+
+
 def _strict_json_bytes(value: Any) -> bytes:
     """Serialize metadata deterministically and reject non-standard JSON numbers."""
     return json.dumps(
@@ -1258,35 +1269,67 @@ def _read_audited_packed_waveform(
     return packed_wav[:, 0] * restore_gain, record
 
 
-def audit_source_parity(args: argparse.Namespace) -> None:
-    """Compare sampled packed waveforms with their still-available original files."""
-    if not math.isfinite(args.max_abs_error) or args.max_abs_error <= 0.0:
-        raise PackingError("--max-abs-error must be a finite positive value")
-    output_dir = pathlib.Path(args.output_dir).resolve()
-    descriptor = _load_json(output_dir / DESCRIPTOR_FILENAME)
-    sample_rate = descriptor.get("sample_rate")
-    counts = descriptor.get("counts")
-    if not isinstance(sample_rate, int) or sample_rate <= 0 or not isinstance(counts, dict):
-        raise PackingError("audit descriptor lacks a valid sample rate/counts")
-    index_name = _safe_relative_path(descriptor.get("index"), "descriptor index")
-    selected_shards = _select_audit_shards(descriptor, shard_count=args.shards, seed=args.seed)
-    selected, total = _sample_index_rows(
-        output_dir / index_name,
-        sample_count=args.samples,
-        seed=args.seed ^ 0x9E3779B1,
-        allowed_shards=set(selected_shards),
-    )
-    if total != sum(selected_shards.values()):
-        raise PackingError("audit index row count does not match its selected descriptor shards")
-    by_shard: dict[str, list[dict[str, Any]]] = {}
-    for row in selected:
-        shard = str(_safe_relative_path(row.get("shard"), "audit index shard"))
-        by_shard.setdefault(shard, []).append(row)
+def _audit_log(log_file: Any, message: str) -> None:
+    """Persist audit progress while keeping a compact live status stream."""
+    print(message, file=log_file, flush=True)
+    print(message, flush=True)
 
-    max_abs_error = 0.0
-    sum_squared_error = 0.0
-    frame_count = 0
-    failures: list[dict[str, Any]] = []
+
+def _audit_one_source_parity(
+    archive: tarfile.TarFile,
+    row: dict[str, Any],
+    *,
+    shard: str,
+    sample_rate: int,
+    max_abs_error: float,
+    stats: SourceParityAuditStats,
+) -> dict[str, Any] | None:
+    packed_wav, record = _read_audited_packed_waveform(archive, row, sample_rate=sample_rate)
+    source_wav = _load_canonical_waveform(record, sample_rate)
+    if packed_wav.shape != source_wav.shape:
+        raise PackingError(
+            f"audit frame-count mismatch for {record.sample_id!r}: "
+            f"packed={packed_wav.size}, source={source_wav.size}"
+        )
+    difference = packed_wav.astype(np.float64) - source_wav.astype(np.float64)
+    sample_max = float(np.max(np.abs(difference)))
+    stats.records += 1
+    stats.frames += int(difference.size)
+    stats.sum_squared_error += float(np.dot(difference, difference))
+    stats.max_abs_error = max(stats.max_abs_error, sample_max)
+    if sample_max <= max_abs_error:
+        return None
+    stats.failures += 1
+    return {
+        "sample_id": record.sample_id,
+        "shard": shard,
+        "source_path": str(record.source_path),
+        "max_abs_error": sample_max,
+        "source_peak": float(np.max(np.abs(source_wav))),
+        "packed_peak": float(np.max(np.abs(packed_wav))),
+    }
+
+
+def _audit_progress(log_file: Any, stats: SourceParityAuditStats, every: int) -> None:
+    if stats.records % every == 0:
+        _audit_log(
+            log_file,
+            "[packed-shards] source-parity progress: "
+            f"records={stats.records}, frames={stats.frames}, failures={stats.failures}, "
+            f"max_abs_error={stats.max_abs_error:.9g}",
+        )
+
+
+def _audit_selected_rows(
+    output_dir: pathlib.Path,
+    by_shard: dict[str, list[dict[str, Any]]],
+    *,
+    sample_rate: int,
+    max_abs_error: float,
+    progress_every: int,
+    stats: SourceParityAuditStats,
+    log_file: Any,
+) -> None:
     for shard, rows in sorted(by_shard.items()):
         shard_path = output_dir / shard
         if not shard_path.is_file():
@@ -1294,47 +1337,164 @@ def audit_source_parity(args: argparse.Namespace) -> None:
         try:
             with tarfile.open(shard_path, mode="r:") as archive:
                 for row in rows:
-                    packed_wav, record = _read_audited_packed_waveform(
-                        archive, row, sample_rate=sample_rate
+                    failure = _audit_one_source_parity(
+                        archive,
+                        row,
+                        shard=shard,
+                        sample_rate=sample_rate,
+                        max_abs_error=max_abs_error,
+                        stats=stats,
                     )
-                    source_wav = _load_canonical_waveform(record, sample_rate)
-                    if packed_wav.shape != source_wav.shape:
-                        raise PackingError(
-                            f"audit frame-count mismatch for {record.sample_id!r}: "
-                            f"packed={packed_wav.size}, source={source_wav.size}"
+                    if failure is not None:
+                        _audit_log(
+                            log_file,
+                            "[packed-shards] source-parity mismatch: "
+                            + json.dumps(failure, sort_keys=True),
                         )
-                    difference = packed_wav.astype(np.float64) - source_wav.astype(np.float64)
-                    sample_max = float(np.max(np.abs(difference)))
-                    max_abs_error = max(max_abs_error, sample_max)
-                    sum_squared_error += float(np.dot(difference, difference))
-                    frame_count += int(difference.size)
-                    if sample_max > args.max_abs_error:
-                        failures.append(
-                            {
-                                "sample_id": record.sample_id,
-                                "shard": shard,
-                                "source_path": str(record.source_path),
-                                "max_abs_error": sample_max,
-                                "source_peak": float(np.max(np.abs(source_wav))),
-                                "packed_peak": float(np.max(np.abs(packed_wav))),
-                            }
-                        )
+                    _audit_progress(log_file, stats, progress_every)
         except tarfile.TarError as exc:
             raise PackingError(f"invalid audit TAR {shard}: {exc}") from exc
-    rms_error = math.sqrt(sum_squared_error / frame_count) if frame_count else 0.0
-    print(
-        "[packed-shards] source-parity audit: "
-        f"sampled={len(selected)}/{total}, shards={len(by_shard)}/{len(selected_shards)}, "
-        f"max_abs_error={max_abs_error:.9g}, rms_error={rms_error:.9g}, "
-        f"threshold={args.max_abs_error:.9g}",
-        flush=True,
-    )
-    if failures:
-        for failure in failures[:20]:
-            print("[packed-shards] source-parity mismatch: " + json.dumps(failure, sort_keys=True), flush=True)
-        if len(failures) > 20:
-            print(f"[packed-shards] source-parity mismatches omitted: {len(failures) - 20}", flush=True)
-        raise PackingError(f"source-parity audit found {len(failures)} samples above threshold")
+
+
+def _audit_all_rows(
+    output_dir: pathlib.Path,
+    index_path: pathlib.Path,
+    *,
+    sample_rate: int,
+    expected_records: int,
+    max_abs_error: float,
+    progress_every: int,
+    stats: SourceParityAuditStats,
+    log_file: Any,
+) -> None:
+    """Stream the on-disk index in shard order, retaining only one TAR index at once."""
+    current_shard: str | None = None
+    archive: tarfile.TarFile | None = None
+    try:
+        with index_path.open("r", encoding="utf-8") as index_file:
+            for line_number, line in enumerate(index_file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise PackingError(f"invalid index JSON at {index_path}:{line_number}: {exc}") from exc
+                if not isinstance(row, dict):
+                    raise PackingError(f"index row {line_number} is not an object")
+                shard = str(_safe_relative_path(row.get("shard"), "audit index shard"))
+                if shard != current_shard:
+                    if archive is not None:
+                        archive.close()
+                    shard_path = output_dir / shard
+                    if not shard_path.is_file():
+                        raise PackingError(f"audit shard does not exist: {shard_path}")
+                    try:
+                        archive = tarfile.open(shard_path, mode="r:")
+                    except tarfile.TarError as exc:
+                        raise PackingError(f"invalid audit TAR {shard}: {exc}") from exc
+                    current_shard = shard
+                    _audit_log(log_file, f"[packed-shards] source-parity shard: {shard}")
+                assert archive is not None
+                failure = _audit_one_source_parity(
+                    archive,
+                    row,
+                    shard=shard,
+                    sample_rate=sample_rate,
+                    max_abs_error=max_abs_error,
+                    stats=stats,
+                )
+                if failure is not None:
+                    _audit_log(
+                        log_file,
+                        "[packed-shards] source-parity mismatch: " + json.dumps(failure, sort_keys=True),
+                    )
+                _audit_progress(log_file, stats, progress_every)
+    finally:
+        if archive is not None:
+            archive.close()
+    if stats.records != expected_records:
+        raise PackingError(
+            f"source-parity audit scanned {stats.records} index rows, expected {expected_records}"
+        )
+
+
+def audit_source_parity(args: argparse.Namespace) -> None:
+    """Compare sampled or complete packed waveforms with their original source files."""
+    if not math.isfinite(args.max_abs_error) or args.max_abs_error <= 0.0:
+        raise PackingError("--max-abs-error must be a finite positive value")
+    if args.progress_every <= 0:
+        raise PackingError("--progress-every must be positive")
+    output_dir = pathlib.Path(args.output_dir).resolve()
+    descriptor = _load_json(output_dir / DESCRIPTOR_FILENAME)
+    sample_rate = descriptor.get("sample_rate")
+    counts = descriptor.get("counts")
+    if not isinstance(sample_rate, int) or sample_rate <= 0 or not isinstance(counts, dict):
+        raise PackingError("audit descriptor lacks a valid sample rate/counts")
+    expected_records = counts.get("samples")
+    if not isinstance(expected_records, int) or expected_records <= 0:
+        raise PackingError("audit descriptor lacks a positive sample count")
+    index_name = _safe_relative_path(descriptor.get("index"), "descriptor index")
+    index_path = output_dir / index_name
+    log_path = pathlib.Path(args.log_file).resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if log_path.exists():
+        raise PackingError(f"refusing to overwrite existing audit log: {log_path}")
+
+    with log_path.open("x", encoding="utf-8") as log_file:
+        mode = "all records" if args.all else f"{args.samples} sampled records"
+        _audit_log(
+            log_file,
+            "[packed-shards] source-parity audit start: "
+            f"mode={mode}, output={output_dir}, threshold={args.max_abs_error:.9g}",
+        )
+        stats = SourceParityAuditStats()
+        if args.all:
+            _audit_all_rows(
+                output_dir,
+                index_path,
+                sample_rate=sample_rate,
+                expected_records=expected_records,
+                max_abs_error=args.max_abs_error,
+                progress_every=args.progress_every,
+                stats=stats,
+                log_file=log_file,
+            )
+        else:
+            selected_shards = _select_audit_shards(
+                descriptor, shard_count=args.shards, seed=args.seed
+            )
+            selected, total = _sample_index_rows(
+                index_path,
+                sample_count=args.samples,
+                seed=args.seed ^ 0x9E3779B1,
+                allowed_shards=set(selected_shards),
+            )
+            if total != sum(selected_shards.values()):
+                raise PackingError("audit index row count does not match its selected descriptor shards")
+            by_shard: dict[str, list[dict[str, Any]]] = {}
+            for row in selected:
+                shard = str(_safe_relative_path(row.get("shard"), "audit index shard"))
+                by_shard.setdefault(shard, []).append(row)
+            _audit_selected_rows(
+                output_dir,
+                by_shard,
+                sample_rate=sample_rate,
+                max_abs_error=args.max_abs_error,
+                progress_every=args.progress_every,
+                stats=stats,
+                log_file=log_file,
+            )
+            expected_records = total
+        rms_error = math.sqrt(stats.sum_squared_error / stats.frames) if stats.frames else 0.0
+        _audit_log(
+            log_file,
+            "[packed-shards] source-parity audit complete: "
+            f"audited={stats.records}/{expected_records}, max_abs_error={stats.max_abs_error:.9g}, "
+            f"rms_error={rms_error:.9g}, threshold={args.max_abs_error:.9g}, "
+            f"failures={stats.failures}, log={log_path}",
+        )
+        if stats.failures:
+            raise PackingError(f"source-parity audit found {stats.failures} samples above threshold")
 
 
 def _safe_relative_path(value: Any, label: str) -> pathlib.PurePosixPath:
@@ -1573,6 +1733,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument("--output-dir", required=True)
     audit_parser.add_argument(
+        "--log-file",
+        required=True,
+        help="new file that receives audit progress, summary, and every mismatch",
+    )
+    audit_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="audit every index row; ignores --samples and --shards and can take many hours",
+    )
+    audit_parser.add_argument(
         "--samples",
         type=int,
         default=256,
@@ -1595,6 +1765,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0e-3,
         help="fail if a sampled waveform differs by more than this amount (default: 1e-3)",
+    )
+    audit_parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=1000,
+        help="write progress to the log after this many audited records (default: 1000)",
     )
     return parser
 

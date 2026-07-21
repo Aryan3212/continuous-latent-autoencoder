@@ -124,11 +124,11 @@ torchaudio resample sequence on each complete utterance, and writes mono 16 kHz
 PCM16 FLAC members into uncompressed TAR shards. It records a versioned
 `shard_manifest.json` plus `index.jsonl`, records actual encode/decode
 quantization error, supports safe resume, and verifies finished archives.
-Its read-only `audit` subcommand samples index rows from a bounded number of
-random shards and compares the loader-equivalent decoded TAR waveform against
-the still-mounted original source after the identical mono/resample
-canonicalization, reporting exact sample/shard mismatches without modifying
-data.
+Its read-only `audit` subcommand either samples index rows from a bounded
+number of random shards or streams the complete corpus with `--all`, compares
+the loader-equivalent decoded TAR waveform against the still-mounted original
+source after identical mono/resample canonicalization, and requires a new
+log-file path for progress and exact sample/shard mismatch reporting.
 Finite canonical peaks outside PCM16's range are held in a reversible
 per-sample storage scale (recorded as `amplitude_restore_gain` alongside
 canonical/storage peaks); `PackedTarDataset` restores it before normal

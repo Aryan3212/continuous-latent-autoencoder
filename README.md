@@ -126,6 +126,7 @@ it does not contend for disk bandwidth:
 ```bash
 uv run python scripts/prepare_audio_shards.py audit \
   --output-dir staging/packed/train \
+  --log-file staging/packed/train/audit-sample.log \
   --samples 256 \
   --seed 42
 ```
@@ -134,6 +135,18 @@ The command scopes its default sample to one deterministic random shard, so it
 does not scan the whole archive set. Increase `--shards` after an initial pass.
 It prints aggregate max/RMS waveform error and names every sampled record above
 its `--max-abs-error` threshold (default `1e-3`).
+
+For an exhaustive source-parity audit, use `--all`. It streams every TAR and
+every original source file, writes periodic progress plus all mismatches to the
+new log file, and can take many hours on a 1.5k-hour corpus. Run it only while
+training is stopped:
+
+```bash
+uv run python scripts/prepare_audio_shards.py audit \
+  --output-dir staging/packed/train \
+  --all \
+  --log-file staging/packed/train/audit-all.log
+```
 
 This producer is backward-compatible with the current file-backed training
 workflow. To train from the packed representation, use the compatible

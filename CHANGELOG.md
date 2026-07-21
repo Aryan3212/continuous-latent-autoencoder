@@ -11,7 +11,9 @@ Date format: `YYYY-MM-DD`
   sources remain mounted. It decodes each selected FLAC exactly as the TAR
   loader does, restores the validated storage gain, re-applies the producer's
   source load → mono → resample path, and reports the exact sample ID, shard,
-  and source path for waveforms over the configurable error threshold.
+  and source path for waveforms over the configurable error threshold. The
+  command now requires a new audit-log file and can stream the entire corpus
+  with `--all`, persisting periodic progress and every mismatch.
 
 **Reversible PCM16 shard storage scaling and packing progress**
 
