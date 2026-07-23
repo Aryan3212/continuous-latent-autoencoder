@@ -63,6 +63,9 @@ class _ScheduleInputs:
     min_lr_ratio: float
 
 
+_TANH_SATURATION_ABS = 0.99
+
+
 def _schedule_inputs(cfg: Config) -> _ScheduleInputs:
     scheduler = cfg.optim.scheduler
     return _ScheduleInputs(
@@ -181,6 +184,7 @@ def save_checkpoint(
     path: str,
     *,
     step: int,
+    data_epoch: int | None,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scaler: torch.cuda.amp.GradScaler | None,
@@ -198,6 +202,8 @@ def save_checkpoint(
         "scaler": scaler.state_dict() if scaler is not None else None,
         "cfg": cfg.model_dump(),
     }
+    if data_epoch is not None:
+        payload["data_epoch"] = data_epoch
     if disc is not None:
         payload["disc"] = _unwrap(disc).state_dict()
         payload["optimizer_d"] = optimizer_d.state_dict() if optimizer_d is not None else None
@@ -319,6 +325,18 @@ def _reduce_metric_totals(
     }
 
 
+def _reduce_metric_maxes(
+    maxes: dict[str, torch.Tensor],
+    *,
+    distributed: bool,
+) -> dict[str, float]:
+    keys = sorted(maxes)
+    values = torch.stack([maxes[key] for key in keys])
+    if distributed:
+        dist.all_reduce(values, op=dist.ReduceOp.MAX)
+    return {key: value.item() for key, value in zip(keys, values)}
+
+
 def _all_gather_batch(x: torch.Tensor, world_size: int) -> torch.Tensor:
     if world_size == 1:
         return x
@@ -326,6 +344,42 @@ def _all_gather_batch(x: torch.Tensor, world_size: int) -> torch.Tensor:
     gathered = [torch.empty_like(x) for _ in range(world_size)]
     dist.all_gather(gathered, x)
     return torch.cat(gathered, dim=0)
+
+
+def _module_grad_norm(module: torch.nn.Module) -> torch.Tensor:
+    """FP32 L2 norm over the module's unscaled gradients."""
+    parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise ValueError("cannot measure gradient norm for a module without trainable parameters")
+    total = torch.zeros((), device=parameters[0].device, dtype=torch.float32)
+    for parameter in parameters:
+        if parameter.grad is not None:
+            total = total + parameter.grad.detach().float().square().sum()
+    return total.sqrt()
+
+
+def _snapshot_trainable_parameters(module: torch.nn.Module) -> list[torch.Tensor]:
+    return [
+        parameter.detach().clone()
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    ]
+
+
+def _module_update_norm(
+    module: torch.nn.Module,
+    before: list[torch.Tensor],
+) -> torch.Tensor:
+    """FP32 L2 norm of the actual optimizer update, including weight decay."""
+    parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
+    if len(parameters) != len(before):
+        raise ValueError("parameter snapshot does not match module")
+    if not parameters:
+        raise ValueError("cannot measure update norm for a module without trainable parameters")
+    total = torch.zeros((), device=parameters[0].device, dtype=torch.float32)
+    for parameter, old_value in zip(parameters, before):
+        total = total + (parameter.detach().float() - old_value.float()).square().sum()
+    return total.sqrt()
 
 
 def _restore_checkpoint(
@@ -337,7 +391,7 @@ def _restore_checkpoint(
     disc: torch.nn.Module | None,
     optimizer_d: torch.optim.Optimizer | None,
     scaler_d: torch.cuda.amp.GradScaler | None,
-) -> tuple[int, _ScheduleInputs | None]:
+) -> tuple[int, _ScheduleInputs | None, int | None]:
     state = torch.load(path, map_location="cpu")
     model.load_state_dict(state["model"], strict=True)
     optimizer.load_state_dict(state["optimizer"])
@@ -349,7 +403,14 @@ def _restore_checkpoint(
             optimizer_d.load_state_dict(state["optimizer_d"])
         if state.get("scaler_d") and scaler_d is not None and scaler_d.is_enabled():
             scaler_d.load_state_dict(state["scaler_d"])
-    return int(state.get("step", 0)), _checkpoint_schedule_inputs(state)
+    saved_data_epoch = state.get("data_epoch")
+    if saved_data_epoch is not None and (
+        not isinstance(saved_data_epoch, int)
+        or isinstance(saved_data_epoch, bool)
+        or saved_data_epoch < 0
+    ):
+        raise ValueError(f"checkpoint has invalid data_epoch: {saved_data_epoch!r}")
+    return int(state.get("step", 0)), _checkpoint_schedule_inputs(state), saved_data_epoch
 
 
 def main() -> None:
@@ -575,8 +636,9 @@ def main() -> None:
 
     step = 0
     saved_schedule_inputs: _ScheduleInputs | None = None
+    saved_data_epoch: int | None = None
     if args.resume:
-        step, saved_schedule_inputs = _restore_checkpoint(
+        step, saved_schedule_inputs, saved_data_epoch = _restore_checkpoint(
             args.resume,
             model=model,
             optimizer=optimizer,
@@ -664,22 +726,35 @@ def main() -> None:
 
     accum_sums: dict[str, torch.Tensor] = {}
     accum_counts: dict[str, int] = {}
+    interval_maxes: dict[str, torch.Tensor] = {}
+    log_interval = cfg.train.log_interval_steps
 
     start_time = time.monotonic()
     max_seconds = args.max_hours * 3600.0 if args.max_hours else None
 
     epoch = 0
-    # Packed resume intentionally starts a fresh randomized data epoch instead
-    # of trying to reconstruct the sample after the checkpoint. The completed
-    # optimizer step is already checkpointed and supplies a deterministic seed.
-    data_epoch = max(0, step) if dcfg.backend == "tar" else 0
+    # A packed resume restarts at the beginning of the checkpointed data epoch.
+    # This restores its deterministic shard/crop sequence and worker assignment,
+    # but deliberately does not claim exact in-epoch sample-position recovery.
+    # Older checkpoints lack this field and retain the old step-seeded fallback.
+    if dcfg.backend == "tar":
+        data_epoch = saved_data_epoch if saved_data_epoch is not None else max(0, step)
+    else:
+        data_epoch = 0
     if dcfg.backend == "tar":
         assert isinstance(train_ds, PackedTarDataset)
         train_ds.set_epoch(data_epoch)
+        if args.resume and saved_data_epoch is None and is_main:
+            print(
+                "[train] WARNING: checkpoint predates packed data_epoch state; "
+                f"using legacy step-seeded data_epoch={data_epoch}.",
+                flush=True,
+            )
     if train_sampler is not None:
         train_sampler.set_epoch(epoch)
     train_it = iter(train_dl)
     while step < max_steps:
+        will_log = (step + 1) % log_interval == 0
         # Stop decision must be COLLECTIVE under DDP: if one rank breaks (SIGTERM or
         # wall-clock budget) while others keep going, the others hang at the next
         # collective. all_reduce(MAX) makes every rank stop on the same iteration.
@@ -933,6 +1008,13 @@ def main() -> None:
                 z_a_rms = z_a.pow(2).mean().sqrt()
                 z_diff_rms = (z_a - z_mask).pow(2).mean().sqrt()
                 z_to_norm_ratio = z_diff_rms / z_a_rms.clamp_min(1e-6)
+                wav32 = wav_a.detach().float()
+                output32 = x_hat_all.detach().float()
+                input_rms = wav32.square().mean().sqrt()
+                decoder_output_rms = output32.square().mean().sqrt()
+                decoder_tanh_saturation_frac = (
+                    output32.abs() >= _TANH_SATURATION_ABS
+                ).float().mean()
 
             mb_step_stats = {
                 ("l_stft" if recon_type == "stft" else "l_mel"): l_recon.detach(),
@@ -940,6 +1022,9 @@ def main() -> None:
                 "l_jepa": l_jepa.detach(),
                 "z_diff_rms": z_diff_rms.detach(),
                 "z_to_norm_ratio": z_to_norm_ratio.detach(),
+                "input_rms": input_rms,
+                "decoder_output_rms": decoder_output_rms,
+                "decoder_tanh_saturation_frac": decoder_tanh_saturation_frac,
             }
             if disc is not None:
                 mb_step_stats["l_adv"] = l_adv.detach()
@@ -968,16 +1053,61 @@ def main() -> None:
             for k, v in mb_step_stats.items():
                 accum_sums[k] = accum_sums.get(k, torch.zeros((), device=device)) + v.detach()
                 accum_counts[k] = accum_counts.get(k, 0) + 1
+            mb_max_stats = {
+                "input_rms_max": input_rms,
+                "input_peak": wav32.abs().amax(),
+                "decoder_output_rms_max": decoder_output_rms,
+                "decoder_output_peak": output32.abs().amax(),
+                "decoder_tanh_saturation_frac_max": decoder_tanh_saturation_frac,
+            }
+            for k, v in mb_max_stats.items():
+                previous = interval_maxes.get(k)
+                interval_maxes[k] = (
+                    v.detach()
+                    if previous is None
+                    else torch.maximum(previous, v.detach())
+                )
 
-        accum_sums["loss"] = accum_sums.get("loss", torch.zeros((), device=device)) + total_loss.detach()
+        accum_sums["loss"] = (
+            accum_sums.get("loss", torch.zeros((), device=device))
+            + total_loss.detach()
+        )
         accum_counts["loss"] = accum_counts.get("loss", 0) + 1
 
-        # Optimize generator
+        # Unscale on every step so the decoder diagnostic is always the true
+        # pre-clip gradient norm. The snapshot is limited to log-boundary steps:
+        # it measures the actual post-optimizer parameter delta without imposing
+        # a full decoder copy on every training step.
+        scaler.unscale_(optimizer)
+        decoder_grad_norm = _module_grad_norm(_unwrap(model.decoder))
+        accum_sums["decoder_grad_norm"] = (
+            accum_sums.get("decoder_grad_norm", torch.zeros((), device=device))
+            + decoder_grad_norm.detach()
+        )
+        accum_counts["decoder_grad_norm"] = (
+            accum_counts.get("decoder_grad_norm", 0) + 1
+        )
+        previous_grad_max = interval_maxes.get("decoder_grad_norm_max")
+        interval_maxes["decoder_grad_norm_max"] = (
+            decoder_grad_norm.detach()
+            if previous_grad_max is None
+            else torch.maximum(previous_grad_max, decoder_grad_norm.detach())
+        )
+        decoder_before_step = (
+            _snapshot_trainable_parameters(_unwrap(model.decoder)) if will_log else None
+        )
+
+        # Optimize generator.
         if grad_clip and grad_clip > 0:
-            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        lr_used = float(optimizer.param_groups[0]["lr"])
         scaler.step(optimizer)
         scaler.update()
+        decoder_update_norm = (
+            _module_update_norm(_unwrap(model.decoder), decoder_before_step)
+            if decoder_before_step is not None
+            else None
+        )
 
         # Optimize discriminator (only once the GAN path is active)
         if optimizer_d is not None and step >= adv_start:
@@ -1023,7 +1153,6 @@ def main() -> None:
             if wb is not None:
                 wb.log(probe_row, step=step)
 
-        log_interval = cfg.train.log_interval_steps
         if step % log_interval == 0:
             log_stats = _reduce_metric_totals(
                 accum_sums,
@@ -1031,8 +1160,15 @@ def main() -> None:
                 distributed=is_dist,
                 device=device,
             )
+            log_stats.update(
+                _reduce_metric_maxes(
+                    interval_maxes,
+                    distributed=is_dist,
+                )
+            )
             accum_sums.clear()
             accum_counts.clear()
+            interval_maxes.clear()
 
             with torch.no_grad():
                 z32 = _all_gather_batch(z_a.detach().float(), world_size)
@@ -1041,6 +1177,7 @@ def main() -> None:
                 )
 
             if is_main:
+                assert decoder_update_norm is not None
                 with torch.no_grad():
                     z_frames = z32.permute(0, 2, 1).reshape(-1, z32.size(1))
                     z_res = (z32 - z32.mean(dim=2, keepdim=True)).permute(0, 2, 1).reshape(-1, z32.size(1))
@@ -1048,7 +1185,23 @@ def main() -> None:
                     log_stats["z_rank_utt"] = _participation_ratio(z32.mean(dim=2)).item()
                     log_stats["z_rank_res"] = _participation_ratio(z_res).item()
                     log_stats["p_rank_utt"] = _participation_ratio(p_utt).item()
-                row = {"step": step, **log_stats}
+                row: dict[str, Any] = {
+                    "step": step,
+                    "lr": lr_used,
+                    "decoder_update_norm": decoder_update_norm.item(),
+                    **log_stats,
+                }
+                if dcfg.backend == "tar":
+                    assert isinstance(train_ds, PackedTarDataset)
+                    row["data_epoch"] = data_epoch
+                    for assignment in train_ds.epoch_assignment_summary(data_epoch):
+                        prefix = (
+                            f"packed/rank{assignment['rank']}_worker{assignment['worker']}"
+                        )
+                        row[f"{prefix}/shard_ids"] = ",".join(assignment["shard_ids"])
+                        row[f"{prefix}/shard_count"] = assignment["shard_count"]
+                        row[f"{prefix}/assigned_samples"] = assignment["assigned_samples"]
+                        row[f"{prefix}/selected_samples"] = assignment["selected_samples"]
 
                 jsonl.log(row)
                 if wb is not None:
@@ -1061,6 +1214,7 @@ def main() -> None:
             save_checkpoint(
                 str(step_ckpt),
                 step=step,
+                data_epoch=data_epoch if dcfg.backend == "tar" else None,
                 model=model,
                 optimizer=optimizer,
                 scaler=scaler if scaler.is_enabled() else None,
@@ -1081,6 +1235,7 @@ def main() -> None:
         save_checkpoint(
             str(ckpt_dir / "last.pt"),
             step=step,
+            data_epoch=data_epoch if dcfg.backend == "tar" else None,
             model=model,
             optimizer=optimizer,
             scaler=scaler if scaler.is_enabled() else None,

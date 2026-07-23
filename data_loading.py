@@ -281,6 +281,36 @@ class PackedTarDataset(torch.utils.data.IterableDataset[dict[str, Any]]):
         with self._epoch.get_lock():
             return int(self._epoch.value)
 
+    def epoch_assignment_summary(self, epoch: int | None = None) -> list[dict[str, Any]]:
+        """Describe the deterministic whole-shard assignment for logging.
+
+        This runs in the parent process and mirrors the assignment each worker
+        computes in ``__iter__``.  It does not open a shard or communicate with
+        workers, so logging it cannot perturb the streamed sample order.
+        """
+        if epoch is None:
+            epoch = self._epoch_value()
+        if epoch < 0:
+            raise ValueError("data epoch cannot be negative")
+        groups, quota = packed_epoch_assignment(
+            self.shards,
+            seed=self.run_seed,
+            epoch=epoch,
+            total_consumers=self.world_size * self.workers_per_rank,
+            batch_size=self.batch_size,
+        )
+        return [
+            {
+                "rank": consumer_id // self.workers_per_rank,
+                "worker": consumer_id % self.workers_per_rank,
+                "shard_ids": [shard.relative_path for shard in assigned],
+                "shard_count": len(assigned),
+                "assigned_samples": sum(shard.count for shard in assigned),
+                "selected_samples": quota,
+            }
+            for consumer_id, assigned in enumerate(groups)
+        ]
+
     @staticmethod
     def _safe_member_name(name: str, suffix: str) -> str:
         path = pathlib.PurePosixPath(name)

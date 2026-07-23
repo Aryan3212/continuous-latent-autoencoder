@@ -82,9 +82,18 @@ optional discriminator optimizer, and profiling.
 - Checkpoints restore model, optimizer, AMP scaler, global step, and optional
   discriminator state. The step-based scheduler is reconstructed from global
   step and the current config; it has no separately restored state. Packed
-  resumes use global step as a fresh shuffle-epoch seed rather than attempting
-  to restore a sample position. There is no EMA state in this codebase.
+  checkpoints also store the active `data_epoch`. Resume restarts at the
+  beginning of that deterministic packed epoch (same whole-shard worker
+  assignment, selection, shuffle, and crops), not at an exact in-epoch sample
+  position. Older checkpoints without this field retain the legacy global-step
+  seed fallback. There is no EMA state in this codebase.
 - AMP-overflow-skipped updates still advance the attempted-step counter.
+- Every training log interval records the LR, interval mean/max input and
+  decoder-output RMS, interval peaks, decoder tanh-saturation fraction
+  (`abs(output) >= 0.99`), unscaled pre-clip decoder gradient mean/max, and the
+  actual log-boundary decoder parameter-update norm. Packed runs additionally
+  record `data_epoch` and each global rank/worker's shard IDs, shard count,
+  assigned samples, and equal selected-sample quota.
 - There is no in-loop validation. `train.eval_interval_steps`,
   `train.val_batches`, and `eval.enabled` are currently unused;
   `data.val_manifest` is metadata for external evaluation.

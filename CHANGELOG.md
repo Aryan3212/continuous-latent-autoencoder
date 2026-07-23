@@ -2,6 +2,25 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-23
+
+**Packed epoch resume state and decoder-collapse diagnostics**
+
+- **Checkpoint/resume**: packed checkpoints now store the active `data_epoch`.
+  Resume restarts at the beginning of that same deterministic epoch, preserving
+  its shard assignment, selection, shuffle, and crop sequence without claiming
+  exact in-epoch sample-position recovery. Older checkpoints remain compatible
+  and use the previous global-step-seeded epoch fallback with a warning.
+- **Training observability**: every normal log interval now includes the LR,
+  input and decoder-output RMS/peak diagnostics, decoder tanh-saturation
+  fractions, the unscaled pre-clip decoder gradient norm, and the actual
+  log-boundary decoder parameter-update norm. Mean and worst-batch interval
+  values are separated where a transient spike matters.
+- **Packed assignment provenance**: packed log rows include `data_epoch` plus
+  every global rank/worker's assigned shard IDs/count, total assigned samples,
+  and selected-sample quota. Assignment reporting is parent-side and read-only,
+  so it cannot perturb worker iteration.
+
 ## 2026-07-20
 
 **Packed source-parity audit**
