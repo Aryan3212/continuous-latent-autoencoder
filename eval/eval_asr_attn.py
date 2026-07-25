@@ -287,7 +287,8 @@ def _load_adapter_feats_and_text(
     feats: List[torch.Tensor] = []
     texts: List[str] = []
     for row in rows:
-        if text_key not in row or not str(row[text_key]).strip():
+        text = row.get(text_key)
+        if not isinstance(text, str) or not text.strip():
             continue
         path = str(row["audio_filepath"])
         if not os.path.isabs(path):
@@ -300,7 +301,7 @@ def _load_adapter_feats_and_text(
         if frames.ndim != 2 or frames.size(0) < 1:
             raise RuntimeError(f"{model_name} returned invalid ASR feature shape {tuple(frames.shape)}")
         feats.append(frames)
-        texts.append(str(row[text_key]))
+        texts.append(text)
         if max_samples and len(feats) >= max_samples:
             break
     if not feats:

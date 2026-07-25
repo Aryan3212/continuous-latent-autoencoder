@@ -123,12 +123,26 @@ def _load_feats_and_text(
         mel_hop=mel_hop,
         log_name=log_name,
     ):
-        feats_list.append(feats)  # already on CPU from iter_frame_features
-        lens_list.append(lens)
-        texts.extend([m[text_key] for m in meta])
-        n += feats.size(0)
+        valid_indices: List[int] = []
+        batch_texts: List[str] = []
+        for index, row in enumerate(meta):
+            text = row.get(text_key)
+            if not isinstance(text, str) or not text.strip():
+                continue
+            valid_indices.append(index)
+            batch_texts.append(text)
+        if not valid_indices:
+            continue
+        feats_list.append(feats[valid_indices])  # already on CPU from iter_frame_features
+        lens_list.append(lens[valid_indices])
+        texts.extend(batch_texts)
+        n += len(valid_indices)
         if max_samples > 0 and n >= max_samples:
             break
+    if not feats_list:
+        raise ValueError(
+            f"No usable rows with a non-empty string {text_key!r} in {manifest}"
+        )
     all_feats = torch.cat(feats_list, dim=0)
     all_lens = torch.cat(lens_list, dim=0)
     if max_samples > 0 and all_feats.size(0) > max_samples:
