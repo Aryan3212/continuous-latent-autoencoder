@@ -11,6 +11,9 @@ Date format: `YYYY-MM-DD`
   This makes the probe's duration bound effective when evaluation manifests
   lack duration metadata, avoids unbounded WavLM inputs, and logs periodic and
   final extraction progress with the number of clipped utterances.
+- **Compatibility**: when an installed `torchaudio` exposes `load` but not
+  `info`, the evaluator now loads then crops the waveform before resampling and
+  WavLM inference instead of failing during feature extraction.
 
 ## 2026-07-23
 

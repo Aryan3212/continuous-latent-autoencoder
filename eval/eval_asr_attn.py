@@ -300,10 +300,20 @@ def _load_adapter_feats_and_text(
         path = str(row["audio_filepath"])
         if not os.path.isabs(path):
             path = str(root / path)
-        info = torchaudio.info(path)
-        max_frames = math.ceil(segment_seconds * info.sample_rate)
-        wav, sr = torchaudio.load(path, num_frames=max_frames)
-        truncated += int(info.num_frames > max_frames)
+        info_fn = getattr(torchaudio, "info", None)
+        if info_fn is not None:
+            info = info_fn(path)
+            max_frames = math.ceil(segment_seconds * info.sample_rate)
+            wav, sr = torchaudio.load(path, num_frames=max_frames)
+            truncated += int(info.num_frames > max_frames)
+        else:
+            # Some torchaudio builds expose ``load`` but not ``info``. Keep
+            # the evaluator usable there: crop after loading, before
+            # resampling and WavLM inference.
+            wav, sr = torchaudio.load(path)
+            max_frames = math.ceil(segment_seconds * sr)
+            truncated += int(wav.size(-1) > max_frames)
+            wav = wav[..., :max_frames]
         if wav.size(0) > 1:
             wav = wav.mean(dim=0, keepdim=True)
         wav16k = _resample(wav.squeeze(0), int(sr), TARGET_SR)
