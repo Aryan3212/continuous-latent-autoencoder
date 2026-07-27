@@ -185,7 +185,11 @@ same name.
   it accepts the shared adapters and is the content metric for low-rate CLAE.
   External adapters decode only up to `--segment_seconds` per utterance even
   when manifest duration metadata is absent, report extraction progress, and
-  reuse one frozen adapter across train and dev feature extraction.
+  reuse one frozen adapter across train and dev feature extraction. Their
+  manifest rows are streamed into resumable per-utterance frame caches on disk;
+  training and greedy evaluation load/pad only the current `DataLoader` batch
+  (`--num_workers 0` by default), rather than retaining padded train/dev frame
+  tensors in RAM.
 - `eval/eval_repr_viz.py` / `eval/render_compact_scorecard.py` — PCA+UMAP
   attribute plots and Markdown scorecard aggregation.
 - `eval/eval_mimi_recon.py` — standalone Mimi reconstruction baseline using the

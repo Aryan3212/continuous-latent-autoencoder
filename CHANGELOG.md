@@ -4,6 +4,16 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-07-27
 
+**Streaming external attention-ASR evaluation**
+
+- **`eval/eval_asr_attn.py`**: external adapters now stream JSONL records into
+  resumable, disk-backed per-utterance feature caches instead of loading the
+  entire manifest or retaining all WavLM frames in RAM. Training keeps its
+  fixed-step random-with-replacement behavior through a cache-backed
+  `DataLoader`; greedy train/dev decoding likewise pads and transfers only the
+  current batch. `--num_workers` defaults to `0`, and `--feature_cache_dir`
+  optionally selects the persistent cache location.
+
 **Bounded external ASR feature extraction**
 
 - **`eval/eval_asr_attn.py`**: external adapters such as WavLM now limit audio

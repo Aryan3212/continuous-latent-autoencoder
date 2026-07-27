@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pathlib
 import time
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from jiwer import cer, wer
 
@@ -228,6 +231,54 @@ def _decode(
     return {"wer": float(w), "cer": float(c), "num_samples": len(texts), "examples": examples}
 
 
+def _decode_cached_loader(
+    head: AttnDecoderHead,
+    loader: Iterable[Tuple[torch.Tensor, torch.Tensor, List[str]]],
+    id2tok: List[str],
+    device: torch.device,
+    max_decode_len: int = 200,
+) -> Dict[str, Any]:
+    """Greedily decode a disk-backed feature ``DataLoader`` batch by batch."""
+    head.eval()
+    all_texts: List[str] = []
+    all_hyps: List[str] = []
+    skip = {PAD_IDX, BOS_IDX, EOS_IDX}
+    with torch.no_grad():
+        for xb_cpu, vl_cpu, texts in loader:
+            xb = xb_cpu.to(device)
+            vl = vl_cpu.to(device)
+            B, T, _ = xb.shape
+            memory = head.encode_memory(xb)
+            mem_kpm = torch.arange(T, device=device)[None, :] >= vl[:, None]
+            ys = torch.full((B, 1), BOS_IDX, dtype=torch.long, device=device)
+            finished = torch.zeros(B, dtype=torch.bool, device=device)
+            for _ in range(max_decode_len):
+                logits = head(memory, mem_kpm, ys, ys == PAD_IDX)
+                next_tok = logits[:, -1].argmax(dim=-1).masked_fill(finished, PAD_IDX)
+                ys = torch.cat([ys, next_tok[:, None]], dim=1)
+                finished = finished | (next_tok == EOS_IDX)
+                if finished.all():
+                    break
+            for row in ys.cpu().tolist():
+                hyp_ids: List[int] = []
+                for tok_id in row[1:]:
+                    if tok_id == EOS_IDX:
+                        break
+                    hyp_ids.append(tok_id)
+                all_hyps.append("".join(id2tok[i] for i in hyp_ids if i not in skip))
+            all_texts.extend(texts)
+    examples = [
+        {"ref": ref, "hyp": hyp}
+        for ref, hyp in zip(all_texts[:5], all_hyps[:5])
+    ]
+    return {
+        "wer": float(wer(all_texts, all_hyps)),
+        "cer": float(cer(all_texts, all_hyps)),
+        "num_samples": len(all_texts),
+        "examples": examples,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Batch collation helpers for seq2seq training
 # ---------------------------------------------------------------------------
@@ -264,80 +315,253 @@ def _make_batch_targets(
     return tgt_in, tgt_out, tgt_kpm
 
 
-def _load_adapter_feats_and_text(
+@dataclass
+class _ExternalFeatureCache:
+    """Small index for a feature cache whose frame tensors remain on disk."""
+
+    root: pathlib.Path
+    records: List[Dict[str, Any]]
+    feature_dim: int
+
+    @property
+    def texts(self) -> List[str]:
+        return [str(record["text"]) for record in self.records]
+
+
+class _CachedFeatureDataset(Dataset[Tuple[torch.Tensor, str]]):
+    """Map-style view that loads one cached, variable-length feature tensor."""
+
+    def __init__(self, cache: _ExternalFeatureCache) -> None:
+        self.cache = cache
+
+    def __len__(self) -> int:
+        return len(self.cache.records)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, str]:
+        record = self.cache.records[index]
+        # Cache files are created locally by this evaluator, not supplied as
+        # arbitrary checkpoints; weights_only still avoids pickle execution.
+        frames = torch.load(
+            self.cache.root / str(record["feature"]), map_location="cpu", weights_only=True
+        )
+        if not isinstance(frames, torch.Tensor) or frames.ndim != 2:
+            raise RuntimeError(f"Invalid cached ASR feature file: {record['feature']}")
+        return frames.float(), str(record["text"])
+
+
+def _collate_cached_features(
+    batch: List[Tuple[torch.Tensor, str]],
+) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
+    frames, texts = zip(*batch)
+    lens = torch.tensor([frame.size(0) for frame in frames], dtype=torch.long)
+    return torch.nn.utils.rnn.pad_sequence(list(frames), batch_first=True), lens, list(texts)
+
+
+def _cache_config(
     model_name: str,
     manifest: str,
     *,
     text_key: str,
     max_samples: int,
     segment_seconds: float,
+    max_utt_seconds: float,
+) -> Dict[str, Any]:
+    stat = pathlib.Path(manifest).resolve().stat()
+    return {
+        "format": 1,
+        "model": model_name,
+        "manifest": str(pathlib.Path(manifest).resolve()),
+        "manifest_size": stat.st_size,
+        "manifest_mtime_ns": stat.st_mtime_ns,
+        "text_key": text_key,
+        "max_samples": max_samples,
+        "segment_seconds": segment_seconds,
+        "max_utt_seconds": max_utt_seconds,
+    }
+
+
+def _read_cache_records(index_path: pathlib.Path) -> List[Dict[str, Any]]:
+    if not index_path.exists():
+        return []
+    with index_path.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _write_cache_metadata(path: pathlib.Path, data: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _cache_external_features(
+    model_name: str,
+    manifest: str,
+    *,
+    text_key: str,
+    max_samples: int,
+    segment_seconds: float,
+    max_utt_seconds: float,
     embedder: Any,
-) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
-    """Extract bounded, CPU-resident frames from a ``repr_bench`` adapter.
+    cache_dir: pathlib.Path,
+    split_name: str,
+) -> Tuple[_ExternalFeatureCache, int, int]:
+    """Stream a manifest into a resumable disk cache without retaining frames.
 
-    External adapters do not use the project's fixed-length training collator.
-    Limit decoding to ``segment_seconds`` here rather than relying on manifest
-    duration metadata, which is commonly missing in evaluation manifests.
+    ``DataLoader`` later reads these tensors individually and pads only the
+    current batch.  The JSONL index intentionally contains only lightweight
+    paths/transcripts (at most ``max_samples`` entries), never frame arrays or
+    the full source manifest.
     """
-    import os
-
     import torchaudio
 
     spec = model_spec(model_name)
     if not spec.supports_asr_probe:
         raise ValueError(f"{model_name} exposes utterance-only features and cannot be used for ASR")
-    with open(manifest, encoding="utf-8") as f:
-        rows = [json.loads(line) for line in f if line.strip()]
-    root = resolve_manifest_root(manifest, rows)
-    feats: List[torch.Tensor] = []
-    texts: List[str] = []
-    truncated = 0
-    for row in rows:
-        text = row.get(text_key)
-        if not isinstance(text, str) or not text.strip():
-            continue
-        path = str(row["audio_filepath"])
-        if not os.path.isabs(path):
-            path = str(root / path)
-        info_fn = getattr(torchaudio, "info", None)
-        if info_fn is not None:
-            info = info_fn(path)
-            max_frames = math.ceil(segment_seconds * info.sample_rate)
-            wav, sr = torchaudio.load(path, num_frames=max_frames)
-            truncated += int(info.num_frames > max_frames)
-        else:
-            # Some torchaudio builds expose ``load`` but not ``info``. Keep
-            # the evaluator usable there: crop after loading, before
-            # resampling and WavLM inference.
-            wav, sr = torchaudio.load(path)
-            max_frames = math.ceil(segment_seconds * sr)
-            truncated += int(wav.size(-1) > max_frames)
-            wav = wav[..., :max_frames]
-        if wav.size(0) > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        wav16k = _resample(wav.squeeze(0), int(sr), TARGET_SR)
-        frames = torch.from_numpy(embedder.fn(wav16k)).float()
-        if frames.ndim != 2 or frames.size(0) < 1:
-            raise RuntimeError(f"{model_name} returned invalid ASR feature shape {tuple(frames.shape)}")
-        feats.append(frames)
-        texts.append(text)
-        if len(feats) % 50 == 0:
-            print(
-                f"  [ASR-ATTN] {model_name}: extracted {len(feats)} "
-                f"features ({truncated} clipped to {segment_seconds:g}s)",
-                flush=True,
+
+    config = _cache_config(
+        model_name, manifest, text_key=text_key, max_samples=max_samples,
+        segment_seconds=segment_seconds, max_utt_seconds=max_utt_seconds,
+    )
+    meta_path = cache_dir / "metadata.json"
+    index_path = cache_dir / "index.jsonl"
+    features_dir = cache_dir / "features"
+    if cache_dir.exists():
+        if not meta_path.exists():
+            raise RuntimeError(
+                f"Feature cache {cache_dir} has no metadata; remove it or choose --feature_cache_dir"
             )
-        if max_samples and len(feats) >= max_samples:
-            break
-    if not feats:
+        previous = json.loads(meta_path.read_text(encoding="utf-8"))
+        previous_config = {key: previous.get(key) for key in config}
+        if previous_config != config:
+            raise RuntimeError(
+                f"Feature cache {cache_dir} was made for different inputs; remove it or choose "
+                "--feature_cache_dir"
+            )
+    else:
+        cache_dir.mkdir(parents=True)
+        features_dir.mkdir()
+        _write_cache_metadata(meta_path, {**config, "complete": False, "feature_dim": None})
+
+    records = _read_cache_records(index_path)
+    existing = len(records)
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    if bool(metadata.get("complete")):
+        if not records:
+            raise RuntimeError(f"Completed feature cache {cache_dir} has no records")
+        feature_dim = int(metadata["feature_dim"])
+        print(f"  [ASR-ATTN] Reusing {split_name} feature cache: {existing} samples at {cache_dir}", flush=True)
+        return (
+            _ExternalFeatureCache(cache_dir, records, feature_dim),
+            int(metadata.get("n_filtered", 0)),
+            int(metadata.get("n_unknown_duration", 0)),
+        )
+
+    features_dir.mkdir(exist_ok=True)
+    root: pathlib.Path | None = None
+    kept = dropped = unknown_duration = truncated = accepted = 0
+    feature_dim: int | None = None
+    if records:
+        cached = torch.load(cache_dir / str(records[0]["feature"]), map_location="cpu", weights_only=True)
+        if not isinstance(cached, torch.Tensor) or cached.ndim != 2:
+            raise RuntimeError(f"Invalid cached ASR feature file: {records[0]['feature']}")
+        feature_dim = int(cached.size(1))
+    # Resume interrupted extraction by scanning rows again but retaining no
+    # waveform/features for the already-written prefix.
+    with open(manifest, encoding="utf-8") as f, index_path.open("a", encoding="utf-8") as index_file:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            duration = row.get("duration")
+            if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
+                unknown_duration += 1
+            elif duration > max_utt_seconds:
+                dropped += 1
+                continue
+            text = row.get(text_key)
+            if not isinstance(text, str) or not text.strip():
+                continue
+            raw_path = row.get("audio_filepath")
+            if not isinstance(raw_path, str):
+                raise ValueError(f"Manifest row has no string audio_filepath: {row}")
+            if os.path.isabs(raw_path):
+                path = raw_path
+            else:
+                # Do not lock the root to the manifest parent merely because
+                # an earlier row happened to use an absolute path.
+                if root is None:
+                    root = resolve_manifest_root(manifest, [row])
+                path = str(root / raw_path)
+            kept += 1
+            if accepted < existing:
+                accepted += 1
+                continue
+            if max_samples and accepted >= max_samples:
+                break
+            info_fn = getattr(torchaudio, "info", None)
+            if info_fn is not None:
+                info = info_fn(path)
+                max_frames = math.ceil(segment_seconds * info.sample_rate)
+                wav, sr = torchaudio.load(path, num_frames=max_frames)
+                truncated += int(info.num_frames > max_frames)
+            else:
+                # Some torchaudio builds expose ``load`` but not ``info``.
+                # Crop before resampling and WavLM inference in that case too.
+                wav, sr = torchaudio.load(path)
+                max_frames = math.ceil(segment_seconds * sr)
+                truncated += int(wav.size(-1) > max_frames)
+                wav = wav[..., :max_frames]
+            if wav.size(0) > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            wav16k = _resample(wav.squeeze(0), int(sr), TARGET_SR)
+            frames = torch.from_numpy(embedder.fn(wav16k)).float().contiguous()
+            if frames.ndim != 2 or frames.size(0) < 1:
+                raise RuntimeError(f"{model_name} returned invalid ASR feature shape {tuple(frames.shape)}")
+            if feature_dim is None:
+                feature_dim = frames.size(1)
+            elif frames.size(1) != feature_dim:
+                raise RuntimeError(f"{model_name} changed feature dimension within one run")
+            feature_rel = pathlib.Path("features") / f"{accepted:08d}.pt"
+            feature_path = cache_dir / feature_rel
+            temp_path = feature_path.with_suffix(".tmp")
+            torch.save(frames, temp_path)
+            temp_path.replace(feature_path)
+            record = {"feature": str(feature_rel), "text": text, "source": path}
+            index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            index_file.flush()
+            records.append(record)
+            accepted += 1
+            if accepted % 50 == 0:
+                print(
+                    f"  [ASR-ATTN] {model_name}: cached {accepted} {split_name} features "
+                    f"({truncated} clipped to {segment_seconds:g}s)",
+                    flush=True,
+                )
+
+    if not records:
         raise ValueError(f"No usable transcript/audio rows in {manifest}")
+    if feature_dim is None:
+        cached = torch.load(cache_dir / str(records[0]["feature"]), map_location="cpu", weights_only=True)
+        if not isinstance(cached, torch.Tensor) or cached.ndim != 2:
+            raise RuntimeError(f"Invalid cached ASR feature file: {records[0]['feature']}")
+        feature_dim = int(cached.size(1))
+    _write_cache_metadata(
+        meta_path,
+        {
+            **config,
+            "complete": True,
+            "feature_dim": feature_dim,
+            "n_filtered": dropped,
+            "n_unknown_duration": unknown_duration,
+        },
+    )
     print(
-        f"  [ASR-ATTN] {model_name}: extracted {len(feats)} features total "
-        f"({truncated} clipped to {segment_seconds:g}s)",
+        f"  [ASR-ATTN] {model_name}: cached {len(records)} {split_name} features total "
+        f"({truncated} clipped to {segment_seconds:g}s; {dropped} known-long rows skipped; "
+        f"{unknown_duration} unknown durations scanned)",
         flush=True,
     )
-    lens = torch.tensor([x.size(0) for x in feats], dtype=torch.long)
-    return torch.nn.utils.rnn.pad_sequence(feats, batch_first=True), lens, texts
+    return _ExternalFeatureCache(cache_dir, records, feature_dim), dropped, unknown_duration
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +593,17 @@ def main() -> None:
     ap.add_argument(
         "--max_samples", type=int, default=0,
         help="Cap train/dev samples (0=unlimited)"
+    )
+    ap.add_argument(
+        "--feature_cache_dir", default=None,
+        help=(
+            "Directory for external-adapter frame tensors (default: derived from --out). "
+            "The cache is resumable and lets training/evaluation stream batches from disk."
+        ),
+    )
+    ap.add_argument(
+        "--num_workers", type=int, default=0,
+        help="Feature-cache DataLoader workers (default: 0; safer for WSL and HDD-backed audio).",
     )
     ap.add_argument(
         "--max_utt_seconds", type=float, default=None,
@@ -405,6 +640,8 @@ def main() -> None:
     )
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
+    if args.num_workers < 0:
+        ap.error("--num_workers must be non-negative")
 
     # ``ours_random`` deliberately takes the shared adapter route so it keeps
     # freshly initialized weights instead of accidentally loading the checkpoint.
@@ -438,21 +675,27 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 3. Filter manifests (note the .attn. infix — never clobbers CTC outputs)
+    # 3. Filter manifests for CLAE. External adapters apply the duration
+    #    check while streaming into their cache, so they never materialize a
+    #    second full JSONL file or list of all manifest rows.
     # ------------------------------------------------------------------
     out_path = pathlib.Path(args.out)
-    train_manifest, _, n_filtered_tr, n_unknown_tr = _filter_manifest_by_duration(
-        args.train_manifest,
-        max_utt,
-        out_path.with_suffix(".attn.train_filtered.jsonl"),
-        "Filter train",
-    )
-    dev_manifest, _, n_filtered_de, n_unknown_de = _filter_manifest_by_duration(
-        args.dev_manifest,
-        max_utt,
-        out_path.with_suffix(".attn.dev_filtered.jsonl"),
-        "Filter dev",
-    )
+    if is_clae:
+        train_manifest, _, n_filtered_tr, n_unknown_tr = _filter_manifest_by_duration(
+            args.train_manifest,
+            max_utt,
+            out_path.with_suffix(".attn.train_filtered.jsonl"),
+            "Filter train",
+        )
+        dev_manifest, _, n_filtered_de, n_unknown_de = _filter_manifest_by_duration(
+            args.dev_manifest,
+            max_utt,
+            out_path.with_suffix(".attn.dev_filtered.jsonl"),
+            "Filter dev",
+        )
+    else:
+        train_manifest, dev_manifest = args.train_manifest, args.dev_manifest
+        n_filtered_tr = n_filtered_de = n_unknown_tr = n_unknown_de = 0
 
     # ------------------------------------------------------------------
     # 4. Dry-run: pull one batch, write shape info, exit
@@ -467,11 +710,13 @@ def main() -> None:
             ))
         else:
             adapter = build_embedder(args.model, ckpt=args.ckpt)
-            feats, _, texts = _load_adapter_feats_and_text(
+            dry_cache, _, _ = _cache_external_features(
                 args.model, train_manifest, text_key=args.text_key, max_samples=1,
-                segment_seconds=seg, embedder=adapter,
+                segment_seconds=seg, max_utt_seconds=max_utt, embedder=adapter,
+                cache_dir=out_path.with_suffix(".attn_dryrun_features"), split_name="dry-run",
             )
-            meta = texts
+            frame, text = _CachedFeatureDataset(dry_cache)[0]
+            feats, meta = frame.unsqueeze(0), [text]
         out = {
             "dry_run": True,
             "feats_shape": list(feats.shape),
@@ -482,7 +727,9 @@ def main() -> None:
         return
 
     # ------------------------------------------------------------------
-    # 5. Extract features (CPU-resident; per-batch GPU moves during training)
+    # 5. Extract features. CLAE retains its legacy in-memory path; external
+    #    adapters cache one frame tensor per utterance and stream it through
+    #    DataLoaders below. This keeps RAM proportional to batch size.
     # ------------------------------------------------------------------
     max_s = args.max_samples
     print(
@@ -496,12 +743,18 @@ def main() -> None:
             mel_hop=args.mel_hop, log_name="ASR-ATTN train", max_samples=max_s,
         )
     else:
+        cache_root = (
+            pathlib.Path(args.feature_cache_dir)
+            if args.feature_cache_dir
+            else out_path.with_suffix(".attn_features")
+        )
         # One frozen adapter serves both splits. Re-instantiating WavLM for
         # dev extraction needlessly reloads 95M parameters onto the GPU.
         adapter = build_embedder(args.model, ckpt=args.ckpt)
-        feats_tr, lens_tr, text_tr = _load_adapter_feats_and_text(
+        train_cache, n_filtered_tr, n_unknown_tr = _cache_external_features(
             args.model, train_manifest, text_key=args.text_key, max_samples=max_s,
-            segment_seconds=seg, embedder=adapter,
+            segment_seconds=seg, max_utt_seconds=max_utt, embedder=adapter, cache_dir=cache_root / "train",
+            split_name="train",
         )
     print(
         f"  [ASR-ATTN] Extracting dev features{f' (max {max_s})' if max_s else ''}...",
@@ -514,9 +767,10 @@ def main() -> None:
             mel_hop=args.mel_hop, log_name="ASR-ATTN dev", max_samples=max_s,
         )
     else:
-        feats_de, lens_de, text_de = _load_adapter_feats_and_text(
+        dev_cache, n_filtered_de, n_unknown_de = _cache_external_features(
             args.model, dev_manifest, text_key=args.text_key, max_samples=max_s,
-            segment_seconds=seg, embedder=adapter,
+            segment_seconds=seg, max_utt_seconds=max_utt, embedder=adapter, cache_dir=cache_root / "dev",
+            split_name="dev",
         )
 
     # ------------------------------------------------------------------
@@ -527,7 +781,15 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    print(f"  [ASR-ATTN] Train: {feats_tr.shape}, Dev: {feats_de.shape}", flush=True)
+    if is_clae:
+        print(f"  [ASR-ATTN] Train: {feats_tr.shape}, Dev: {feats_de.shape}", flush=True)
+    else:
+        print(
+            f"  [ASR-ATTN] Train: {len(train_cache.records)} disk-cached features "
+            f"(D={train_cache.feature_dim}), Dev: {len(dev_cache.records)} disk-cached features "
+            f"(D={dev_cache.feature_dim})",
+            flush=True,
+        )
 
     # ------------------------------------------------------------------
     # 7. Build / load attention vocab (DISTINCT cache from CTC .charset.json)
@@ -540,7 +802,7 @@ def main() -> None:
             flush=True,
         )
     else:
-        vocab_list = build_attn_vocab(text_tr)
+        vocab_list = build_attn_vocab(text_tr if is_clae else train_cache.texts)
         charset_path.write_text(
             json.dumps(vocab_list, ensure_ascii=False), encoding="utf-8"
         )
@@ -555,9 +817,10 @@ def main() -> None:
     # 8. Encode train transcripts to id lists
     #    (No infeasibility filtering — attention has no T >= L constraint)
     # ------------------------------------------------------------------
-    targets_tr: List[List[int]] = [
-        [vocab[c] for c in t.lower() if c in vocab] for t in text_tr
-    ]
+    targets_tr: List[List[int]] = (
+        [[vocab[c] for c in t.lower() if c in vocab] for t in text_tr]
+        if is_clae else []
+    )
 
     # ------------------------------------------------------------------
     # 9. Build model, optimizer, loss
@@ -566,7 +829,7 @@ def main() -> None:
     # Features stay on CPU — only per-batch slices are moved to GPU.
 
     head = AttnDecoderHead(
-        feat_dim=feats_tr.size(-1),
+        feat_dim=feats_tr.size(-1) if is_clae else train_cache.feature_dim,
         vocab_size=len(vocab_list),
         d_model=args.d_model,
         nhead=args.nhead,
@@ -582,21 +845,39 @@ def main() -> None:
     # 10. Training loop
     # ------------------------------------------------------------------
     head.train()
-    N = feats_tr.size(0)
     t0 = time.perf_counter()
     log_interval = max(1, args.steps // 10)
 
+    if is_clae:
+        N = feats_tr.size(0)
+    else:
+        train_dataset = _CachedFeatureDataset(train_cache)
+        sampler = RandomSampler(
+            train_dataset, replacement=True, num_samples=args.steps * args.batch_size
+        )
+        train_loader = DataLoader(
+            train_dataset, batch_size=args.batch_size, sampler=sampler,
+            num_workers=args.num_workers, collate_fn=_collate_cached_features,
+        )
+        train_iter = iter(train_loader)
+
     for step_i in range(args.steps):
-        idx = torch.randint(0, N, (args.batch_size,))
-        xb = feats_tr[idx].to(device)   # (B, T, D) — only batch on GPU
-        vl = lens_tr[idx].to(device)    # (B,)
+        if is_clae:
+            idx = torch.randint(0, N, (args.batch_size,))
+            xb = feats_tr[idx].to(device)   # (B, T, D) — only batch on GPU
+            vl = lens_tr[idx].to(device)    # (B,)
+            batch_ids = [targets_tr[int(i)] for i in idx.tolist()]
+        else:
+            xb_cpu, vl_cpu, batch_texts = next(train_iter)
+            xb = xb_cpu.to(device)
+            vl = vl_cpu.to(device)
+            batch_ids = [[vocab[c] for c in text.lower() if c in vocab] for text in batch_texts]
         T = xb.size(1)
 
         # Memory padding mask: True where frame index >= valid length.
         mem_kpm = torch.arange(T, device=device)[None, :] >= vl[:, None]  # (B, T)
 
         # Build teacher-forced targets for this batch.
-        batch_ids = [targets_tr[int(i)] for i in idx.tolist()]
         tgt_in, tgt_out, tgt_kpm = _make_batch_targets(batch_ids, device)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
@@ -626,14 +907,30 @@ def main() -> None:
     # 11. Evaluate (greedy autoregressive decode)
     # ------------------------------------------------------------------
     print("  [ASR-ATTN] Evaluating...", flush=True)
-    result_tr = _decode(
-        head, feats_tr, lens_tr, text_tr, id2tok, device,
-        max_decode_len=args.max_decode_len,
-    )
-    result_de = _decode(
-        head, feats_de, lens_de, text_de, id2tok, device,
-        max_decode_len=args.max_decode_len,
-    )
+    if is_clae:
+        result_tr = _decode(
+            head, feats_tr, lens_tr, text_tr, id2tok, device,
+            max_decode_len=args.max_decode_len,
+        )
+        result_de = _decode(
+            head, feats_de, lens_de, text_de, id2tok, device,
+            max_decode_len=args.max_decode_len,
+        )
+    else:
+        train_eval_loader = DataLoader(
+            _CachedFeatureDataset(train_cache), batch_size=args.batch_size,
+            shuffle=False, num_workers=args.num_workers, collate_fn=_collate_cached_features,
+        )
+        dev_eval_loader = DataLoader(
+            _CachedFeatureDataset(dev_cache), batch_size=args.batch_size,
+            shuffle=False, num_workers=args.num_workers, collate_fn=_collate_cached_features,
+        )
+        result_tr = _decode_cached_loader(
+            head, train_eval_loader, id2tok, device, max_decode_len=args.max_decode_len,
+        )
+        result_de = _decode_cached_loader(
+            head, dev_eval_loader, id2tok, device, max_decode_len=args.max_decode_len,
+        )
 
     # ------------------------------------------------------------------
     # 12. Write output JSON
@@ -651,6 +948,8 @@ def main() -> None:
         "chunk_seconds": chunk,
         "features": args.features,
         "model": args.model,
+        "feature_cache_dir": str(cache_root) if not is_clae else None,
+        "num_workers": args.num_workers if not is_clae else None,
         "mel_hop": args.mel_hop if args.features == "mel" else None,
         "n_filtered_train": n_filtered_tr,
         "n_filtered_dev": n_filtered_de,
