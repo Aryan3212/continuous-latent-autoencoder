@@ -271,7 +271,7 @@ def _load_adapter_feats_and_text(
     text_key: str,
     max_samples: int,
     segment_seconds: float,
-    ckpt: str | None = None,
+    embedder: Any,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
     """Extract bounded, CPU-resident frames from a ``repr_bench`` adapter.
 
@@ -289,7 +289,6 @@ def _load_adapter_feats_and_text(
     with open(manifest, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
     root = resolve_manifest_root(manifest, rows)
-    embedder = build_embedder(model_name, ckpt=ckpt)
     feats: List[torch.Tensor] = []
     texts: List[str] = []
     truncated = 0
@@ -411,6 +410,7 @@ def main() -> None:
     # freshly initialized weights instead of accidentally loading the checkpoint.
     is_clae = args.model == "ours"
     lm = None
+    adapter: Any = None
     if is_clae:
         if not args.config or not args.ckpt:
             ap.error("--config and --ckpt are required for --model ours")
@@ -466,9 +466,10 @@ def main() -> None:
                 source=args.features, mel_hop=args.mel_hop,
             ))
         else:
+            adapter = build_embedder(args.model, ckpt=args.ckpt)
             feats, _, texts = _load_adapter_feats_and_text(
                 args.model, train_manifest, text_key=args.text_key, max_samples=1,
-                segment_seconds=seg, ckpt=args.ckpt,
+                segment_seconds=seg, embedder=adapter,
             )
             meta = texts
         out = {
@@ -495,9 +496,12 @@ def main() -> None:
             mel_hop=args.mel_hop, log_name="ASR-ATTN train", max_samples=max_s,
         )
     else:
+        # One frozen adapter serves both splits. Re-instantiating WavLM for
+        # dev extraction needlessly reloads 95M parameters onto the GPU.
+        adapter = build_embedder(args.model, ckpt=args.ckpt)
         feats_tr, lens_tr, text_tr = _load_adapter_feats_and_text(
             args.model, train_manifest, text_key=args.text_key, max_samples=max_s,
-            segment_seconds=seg, ckpt=args.ckpt,
+            segment_seconds=seg, embedder=adapter,
         )
     print(
         f"  [ASR-ATTN] Extracting dev features{f' (max {max_s})' if max_s else ''}...",
@@ -512,14 +516,14 @@ def main() -> None:
     else:
         feats_de, lens_de, text_de = _load_adapter_feats_and_text(
             args.model, dev_manifest, text_key=args.text_key, max_samples=max_s,
-            segment_seconds=seg, ckpt=args.ckpt,
+            segment_seconds=seg, embedder=adapter,
         )
 
     # ------------------------------------------------------------------
     # 6. Free the frozen encoder to reclaim GPU memory
     # ------------------------------------------------------------------
-    if lm is not None:
-        del lm
+    if lm is not None or adapter is not None:
+        del lm, adapter
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

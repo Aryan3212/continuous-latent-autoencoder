@@ -14,6 +14,9 @@ Date format: `YYYY-MM-DD`
 - **Compatibility**: when an installed `torchaudio` exposes `load` but not
   `info`, the evaluator now loads then crops the waveform before resampling and
   WavLM inference instead of failing during feature extraction.
+- **WavLM lifecycle**: train and dev feature extraction now share one frozen
+  adapter instance, which is released before probe training; the evaluator no
+  longer reloads WavLM between splits.
 
 ## 2026-07-23
 
