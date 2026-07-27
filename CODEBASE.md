@@ -183,6 +183,8 @@ same name.
   reads local Common Voice Bengali `validated.tsv` metadata.
 - `eval/eval_asr_attn.py` — fixed-budget 2-layer Transformer-decoder ASR probe;
   it accepts the shared adapters and is the content metric for low-rate CLAE.
+  External adapters decode only up to `--segment_seconds` per utterance even
+  when manifest duration metadata is absent, and report extraction progress.
 - `eval/eval_repr_viz.py` / `eval/render_compact_scorecard.py` — PCA+UMAP
   attribute plots and Markdown scorecard aggregation.
 - `eval/eval_mimi_recon.py` — standalone Mimi reconstruction baseline using the

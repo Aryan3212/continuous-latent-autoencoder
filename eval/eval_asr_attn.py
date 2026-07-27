@@ -270,9 +270,15 @@ def _load_adapter_feats_and_text(
     *,
     text_key: str,
     max_samples: int,
+    segment_seconds: float,
     ckpt: str | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
-    """Extract CPU-resident frames from a ``repr_bench`` adapter for ASR."""
+    """Extract bounded, CPU-resident frames from a ``repr_bench`` adapter.
+
+    External adapters do not use the project's fixed-length training collator.
+    Limit decoding to ``segment_seconds`` here rather than relying on manifest
+    duration metadata, which is commonly missing in evaluation manifests.
+    """
     import os
 
     import torchaudio
@@ -286,6 +292,7 @@ def _load_adapter_feats_and_text(
     embedder = build_embedder(model_name, ckpt=ckpt)
     feats: List[torch.Tensor] = []
     texts: List[str] = []
+    truncated = 0
     for row in rows:
         text = row.get(text_key)
         if not isinstance(text, str) or not text.strip():
@@ -293,7 +300,10 @@ def _load_adapter_feats_and_text(
         path = str(row["audio_filepath"])
         if not os.path.isabs(path):
             path = str(root / path)
-        wav, sr = torchaudio.load(path)
+        info = torchaudio.info(path)
+        max_frames = math.ceil(segment_seconds * info.sample_rate)
+        wav, sr = torchaudio.load(path, num_frames=max_frames)
+        truncated += int(info.num_frames > max_frames)
         if wav.size(0) > 1:
             wav = wav.mean(dim=0, keepdim=True)
         wav16k = _resample(wav.squeeze(0), int(sr), TARGET_SR)
@@ -302,10 +312,21 @@ def _load_adapter_feats_and_text(
             raise RuntimeError(f"{model_name} returned invalid ASR feature shape {tuple(frames.shape)}")
         feats.append(frames)
         texts.append(text)
+        if len(feats) % 50 == 0:
+            print(
+                f"  [ASR-ATTN] {model_name}: extracted {len(feats)} "
+                f"features ({truncated} clipped to {segment_seconds:g}s)",
+                flush=True,
+            )
         if max_samples and len(feats) >= max_samples:
             break
     if not feats:
         raise ValueError(f"No usable transcript/audio rows in {manifest}")
+    print(
+        f"  [ASR-ATTN] {model_name}: extracted {len(feats)} features total "
+        f"({truncated} clipped to {segment_seconds:g}s)",
+        flush=True,
+    )
     lens = torch.tensor([x.size(0) for x in feats], dtype=torch.long)
     return torch.nn.utils.rnn.pad_sequence(feats, batch_first=True), lens, texts
 
@@ -328,7 +349,14 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--batch_size", type=int, default=16)
-    ap.add_argument("--segment_seconds", type=float, default=None)
+    ap.add_argument(
+        "--segment_seconds", type=float, default=None,
+        help=(
+            "Maximum audio duration passed to the feature extractor "
+            "(also defaults --max_utt_seconds). External adapters hard-crop "
+            "audio even when manifest durations are missing."
+        ),
+    )
     ap.add_argument(
         "--max_samples", type=int, default=0,
         help="Cap train/dev samples (0=unlimited)"
@@ -429,7 +457,8 @@ def main() -> None:
             ))
         else:
             feats, _, texts = _load_adapter_feats_and_text(
-                args.model, train_manifest, text_key=args.text_key, max_samples=1, ckpt=args.ckpt
+                args.model, train_manifest, text_key=args.text_key, max_samples=1,
+                segment_seconds=seg, ckpt=args.ckpt,
             )
             meta = texts
         out = {
@@ -457,7 +486,8 @@ def main() -> None:
         )
     else:
         feats_tr, lens_tr, text_tr = _load_adapter_feats_and_text(
-            args.model, train_manifest, text_key=args.text_key, max_samples=max_s, ckpt=args.ckpt
+            args.model, train_manifest, text_key=args.text_key, max_samples=max_s,
+            segment_seconds=seg, ckpt=args.ckpt,
         )
     print(
         f"  [ASR-ATTN] Extracting dev features{f' (max {max_s})' if max_s else ''}...",
@@ -471,7 +501,8 @@ def main() -> None:
         )
     else:
         feats_de, lens_de, text_de = _load_adapter_feats_and_text(
-            args.model, dev_manifest, text_key=args.text_key, max_samples=max_s, ckpt=args.ckpt
+            args.model, dev_manifest, text_key=args.text_key, max_samples=max_s,
+            segment_seconds=seg, ckpt=args.ckpt,
         )
 
     # ------------------------------------------------------------------

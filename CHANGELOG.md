@@ -2,6 +2,16 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-07-27
+
+**Bounded external ASR feature extraction**
+
+- **`eval/eval_asr_attn.py`**: external adapters such as WavLM now limit audio
+  decoding to `--segment_seconds` before resampling and feature extraction.
+  This makes the probe's duration bound effective when evaluation manifests
+  lack duration metadata, avoids unbounded WavLM inputs, and logs periodic and
+  final extraction progress with the number of clipped utterances.
+
 ## 2026-07-23
 
 **Packed epoch resume state and decoder-collapse diagnostics**
