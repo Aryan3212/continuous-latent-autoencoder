@@ -11,10 +11,22 @@ import json
 
 import numpy as np
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_common_voice_age_utterances
+from eval.repr_bench import (
+    DEFAULT_MODELS,
+    EVAL_DIR,
+    MODEL_ORDER,
+    extract,
+    load_common_voice_age_utterances,
+)
 
 
-def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> dict:
+def probe(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    folds: int,
+    seed: int,
+) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import balanced_accuracy_score, f1_score
     from sklearn.model_selection import GroupKFold
@@ -23,14 +35,34 @@ def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> dict:
     n_splits = min(folds, len(np.unique(groups)))
     if n_splits < 2:
         raise ValueError("Age probe needs at least two labelled speakers")
-    scores, f1s = [], []
-    for tr, te in GroupKFold(n_splits=n_splits).split(X, y, groups):
+    scores, f1s, fold_results = [], [], []
+    for fold, (tr, te) in enumerate(
+        GroupKFold(n_splits=n_splits).split(X, y, groups)
+    ):
         scaler = StandardScaler().fit(X[tr])
-        clf = LogisticRegression(max_iter=3000, C=1.0, class_weight="balanced")
+        clf = LogisticRegression(
+            max_iter=3000,
+            C=1.0,
+            class_weight="balanced",
+            random_state=seed,
+        )
         clf.fit(scaler.transform(X[tr]), y[tr])
         pred = clf.predict(scaler.transform(X[te]))
-        scores.append(balanced_accuracy_score(y[te], pred))
-        f1s.append(f1_score(y[te], pred, average="macro", zero_division=0))
+        balanced_accuracy = float(balanced_accuracy_score(y[te], pred))
+        macro_f1 = float(
+            f1_score(y[te], pred, average="macro", zero_division=0)
+        )
+        scores.append(balanced_accuracy)
+        f1s.append(macro_f1)
+        fold_results.append({
+            "fold": fold,
+            "balanced_accuracy": balanced_accuracy,
+            "macro_f1": macro_f1,
+            "n_train": int(len(tr)),
+            "n_test": int(len(te)),
+            "n_train_speakers": int(len(np.unique(groups[tr]))),
+            "n_test_speakers": int(len(np.unique(groups[te]))),
+        })
     return {
         "balanced_accuracy": float(np.mean(scores)),
         "balanced_accuracy_std": float(np.std(scores)),
@@ -38,6 +70,7 @@ def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> dict:
         "macro_f1_std": float(np.std(f1s)),
         "n_splits": n_splits,
         "dim": int(X.shape[1]),
+        "folds": fold_results,
     }
 
 
@@ -45,7 +78,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cv_root", required=True, help="Common Voice release directory containing validated.tsv + clips/")
     ap.add_argument("--max-utts", type=int, default=None)
-    ap.add_argument("--models", default=",".join(MODEL_ORDER))
+    ap.add_argument(
+        "--models",
+        default=",".join(DEFAULT_MODELS),
+        help="Comma-separated subset of: " + ",".join(MODEL_ORDER),
+    )
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--pool", default="meanstd", choices=["mean", "meanstd"])
     ap.add_argument("--folds", type=int, default=5)
@@ -54,11 +91,29 @@ def main() -> None:
     args = ap.parse_args()
 
     models = [x.strip() for x in args.models.split(",") if x.strip()]
+    if not models:
+        ap.error("--models must name at least one model")
+    if args.folds < 2:
+        ap.error("--folds must be at least 2")
+    if args.max_utts is not None and args.max_utts < 1:
+        ap.error("--max-utts must be positive")
     utts = load_common_voice_age_utterances(args.cv_root, args.max_utts, args.seed)
     y = np.asarray([u.age for u in utts])
     groups = np.asarray([u.speaker for u in utts])
     results = {
-        name: probe(extract(name, utts, ckpt=args.ckpt, pool=args.pool, use_cache=not args.no_cache)["X"], y, groups, args.folds)
+        name: probe(
+            extract(
+                name,
+                utts,
+                ckpt=args.ckpt,
+                pool=args.pool,
+                use_cache=not args.no_cache,
+            )["X"],
+            y,
+            groups,
+            args.folds,
+            args.seed,
+        )
         for name in models
     }
     EVAL_DIR.mkdir(parents=True, exist_ok=True)

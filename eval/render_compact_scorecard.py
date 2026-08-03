@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, model_spec
+from eval.repr_bench import DEFAULT_MODELS, EVAL_DIR, MODEL_ORDER, model_spec
 
 
 def _results(path: Path) -> dict:
@@ -18,7 +18,11 @@ def _fmt(value: float | None) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", default=",".join(MODEL_ORDER))
+    ap.add_argument(
+        "--models",
+        default=",".join(DEFAULT_MODELS),
+        help="Comma-separated subset of: " + ",".join(MODEL_ORDER),
+    )
     ap.add_argument("--emotion", type=Path, default=EVAL_DIR / "emotion_probe.json")
     ap.add_argument("--speaker-id", type=Path, default=EVAL_DIR / "speaker_id_probe.json")
     ap.add_argument("--speaker-verif", type=Path, default=EVAL_DIR / "speaker_verif.json")

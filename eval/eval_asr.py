@@ -27,7 +27,12 @@ def _min_ctc_frames(target: List[int]) -> int:
 
 
 def _filter_manifest_by_duration(
-    manifest: str, max_seconds: float, out_path: pathlib.Path, log_name: str
+    manifest: str,
+    max_seconds: float,
+    out_path: pathlib.Path,
+    log_name: str,
+    *,
+    text_key: str | None = None,
 ) -> Tuple[str, int, int, int]:
     """Write a filtered copy of `manifest`, dropping rows with duration > max_seconds.
 
@@ -36,10 +41,10 @@ def _filter_manifest_by_duration(
     CTC target, so utterances longer than the segment would train on misaligned
     audio/text. Drop them before feature extraction.
 
-    Missing-duration policy: rows with a missing, non-numeric, or non-positive
-    `duration` (placeholders) are KEPT — we cannot prove they are too long, and
-    dropping them would empty manifests that simply lack durations — but they
-    are counted and reported so the user can audit them.
+    Every duration is verified from the audio header (or decoded as a fallback)
+    rather than trusting potentially stale manifest metadata. The actual
+    duration is written into the filtered row, and overlong audio is dropped
+    rather than cropped against a full transcript.
 
     Relative audio_filepath rows are absolutized (via resolve_manifest_root,
     matching AudioDataset) before relocating the manifest next to --out.
@@ -47,25 +52,60 @@ def _filter_manifest_by_duration(
     with open(manifest, "r", encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
     root = resolve_manifest_root(manifest, rows)
-    kept = dropped = unknown = 0
+    kept = dropped = unknown = missing_text = 0
     out_lines: List[str] = []
     for row in rows:
-        dur = row.get("duration")
-        if not isinstance(dur, (int, float)) or isinstance(dur, bool) or dur <= 0:
+        if text_key is not None:
+            text = row.get(text_key)
+            if not isinstance(text, str) or not text.strip():
+                missing_text += 1
+                continue
+        p = row.get("audio_filepath")
+        if not isinstance(p, str):
+            raise ValueError(f"Manifest row has no string audio_filepath: {row}")
+        if not os.path.isabs(p):
+            p = str(root / p)
+            row["audio_filepath"] = p
+
+        declared_duration = row.get("duration")
+        if (
+            not isinstance(declared_duration, (int, float))
+            or isinstance(declared_duration, bool)
+            or declared_duration <= 0
+        ):
             unknown += 1
-        elif dur > max_seconds:
+        # The transcript/audio boundary is a correctness invariant, so verify
+        # every row against the actual audio rather than trusting stale manifest
+        # metadata. Header reads are cheap; decoding is only a compatibility
+        # fallback for torchaudio builds without ``info``.
+        import torchaudio
+
+        info_fn = getattr(torchaudio, "info", None)
+        if info_fn is not None:
+            info = info_fn(p)
+            if info.sample_rate <= 0 or info.num_frames <= 0:
+                raise ValueError(f"Invalid audio metadata for {p}")
+            dur = info.num_frames / info.sample_rate
+        else:
+            wav, sample_rate = torchaudio.load(p)
+            if sample_rate <= 0 or wav.size(-1) <= 0:
+                raise ValueError(f"Invalid audio data for {p}")
+            dur = wav.size(-1) / sample_rate
+        row["duration"] = float(dur)
+        if float(dur) > max_seconds:
             dropped += 1
             continue
-        p = row.get("audio_filepath")
-        if isinstance(p, str) and not os.path.isabs(p):
-            row["audio_filepath"] = str(root / p)
         out_lines.append(json.dumps(row, ensure_ascii=False))
         kept += 1
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(out_lines) + ("\n" if out_lines else ""), encoding="utf-8")
+    output_text = "\n".join(out_lines) + ("\n" if out_lines else "")
+    if not out_path.exists() or out_path.read_text(encoding="utf-8") != output_text:
+        out_path.write_text(output_text, encoding="utf-8")
     msg = f"  [ASR] {log_name}: kept {kept} rows, dropped {dropped} rows over {max_seconds:.1f}s"
     if unknown:
-        msg += f" ({unknown} rows with missing/placeholder duration kept, unaudited)"
+        msg += f" ({unknown} missing/placeholder durations resolved from audio)"
+    if missing_text:
+        msg += f" ({missing_text} rows without usable {text_key!r} text dropped)"
     print(msg, flush=True)
     return str(out_path), kept, dropped, unknown
 
@@ -162,6 +202,7 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--batch_size", type=int, default=16)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--segment_seconds", type=float, default=None)
     ap.add_argument("--max_samples", type=int, default=0, help="Cap train/dev samples (0=unlimited)")
     ap.add_argument("--upsample_factor", type=int, default=4,
@@ -188,6 +229,15 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
+    if args.steps < 1 or args.batch_size < 1:
+        ap.error("--steps and --batch_size must be positive")
+    if args.max_samples < 0:
+        ap.error("--max_samples must be non-negative")
+    if args.upsample_factor < 1 or args.mel_hop < 1:
+        ap.error("--upsample_factor and --mel_hop must be positive")
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
     # eval.asr.segment_seconds, NOT data.segment_seconds: pretraining crops to
@@ -195,22 +245,37 @@ def main() -> None:
     # transcript no longer matches the start-cropped audio.
     seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.eval.asr.segment_seconds
     max_utt = args.max_utt_seconds if args.max_utt_seconds is not None else seg
+    if seg <= 0 or max_utt <= 0:
+        ap.error("--segment_seconds and --max_utt_seconds must be positive")
+    if max_utt > seg:
+        ap.error(
+            "--max_utt_seconds cannot exceed --segment_seconds: cropping audio "
+            "while retaining the full transcript would invalidate the probe"
+        )
     chunk = args.chunk_seconds if args.chunk_seconds is not None else lm.cfg.data.segment_seconds
     if chunk <= 0:
         chunk = None
     print(f"  [ASR] segment_seconds={seg:g}, max_utt_seconds={max_utt:g}, "
           f"chunk_seconds={'off' if chunk is None else f'{chunk:g}'}, "
           f"features={args.features}", flush=True)
-    upf = max(1, int(args.upsample_factor))
+    upf = int(args.upsample_factor)
 
     # Drop utterances longer than max_utt BEFORE extraction: _start_crop would
     # truncate their audio while the full transcript stays the CTC target.
     out_path = pathlib.Path(args.out)
     train_manifest, _, n_filtered_tr, n_unknown_tr = _filter_manifest_by_duration(
-        args.train_manifest, max_utt, out_path.with_suffix(".train_filtered.jsonl"), "Filter train"
+        args.train_manifest,
+        max_utt,
+        out_path.with_suffix(".train_filtered.jsonl"),
+        "Filter train",
+        text_key=args.text_key,
     )
     dev_manifest, _, n_filtered_de, n_unknown_de = _filter_manifest_by_duration(
-        args.dev_manifest, max_utt, out_path.with_suffix(".dev_filtered.jsonl"), "Filter dev"
+        args.dev_manifest,
+        max_utt,
+        out_path.with_suffix(".dev_filtered.jsonl"),
+        "Filter dev",
+        text_key=args.text_key,
     )
 
     if args.dry_run:
@@ -269,16 +334,10 @@ def main() -> None:
 
     print(f"  [ASR] Train: {feats_tr.shape}, Dev: {feats_de.shape}", flush=True)
 
-    # Charset is a function of the training manifest's text — cache next to the
-    # manifest so probe-CTC training across runs reuses the same vocab.
-    charset_path = pathlib.Path(args.train_manifest + ".charset.json")
-    if charset_path.exists():
-        charset = json.loads(charset_path.read_text(encoding="utf-8"))
-        print(f"  [ASR] Loaded cached charset ({len(charset)} symbols) from {charset_path}", flush=True)
-    else:
-        charset = build_charset(text_tr)
-        charset_path.write_text(json.dumps(charset, ensure_ascii=False), encoding="utf-8")
-        print(f"  [ASR] Built and cached charset ({len(charset)} symbols) at {charset_path}", flush=True)
+    # Building this tiny vocabulary is cheap and guarantees it matches the
+    # filtered/capped transcripts used by this exact run.
+    charset = build_charset(text_tr)
+    print(f"  [ASR] Built charset with {len(charset)} symbols.", flush=True)
     vocab = {c: i for i, c in enumerate(charset)}
     id2ch = charset
 
@@ -385,14 +444,21 @@ def main() -> None:
 
     print("  [ASR] Evaluating...", flush=True)
     out = {
+        "protocol": "frozen_features_ctc_v2",
         "train": _eval(feats_tr, lens_tr, text_tr),
         "dev": _eval(feats_de, lens_de, text_de),
         "vocab_size": len(charset),
+        "segment_seconds": float(seg),
         "upsample_factor": upf,
         "max_utt_seconds": float(max_utt),
         "chunk_seconds": chunk,
         "head": args.head,
         "features": args.features,
+        "seed": args.seed,
+        "text_key": args.text_key,
+        "steps": args.steps,
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
         "mel_hop": args.mel_hop if args.features == "mel" else None,
         "n_filtered_train": n_filtered_tr,
         "n_filtered_dev": n_filtered_de,

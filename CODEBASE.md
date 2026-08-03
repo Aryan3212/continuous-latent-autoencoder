@@ -172,24 +172,44 @@ same name.
   `sajid73/SUBESCO-audio-dataset` Parquet release into local WAV files plus a
   label-preserving TSV at `datasets/SUBESCO/` for emotion evaluation.
 - `Makefile` — setup, data preparation, training, and run cleanup.
-- `eval/run_all.py` — reconstruction evaluation plus configured probes.
+- `eval/run_all.py` — reconstruction evaluation plus configured probes. Each
+  checkpoint writes one self-contained `step_<N>/` directory and summary;
+  `eval.enabled` and child probe flags are honored, missing manifests are
+  reported as skips, and latent visualization is opt-in with `--visualize`.
+  Reconstruction uses CUDA AMP for model inference while keeping spectral
+  metrics in FP32. Reruns remove stale per-task artifacts, apply bounded
+  timeouts, and return a failing process status after writing the summary if a
+  requested task fails. Step-less legacy checkpoints require `--step`.
 - `eval/repr_bench.py` — shared frozen-feature adapter registry and versioned
   embedding cache. Supports CLAE, WavLM, Whisper-tiny, ECAPA, emotion2vec,
   Mimi, Higgs Audio V2, and XCodec2; codec adapters use continuous
   latent/quantizer-decoded vectors and never substitute discrete code IDs.
   emotion2vec is extracted through its official FunASR 50 Hz frame-feature API.
+  The default comparison set is the smaller CLAE/random/WavLM/Mimi core; heavier
+  adapters remain available through `--models`. The random CLAE control is
+  deterministically seeded and checkpoint-identified in the cache; decoded
+  audio is fingerprinted so changed clips invalidate embedding and UTMOS
+  results. Multi-pool callers extract frame features once, then derive mean and
+  mean+std embeddings. Remote adapter revisions are immutable Hub commits, and
+  cache hits pair embeddings with the current dataset labels.
 - `eval/eval_emotion.py`, `eval/eval_speaker_id.py`, `eval/eval_speaker_verif.py`,
-  and `eval/eval_age.py` — speaker-disjoint downstream probes. The age probe
-  reads local Common Voice Bengali `validated.tsv` metadata.
+  and `eval/eval_age.py` — downstream representation probes. Emotion and age
+  use speaker-disjoint group folds; closed-set speaker ID holds out utterances
+  from the same enrolled speakers; speaker verification scores all utterance
+  pairs. The age probe reads local Common Voice Bengali `validated.tsv`.
 - `eval/eval_asr_attn.py` — fixed-budget 2-layer Transformer-decoder ASR probe;
   it accepts the shared adapters and is the content metric for low-rate CLAE.
-  External adapters decode only up to `--segment_seconds` per utterance even
-  when manifest duration metadata is absent, report extraction progress, and
-  reuse one frozen adapter across train and dev feature extraction. Their
-  manifest rows are streamed into resumable per-utterance frame caches on disk;
-  training and greedy evaluation load/pad only the current `DataLoader` batch
-  (`--num_workers 0` by default), rather than retaining padded train/dev frame
-  tensors in RAM.
+  CLAE and external adapters both use versioned, resumable per-utterance frame
+  caches; checkpoint/config/adapter settings and source-audio identities are
+  validated before reuse. CLAE cache identity hashes the fully resolved config,
+  including inherited bases and overrides. Actual audio durations are verified
+  before extraction so a cropped waveform is never paired with a full transcript.
+  Feature extraction is batched for CLAE and reuses one frozen external adapter
+  across train/dev. Training and greedy evaluation load/pad only the current
+  `DataLoader` batch (`--num_workers 0` by default), keeping RAM proportional to
+  batch size for every model. The head and replacement sampler use a recorded
+  deterministic seed; head initialization is reset after extraction so cache
+  hits and misses are identical.
 - `eval/eval_repr_viz.py` / `eval/render_compact_scorecard.py` — PCA+UMAP
   attribute plots and Markdown scorecard aggregation.
 - `eval/eval_mimi_recon.py` — standalone Mimi reconstruction baseline using the
@@ -202,5 +222,8 @@ same name.
 - `README.md` — human-facing setup and workflows.
 - `SUPERVISOR_RESEARCH_REPORT.md` — concise supervisor-facing snapshot of the
   configured `large_2kh` architecture, objective, data scale, and evaluation plan.
+- `SUPERVISOR_RESEARCH_REPORT_UPDATED.md` — updated supervisor-facing account
+  of the 170k checkpoint, full downstream results, interpretation, and
+  reproducibility caveats from the supplied experiment log.
 - `CODEBASE.md` — current agent-facing map.
 - `CHANGELOG.md` — human-only change history.

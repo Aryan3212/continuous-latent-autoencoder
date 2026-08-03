@@ -2,7 +2,94 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-08-02
+
+**Updated supervisor research report for the 170k checkpoint**
+
+- Added `SUPERVISOR_RESEARCH_REPORT_UPDATED.md`, preserving the earlier report
+  while incorporating the full emotion, speaker-ID, speaker-verification, age,
+  and attention-ASR results supplied for the 170,000-step checkpoint.
+- Reconciled the 40,250-step exposure snapshot, 50,000-step packed-data resume,
+  and 170,000-step evaluated model; added derived exposure accounting and an
+  explicit reproducibility caveat for the undocumented continuation overrides.
+- Added a publication-style CLAE training-architecture figure showing view
+  augmentation, frontend masking, the JEPA/VISReg projector branch, decoder
+  corruption, and clean-target mel reconstruction.
+
 ## 2026-07-27
+
+**Disk-backed, validated attention-ASR evaluation for every model**
+
+- **`eval/eval_asr_attn.py`**: removed the remaining CLAE-only path that
+  concatenated all padded train/dev features in RAM and sampled tensors
+  manually. CLAE now extracts in batches into the same resumable,
+  variable-length per-utterance cache used by external adapters; all training
+  and greedy decoding goes through cache-backed `DataLoader`s and only pads the
+  current batch.
+- **Cache integrity**: attention-ASR cache format v2 fingerprints the manifest,
+  checkpoint, fully resolved inherited config/overrides, pinned adapter
+  revision/layer, feature source,
+  chunk/mel settings, and deterministic random-control seed. Every indexed
+  feature/source path is checked before reuse, and changed source size/mtime,
+  missing files, non-contiguous indexes, or incompatible settings fail before
+  probe training.
+- **Transcript alignment and reproducibility**: CTC and attention manifest
+  filtering now verifies actual audio durations, writes stable filtered
+  manifests with explicit durations, drops missing transcripts and overlong
+  audio, and rejects `max_utt_seconds > segment_seconds`. This prevents cropped
+  audio from being trained against full transcripts. The attention head and
+  replacement sampler use a recorded `--seed`; CLI dimensions and budgets are
+  validated before extraction.
+- **Probe auditability**: emotion and age JSON now retain each speaker-disjoint
+  fold's metrics, sample counts, and train/test speaker counts in addition to
+  mean/std summaries. Closed-set speaker ID explicitly records its same-speaker
+  held-out-utterance protocol, seed, and split size; speaker verification records
+  its all-pairs cosine protocol and operating prior. Invalid/empty splits and
+  one-class verification trials fail with clear errors.
+- **Regression coverage**: added a hardware-free attention-ASR cache test that
+  asserts valid-frame-only storage, cache reuse without re-extraction,
+  source-audio invalidation, current-batch-only collation/padding, and
+  cache-independent probe initialization. Added runner/status/stale-artifact
+  and representation-cache relabeling coverage.
+
+**Simpler and cheaper offline evaluation**
+
+- **`eval/run_all.py` + `eval/run_probes.py`**: evaluation artifacts now share
+  one predictable `step_<N>/` directory and one summary with explicit
+  completion, skip, failure, and timing statuses. The runner honors
+  `eval.enabled`, safely skips enabled probes with missing manifests, uses the
+  active Python interpreter by default, streams child output, exposes
+  reconstruction budgets, and makes latent visualization opt-in instead of
+  paying for an extra checkpoint load and 200-clip pass on every run. Reruns
+  clear stale task artifacts, apply explicit reconstruction/probe timeouts,
+  require an explicit step for legacy step-less checkpoints, and exit nonzero
+  after writing the summary when a requested task fails or times out.
+- **`eval/eval_recon.py` + `eval/eval_cls_probe.py`**: reconstruction model
+  inference now uses CUDA AMP while spectral metrics stay FP32, metrics are
+  weighted by sample count rather than batch count, and output records the
+  evaluated sample/batch counts; empty manifests fail instead of reporting
+  zero loss. Classification probes keep frozen embeddings
+  on CPU, transfer only the current training/evaluation batch, and reuse the
+  checkpoint step already read with the encoder instead of loading the
+  checkpoint twice. Their head initialization and sampling are seeded and all
+  probe hyperparameters are recorded.
+- **`eval/repr_bench.py` + representation probes**: the random CLAE baseline is
+  fixed to a deterministic seed whose identity is included in its cache, and
+  implicit local CLAE checkpoints are fingerprinted instead of sharing an empty
+  cache identity. Embedding and UTMOS caches also fingerprint decoded audio
+  content, so edited clips cannot silently reuse stale results; cache hits use
+  current speaker labels. External model revisions are pinned to immutable Hub
+  commits. Speaker verification now extracts each model once for both mean and
+  mean+std pooling,
+  roughly halving uncached model inference. Default comparisons use the smaller
+  CLAE/random/WavLM/Mimi core set; heavyweight adapters remain explicitly
+  selectable with `--models`.
+- **ASR probes**: CTC and attention vocabularies are rebuilt from each run's
+  exact filtered training transcripts. The operation is negligible and removes
+  stale path-keyed charset caches whose contents could disagree with changed
+  manifests or evaluation caps.
+- **`schema.py`**: emotion and gender now share one classification-probe schema
+  and expose their hidden width instead of relying on runner-only constants.
 
 **Streaming external attention-ASR evaluation**
 

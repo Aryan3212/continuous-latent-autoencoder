@@ -7,7 +7,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -43,6 +43,8 @@ MODEL_ORDER = [
     "ours", "ours_random", "wavlm", "whisper_tiny", "ecapa", "emotion2vec",
     "mimi", "higgs_audio_v2", "xcodec2",
 ]
+DEFAULT_MODELS = ["ours", "ours_random", "wavlm", "mimi"]
+RANDOM_BASELINE_SEED = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +69,16 @@ def _resample(wav: torch.Tensor, src_sr: int, dst_sr: int) -> torch.Tensor:
     import torchaudio.functional as AF
 
     return AF.resample(wav, src_sr, dst_sr)
+
+
+def _utterance_fingerprint(utts: List[Utterance]) -> str:
+    """Hash ordered IDs and decoded samples so edited audio invalidates caches."""
+    digest = hashlib.sha256()
+    for utterance in utts:
+        digest.update(utterance.id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(utterance.wav.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()[:16]
 
 
 def load_openslr53_utterances(
@@ -308,7 +320,13 @@ class Embedder:
     _ready: bool = field(default=False, repr=False)
 
 
-def _our_encoder_embedder(name: str, *, random_init: bool, ckpt: Optional[str]) -> Embedder:
+def _our_encoder_embedder(
+    name: str,
+    *,
+    random_init: bool,
+    ckpt: Optional[str],
+    random_seed: int = RANDOM_BASELINE_SEED,
+) -> Embedder:
     """Build an embedder around our frontend+encoder.
 
     The architecture comes from the checkpoint's embedded ``cfg`` so no separate
@@ -354,8 +372,16 @@ def _our_encoder_embedder(name: str, *, random_init: bool, ckpt: Optional[str]) 
     cfg_data["loss"] = loss_data
     cfg = Config.model_validate(cfg_data)
 
-    frontend = ConvFrontend(cfg.model.frontend)
-    encoder = Encoder(frontend.out_channels, cfg.model.encoder)
+    if random_init:
+        # Keep the random control stable without modifying the caller's RNG.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(random_seed)
+            frontend = ConvFrontend(cfg.model.frontend)
+            encoder = Encoder(frontend.out_channels, cfg.model.encoder)
+        print(f"[{name}] deterministic random baseline seed={random_seed}", flush=True)
+    else:
+        frontend = ConvFrontend(cfg.model.frontend)
+        encoder = Encoder(frontend.out_channels, cfg.model.encoder)
     model = torch.nn.ModuleDict({"frontend": frontend, "encoder": encoder})
 
     if not random_init:
@@ -413,10 +439,14 @@ def _mimi_embedder() -> Embedder:
     """Mimi continuous encoder output *before* quantization, mean-pooled."""
     from transformers import AutoFeatureExtractor, MimiModel
 
-    repo = "kyutai/mimi"
-    print(f"[mimi] loading {repo}", flush=True)
-    fe = AutoFeatureExtractor.from_pretrained(repo, token=_hf_token())
-    model = MimiModel.from_pretrained(repo, token=_hf_token()).eval().to(DEVICE)
+    spec = model_spec("mimi")
+    print(f"[mimi] loading {spec.repo}@{spec.revision}", flush=True)
+    fe = AutoFeatureExtractor.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    )
+    model = MimiModel.from_pretrained(
+        spec.repo, revision=spec.revision, token=_hf_token()
+    ).eval().to(DEVICE)
     mimi_sr = int(fe.sampling_rate)
 
     @torch.no_grad()
@@ -432,16 +462,21 @@ def _mimi_embedder() -> Embedder:
         emb = model.downsample(emb)                          # (1, C, T')
         return emb.squeeze(0).t().float().cpu().numpy()      # (T', C) frame features
 
-    return Embedder(name="mimi", fn=embed, spec=model_spec("mimi"))
+    return Embedder(name="mimi", fn=embed, spec=spec)
 
 
 def _hf_hidden_state_embedder(name: str, repo: str) -> Embedder:
     """Final-hidden-state mean-pool for a wav2vec2-style HF model (WavLM, MMS)."""
     from transformers import AutoFeatureExtractor, AutoModel
 
-    print(f"[{name}] loading {repo}", flush=True)
-    fe = AutoFeatureExtractor.from_pretrained(repo, token=_hf_token())
-    model = AutoModel.from_pretrained(repo, token=_hf_token()).eval().to(DEVICE)
+    spec = model_spec(name)
+    print(f"[{name}] loading {repo}@{spec.revision}", flush=True)
+    fe = AutoFeatureExtractor.from_pretrained(
+        repo, revision=spec.revision, token=_hf_token()
+    )
+    model = AutoModel.from_pretrained(
+        repo, revision=spec.revision, token=_hf_token()
+    ).eval().to(DEVICE)
     msr = int(getattr(fe, "sampling_rate", TARGET_SR))
 
     @torch.no_grad()
@@ -474,14 +509,14 @@ class ModelSpec:
 _MODEL_SPECS: Dict[str, ModelSpec] = {
     "ours": ModelSpec("ours", "local-or-aryan3212/my-model", feature_layer="encoder.z", frame_rate_hz=12.5, reported_params="checkpoint"),
     "ours_random": ModelSpec("ours_random", "local-random-init", feature_layer="encoder.z", frame_rate_hz=12.5, reported_params="checkpoint"),
-    "wavlm": ModelSpec("wavlm", "microsoft/wavlm-base-plus", frame_rate_hz=50.0, reported_params="95M"),
-    "mms": ModelSpec("mms", "facebook/mms-300m", frame_rate_hz=50.0),
-    "whisper_tiny": ModelSpec("whisper_tiny", "openai/whisper-tiny", feature_layer="encoder.last_hidden_state", frame_rate_hz=50.0, reported_params="39M"),
-    "ecapa": ModelSpec("ecapa", "speechbrain/spkrec-ecapa-voxceleb", feature_layer="utterance_embedding", frame_rate_hz=None, component="speaker_embedder", supports_asr_probe=False, reported_params="14.7M"),
-    "emotion2vec": ModelSpec("emotion2vec", "emotion2vec/emotion2vec_base", feature_layer="continuous_hidden_state"),
-    "mimi": ModelSpec("mimi", "kyutai/mimi", native_sample_rate=24000, frame_rate_hz=12.5, feature_layer="pre_quantization", component="codec_encoder"),
-    "higgs_audio_v2": ModelSpec("higgs_audio_v2", "bosonai/higgs-audio-v2-tokenizer", native_sample_rate=24000, frame_rate_hz=25.0, feature_layer="quantizer_decoded_continuous", component="codec_encoder"),
-    "xcodec2": ModelSpec("xcodec2", "HKUSTAudio/xcodec2-hf", frame_rate_hz=50.0, feature_layer="quantized_continuous_latents", component="codec_encoder", reported_params="0.8B"),
+    "wavlm": ModelSpec("wavlm", "microsoft/wavlm-base-plus", revision="4c66d4806a428f2e922ccfa1a962776e232d487b", frame_rate_hz=50.0, reported_params="95M"),
+    "mms": ModelSpec("mms", "facebook/mms-300m", revision="4ee317ce793c53dbc041fc4376c7558292dd38dc", frame_rate_hz=50.0),
+    "whisper_tiny": ModelSpec("whisper_tiny", "openai/whisper-tiny", revision="169d4a4341b33bc18d8881c4b69c2e104e1cc0af", feature_layer="encoder.last_hidden_state", frame_rate_hz=50.0, reported_params="39M"),
+    "ecapa": ModelSpec("ecapa", "speechbrain/spkrec-ecapa-voxceleb", revision="0f99f2d0ebe89ac095bcc5903c4dd8f72b367286", feature_layer="utterance_embedding", frame_rate_hz=None, component="speaker_embedder", supports_asr_probe=False, reported_params="14.7M"),
+    "emotion2vec": ModelSpec("emotion2vec", "emotion2vec/emotion2vec_base", revision="0c9a3152734f9d7a7a05b4ee6bfb3c109d288664", feature_layer="continuous_hidden_state"),
+    "mimi": ModelSpec("mimi", "kyutai/mimi", revision="89091b3e466eb6a9d11e537bf26b144f194978f7", native_sample_rate=24000, frame_rate_hz=12.5, feature_layer="pre_quantization", component="codec_encoder"),
+    "higgs_audio_v2": ModelSpec("higgs_audio_v2", "bosonai/higgs-audio-v2-tokenizer", revision="403fbacf2f60caaa102f893fdfabb694619b2417", native_sample_rate=24000, frame_rate_hz=25.0, feature_layer="quantizer_decoded_continuous", component="codec_encoder"),
+    "xcodec2": ModelSpec("xcodec2", "HKUSTAudio/xcodec2-hf", revision="64bd034d12d441299cdd535b15c33efd6ccdf252", frame_rate_hz=50.0, feature_layer="quantized_continuous_latents", component="codec_encoder", reported_params="0.8B"),
 }
 
 
@@ -538,10 +573,19 @@ def _whisper_embedder() -> Embedder:
 
 
 def _ecapa_embedder() -> Embedder:
+    from huggingface_hub import snapshot_download
     from speechbrain.inference.speaker import EncoderClassifier
 
     spec = model_spec("ecapa")
-    model = EncoderClassifier.from_hparams(source=spec.repo, run_opts={"device": str(DEVICE)})
+    snapshot = snapshot_download(
+        repo_id=spec.repo,
+        revision=spec.revision,
+        token=_hf_token(),
+    )
+    model = EncoderClassifier.from_hparams(
+        source=snapshot,
+        run_opts={"device": str(DEVICE)},
+    )
 
     @torch.no_grad()
     def embed(wav16k: torch.Tensor) -> np.ndarray:
@@ -554,6 +598,7 @@ def _ecapa_embedder() -> Embedder:
 def _emotion2vec_embedder() -> Embedder:
     """Extract emotion2vec's documented 50 Hz frame features via FunASR."""
     from funasr import AutoModel as FunASRAutoModel
+    from huggingface_hub import snapshot_download
 
     spec = model_spec("emotion2vec")
     print(f"[{spec.name}] loading {spec.repo} with FunASR", flush=True)
@@ -562,7 +607,12 @@ def _emotion2vec_embedder() -> Embedder:
     token = _hf_token()
     if token:
         os.environ.setdefault("HF_TOKEN", token)
-    model = FunASRAutoModel(model=spec.repo, hub="hf", device=str(DEVICE))
+    snapshot = snapshot_download(
+        repo_id=spec.repo,
+        revision=spec.revision,
+        token=token,
+    )
+    model = FunASRAutoModel(model=snapshot, device=str(DEVICE))
 
     @torch.no_grad()
     def embed(wav16k: torch.Tensor) -> np.ndarray:
@@ -651,11 +701,21 @@ def _higgs_embedder() -> Embedder:
     return Embedder(name=spec.name, fn=embed, spec=spec)
 
 
-def build_embedder(name: str, *, ckpt: Optional[str] = None) -> Embedder:
+def build_embedder(
+    name: str,
+    *,
+    ckpt: Optional[str] = None,
+    random_seed: int = RANDOM_BASELINE_SEED,
+) -> Embedder:
     if name == "ours":
         return _our_encoder_embedder("ours", random_init=False, ckpt=ckpt)
     if name == "ours_random":
-        return _our_encoder_embedder("ours_random", random_init=True, ckpt=ckpt)
+        return _our_encoder_embedder(
+            "ours_random",
+            random_init=True,
+            ckpt=ckpt,
+            random_seed=random_seed,
+        )
     if name == "mimi":
         return _mimi_embedder()
     if name == "wavlm":
@@ -706,9 +766,15 @@ def compute_utmos_scores(
     EMB_DIR.mkdir(parents=True, exist_ok=True)
     cache = EMB_DIR / "utmos_mos.npz"
     ids = np.array([u.id for u in utts])
+    audio_fingerprint = _utterance_fingerprint(utts)
     if use_cache and cache.exists():
         data = np.load(cache, allow_pickle=True)
-        if list(data["ids"]) == list(ids):
+        cached_fingerprint = (
+            str(data["audio_fingerprint"].item())
+            if "audio_fingerprint" in data
+            else ""
+        )
+        if list(data["ids"]) == list(ids) and cached_fingerprint == audio_fingerprint:
             print(f"[utmos] using cached MOS ({len(data['mos'])})", flush=True)
             return data["mos"]
 
@@ -722,7 +788,12 @@ def compute_utmos_scores(
             print(f"[utmos] {i + 1}/{len(utts)} scored", flush=True)
     mos_arr = np.asarray(mos, dtype=np.float32)
     print(f"[utmos] done: MOS range [{mos_arr.min():.2f}, {mos_arr.max():.2f}]", flush=True)
-    np.savez(cache, mos=mos_arr, ids=ids)
+    np.savez(
+        cache,
+        mos=mos_arr,
+        ids=ids,
+        audio_fingerprint=audio_fingerprint,
+    )
     return mos_arr
 
 
@@ -741,6 +812,131 @@ def _pool(frames: np.ndarray, mode: str) -> np.ndarray:
     raise ValueError(f"unknown pool mode {mode!r}")
 
 
+def extract_pools(
+    name: str,
+    utts: List[Utterance],
+    *,
+    pools: List[str],
+    ckpt: Optional[str] = None,
+    use_cache: bool = True,
+    random_seed: int = RANDOM_BASELINE_SEED,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    """Extract one model once and derive every requested pooling mode.
+
+    Each pooled result keeps its own cache file. If any modes are missing, the
+    model runs once per utterance and fills all missing modes in the same pass.
+    """
+    EMB_DIR.mkdir(parents=True, exist_ok=True)
+    pools = list(dict.fromkeys(pools))
+    if not pools:
+        raise ValueError("at least one pooling mode is required")
+    for pool in pools:
+        if pool not in {"mean", "meanstd"}:
+            raise ValueError(f"unknown pool mode {pool!r}")
+
+    ids = np.array([u.id for u in utts])
+    speakers = np.array([u.speaker for u in utts])
+    audio_fingerprint = _utterance_fingerprint(utts)
+    spec = model_spec(name)
+    resolved_ckpt = ckpt
+    if name in {"ours", "ours_random"}:
+        resolved_ckpt = _resolve_our_ckpt(ckpt)
+
+    ckpt_identity = ""
+    if resolved_ckpt:
+        checkpoint_path = Path(resolved_ckpt)
+        ckpt_identity = (
+            f"{checkpoint_path.resolve()}:{checkpoint_path.stat().st_size}:"
+            f"{checkpoint_path.stat().st_mtime_ns}"
+            if checkpoint_path.is_file()
+            else resolved_ckpt
+        )
+
+    payloads: Dict[str, Dict[str, Any]] = {}
+    caches: Dict[str, Path] = {}
+    results: Dict[str, Dict[str, np.ndarray]] = {}
+    missing: List[str] = []
+    for pool in pools:
+        payload: Dict[str, Any] = {
+            "name": name,
+            "repo": spec.repo,
+            "revision": spec.revision,
+            "feature_layer": spec.feature_layer,
+            "pool": pool,
+            "checkpoint": ckpt_identity,
+            "ids": ids.tolist(),
+            "audio_fingerprint": audio_fingerprint,
+            "target_sr": TARGET_SR,
+        }
+        if name == "ours_random":
+            payload["random_seed"] = random_seed
+        cache_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()[:16]
+        cache = EMB_DIR / f"{name}.{pool}.{cache_hash}.npz"
+        payloads[pool] = payload
+        caches[pool] = cache
+
+        if use_cache and cache.exists():
+            data = np.load(cache, allow_pickle=True)
+            if list(data["ids"]) == list(ids):
+                print(
+                    f"[{name}] using cached embeddings "
+                    f"({data['X'].shape}, pool={pool})",
+                    flush=True,
+                )
+                results[pool] = {
+                    "X": data["X"],
+                    "speakers": speakers,
+                    "ids": data["ids"],
+                    "spec": spec,
+                }
+                continue
+        missing.append(pool)
+
+    if not missing:
+        return results
+
+    emb = build_embedder(
+        name,
+        ckpt=resolved_ckpt,
+        random_seed=random_seed,
+    )
+    vecs: Dict[str, List[np.ndarray]] = {pool: [] for pool in missing}
+    for i, u in enumerate(utts):
+        frames = emb.fn(u.wav)
+        for pool in missing:
+            vec = _pool(frames, pool)
+            previous = vecs[pool]
+            if previous and vec.shape != previous[0].shape:
+                raise ValueError(
+                    f"{name} produced inconsistent pooled feature shapes: "
+                    f"first={previous[0].shape}, utterance {u.id}={vec.shape}. "
+                    "Check the adapter's time/feature axis handling."
+                )
+            previous.append(vec)
+        if (i + 1) % 50 == 0:
+            print(f"[{name}] {i + 1}/{len(utts)} embedded", flush=True)
+
+    for pool in missing:
+        X = np.stack(vecs[pool], axis=0).astype(np.float32)
+        print(f"[{name}] done: {X.shape} (pool={pool})", flush=True)
+        np.savez(
+            caches[pool],
+            X=X,
+            speakers=speakers,
+            ids=ids,
+            metadata=json.dumps(payloads[pool], sort_keys=True),
+        )
+        results[pool] = {
+            "X": X,
+            "speakers": speakers,
+            "ids": ids,
+            "spec": spec,
+        }
+    return results
+
+
 def extract(
     name: str,
     utts: List[Utterance],
@@ -748,49 +944,14 @@ def extract(
     ckpt: Optional[str] = None,
     pool: str = "mean",
     use_cache: bool = True,
+    random_seed: int = RANDOM_BASELINE_SEED,
 ) -> Dict[str, np.ndarray]:
-    """Return ``{"X": (N,D), "speakers": (N,), "ids": (N,)}`` for one model.
-
-    ``pool`` selects time pooling (``mean`` or ``meanstd``). Cache keys include
-    the extractor revision/layer, checkpoint identity, pool and utterance ids.
-    """
-    EMB_DIR.mkdir(parents=True, exist_ok=True)
-    ids = np.array([u.id for u in utts])
-    spec = model_spec(name)
-    ckpt_identity = ""
-    if ckpt:
-        p = Path(ckpt)
-        ckpt_identity = f"{p.resolve()}:{p.stat().st_size}:{p.stat().st_mtime_ns}" if p.is_file() else ckpt
-    cache_payload = {
-        "name": name, "repo": spec.repo, "revision": spec.revision,
-        "feature_layer": spec.feature_layer, "pool": pool,
-        "checkpoint": ckpt_identity, "ids": ids.tolist(), "target_sr": TARGET_SR,
-    }
-    cache_hash = hashlib.sha256(json.dumps(cache_payload, sort_keys=True).encode()).hexdigest()[:16]
-    cache = EMB_DIR / f"{name}.{pool}.{cache_hash}.npz"
-
-    if use_cache and cache.exists():
-        data = np.load(cache, allow_pickle=True)
-        if list(data["ids"]) == list(ids):
-            print(f"[{name}] using cached embeddings ({data['X'].shape}, pool={pool})", flush=True)
-            return {"X": data["X"], "speakers": data["speakers"], "ids": data["ids"], "spec": spec}
-
-    emb = build_embedder(name, ckpt=ckpt)
-    vecs: List[np.ndarray] = []
-    for i, u in enumerate(utts):
-        vec = _pool(emb.fn(u.wav), pool)
-        if vecs and vec.shape != vecs[0].shape:
-            raise ValueError(
-                f"{name} produced inconsistent pooled feature shapes: "
-                f"first={vecs[0].shape}, utterance {u.id}={vec.shape}. "
-                "Check the adapter's time/feature axis handling."
-            )
-        vecs.append(vec)
-        if (i + 1) % 50 == 0:
-            print(f"[{name}] {i + 1}/{len(utts)} embedded", flush=True)
-    X = np.stack(vecs, axis=0).astype(np.float32)
-    speakers = np.array([u.speaker for u in utts])
-    print(f"[{name}] done: {X.shape} (pool={pool})", flush=True)
-
-    np.savez(cache, X=X, speakers=speakers, ids=ids, metadata=json.dumps(cache_payload, sort_keys=True))
-    return {"X": X, "speakers": speakers, "ids": ids, "spec": spec}
+    """Return pooled embeddings for one model and one pooling mode."""
+    return extract_pools(
+        name,
+        utts,
+        pools=[pool],
+        ckpt=ckpt,
+        use_cache=use_cache,
+        random_seed=random_seed,
+    )[pool]

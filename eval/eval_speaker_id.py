@@ -21,7 +21,7 @@ from typing import Dict, List
 
 import numpy as np
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_utterances
+from eval.repr_bench import DEFAULT_MODELS, EVAL_DIR, MODEL_ORDER, extract, load_utterances
 
 
 def _per_speaker_split(speakers: np.ndarray, test_per_speaker: int, seed: int):
@@ -47,10 +47,17 @@ def probe(X: np.ndarray, speakers: np.ndarray, test_per_speaker: int, seed: int)
     from sklearn.preprocessing import StandardScaler
 
     tr, te = _per_speaker_split(speakers, test_per_speaker, seed)
+    if len(tr) == 0 or len(te) == 0:
+        raise ValueError(
+            "Speaker-ID split needs at least one train and test utterance; "
+            "increase --max-utts or reduce --test-per-speaker"
+        )
+    if set(speakers[te]) - set(speakers[tr]):
+        raise RuntimeError("Closed-set speaker-ID test contains an unenrolled speaker")
     scaler = StandardScaler().fit(X[tr])
     Xtr, Xte = scaler.transform(X[tr]), scaler.transform(X[te])
 
-    clf = LogisticRegression(max_iter=3000, C=1.0)
+    clf = LogisticRegression(max_iter=3000, C=1.0, random_state=seed)
     clf.fit(Xtr, speakers[tr])
     train_acc = float(clf.score(Xtr, speakers[tr]))
     test_acc = float(clf.score(Xte, speakers[te]))
@@ -60,6 +67,8 @@ def probe(X: np.ndarray, speakers: np.ndarray, test_per_speaker: int, seed: int)
         "n_train": int(len(tr)),
         "n_test": int(len(te)),
         "dim": int(X.shape[1]),
+        "seed": seed,
+        "test_per_speaker": test_per_speaker,
     }
 
 
@@ -67,7 +76,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-utts", type=int, default=300)
     ap.add_argument("--source", default="openslr53", choices=["openslr53", "cv"])
-    ap.add_argument("--models", default=",".join(MODEL_ORDER),
+    ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
                     help="Comma-separated subset of: " + ",".join(MODEL_ORDER))
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--test-per-speaker", type=int, default=2)
@@ -76,6 +85,10 @@ def main() -> None:
     args = ap.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if not models:
+        ap.error("--models must name at least one model")
+    if args.max_utts < 2 or args.test_per_speaker < 1:
+        ap.error("--max-utts must be at least 2 and --test-per-speaker positive")
     utts = load_utterances(args.source, max_utts=args.max_utts)
     n_spk = len({u.speaker for u in utts})
     chance = 1.0 / n_spk
@@ -89,7 +102,15 @@ def main() -> None:
 
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     out = EVAL_DIR / "speaker_id_probe.json"
-    payload = {"n_utts": len(utts), "n_speakers": n_spk, "chance": chance, "results": results}
+    payload = {
+        "protocol": "closed_set_same_speakers_heldout_utterances",
+        "n_utts": len(utts),
+        "n_speakers": n_spk,
+        "chance": chance,
+        "seed": args.seed,
+        "test_per_speaker": args.test_per_speaker,
+        "results": results,
+    }
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print(f"\nClosed-set speaker-ID linear probe  "

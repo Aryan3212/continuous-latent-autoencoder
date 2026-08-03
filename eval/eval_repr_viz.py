@@ -9,7 +9,7 @@ import argparse
 
 import numpy as np
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_utterances
+from eval.repr_bench import DEFAULT_MODELS, EVAL_DIR, MODEL_ORDER, extract, load_utterances
 
 
 def _pca(X: np.ndarray, seed: int) -> np.ndarray:
@@ -30,7 +30,11 @@ def main() -> None:
     ap.add_argument("--source", default="openslr53", choices=["openslr53", "cv", "subesco"])
     ap.add_argument("--color", default="speaker", choices=["speaker", "emotion"])
     ap.add_argument("--max-utts", type=int, default=300)
-    ap.add_argument("--models", default=",".join(MODEL_ORDER))
+    ap.add_argument(
+        "--models",
+        default=",".join(DEFAULT_MODELS),
+        help="Comma-separated subset of: " + ",".join(MODEL_ORDER),
+    )
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-cache", action="store_true")

@@ -62,6 +62,7 @@ class LoadedModel:
     device: torch.device
     frontend: ConvFrontend
     encoder: Encoder
+    checkpoint_step: int | None = None
 
 
 def load_frozen_encoder(config_path: str, ckpt_path: str, overrides: List[str]) -> LoadedModel:
@@ -80,7 +81,14 @@ def load_frozen_encoder(config_path: str, ckpt_path: str, overrides: List[str]) 
     for p in model.parameters():
         p.requires_grad = False
 
-    return LoadedModel(cfg=cfg, device=device, frontend=frontend.to(device), encoder=encoder.to(device))
+    step = state.get("step") if isinstance(state, dict) else None
+    return LoadedModel(
+        cfg=cfg,
+        device=device,
+        frontend=frontend.to(device),
+        encoder=encoder.to(device),
+        checkpoint_step=int(step) if step is not None else None,
+    )
 
 
 def _log_progress(name: str, n_samples: int, start_time: float) -> None:
@@ -102,6 +110,8 @@ def iter_frame_features(
     chunk_seconds: float | None = None,
     source: str = "encoder",
     mel_hop: int = 320,
+    start_index: int = 0,
+    max_samples: int = 0,
 ) -> Iterable[Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]]:
     """Yield (feats (B,T',D), valid_lens (B,), meta) per batch.
 
@@ -135,8 +145,18 @@ def iter_frame_features(
             random_crop=False,
         )
     )
+    if start_index < 0:
+        raise ValueError("start_index must be non-negative")
+    stop_index = len(ds) if max_samples <= 0 else min(len(ds), start_index + max_samples)
+    if start_index > len(ds):
+        raise ValueError(
+            f"start_index {start_index} exceeds dataset size {len(ds)}"
+        )
+    selected_ds: torch.utils.data.Dataset = ds
+    if start_index or stop_index < len(ds):
+        selected_ds = torch.utils.data.Subset(ds, range(start_index, stop_index))
     dl = torch.utils.data.DataLoader(
-        ds, batch_size=batch_size, num_workers=num_workers,
+        selected_ds, batch_size=batch_size, num_workers=num_workers,
         collate_fn=collate_fixed, drop_last=False,
     )
     melspec = None

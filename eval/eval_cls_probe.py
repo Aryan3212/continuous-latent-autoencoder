@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 import torch.nn as nn
 
-from eval.common import checkpoint_step, embedding_stats, iter_embeddings_masked, load_frozen_encoder
+from eval.common import embedding_stats, iter_embeddings_masked, load_frozen_encoder
 
 
 def _build_label_map(rows: List[Dict[str, Any]], key: str) -> Dict[str, int]:
@@ -74,14 +74,23 @@ def main() -> None:
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--segment_seconds", type=float, default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
+    if min(args.steps, args.hidden, args.batch_size) < 1 or args.lr <= 0:
+        ap.error("--steps, --hidden, --batch_size, and --lr must be positive")
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     label_key = args.label_key
     lm = load_frozen_encoder(args.config, args.ckpt, args.overrides)
+    loaded_checkpoint_step = lm.checkpoint_step
     seg = args.segment_seconds if args.segment_seconds is not None else lm.cfg.data.segment_seconds
+    if seg <= 0:
+        ap.error("--segment_seconds must be positive")
 
     print(f"  [{label_key}] Extracting train embeddings...", flush=True)
     x_tr, y_tr, _, label_map = _load_embs(lm, args.train_manifest, label_key, args.batch_size, seg, log_name=f"{label_key} train")
@@ -97,9 +106,6 @@ def main() -> None:
     print(f"  [{label_key}] Embedding effective rank: {emb_stats['embed_effective_rank']:.2f} / {emb_stats['embed_dim']}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_tr, y_tr = x_tr.to(device), y_tr.to(device)
-    x_de, y_de = x_de.to(device), y_de.to(device)
-
     num_classes = len(label_map)
     print(f"  [{label_key}] Train: {x_tr.shape[0]}, Dev: {x_de.shape[0]}, Classes: {num_classes}", flush=True)
     head = nn.Sequential(nn.Linear(x_tr.size(1), args.hidden), nn.GELU(), nn.Dropout(0.1), nn.Linear(args.hidden, num_classes)).to(device)
@@ -110,8 +116,9 @@ def main() -> None:
     t0 = time.perf_counter()
     log_interval = max(1, args.steps // 5)
     for step_i in range(args.steps):
-        idx = torch.randint(0, x_tr.size(0), (args.batch_size,), device=device)
-        xb, yb = x_tr[idx], y_tr[idx]
+        idx = torch.randint(0, x_tr.size(0), (args.batch_size,))
+        xb = x_tr[idx].to(device)
+        yb = y_tr[idx].to(device)
         logits = head(xb)
         loss = loss_fn(logits, yb)
         opt.zero_grad(set_to_none=True)
@@ -123,7 +130,11 @@ def main() -> None:
 
     head.eval()
     with torch.no_grad():
-        pred = head(x_de).argmax(dim=-1)
+        preds = []
+        for start in range(0, x_de.size(0), args.batch_size):
+            xb = x_de[start : start + args.batch_size].to(device)
+            preds.append(head(xb).argmax(dim=-1).cpu())
+        pred = torch.cat(preds)
         acc = (pred == y_de).float().mean().item()
         mf1 = _macro_f1(y_de, pred, num_classes)
 
@@ -138,9 +149,13 @@ def main() -> None:
         "embed_dim": emb_stats["embed_dim"],
         "embed_effective_rank": emb_stats["embed_effective_rank"],
         "checkpoint": str(args.ckpt),
-        "checkpoint_step": checkpoint_step(args.ckpt),
+        "checkpoint_step": loaded_checkpoint_step,
         "segment_seconds": float(seg),
         "probe_steps": int(args.steps),
+        "hidden": int(args.hidden),
+        "batch_size": int(args.batch_size),
+        "learning_rate": float(args.lr),
+        "seed": int(args.seed),
     }
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.out).write_text(json.dumps(out, indent=2))

@@ -8,6 +8,7 @@ from typing import Dict
 import torch
 
 from data_loading import AudioDataset, DatasetConfig, collate_fixed
+from eval.common import amp_enabled
 from losses import MultiResSTFTLoss
 from models.decoder_generator import WaveformDecoder
 from models.encoder import Encoder
@@ -26,10 +27,14 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args()
+    if args.batch_size < 1 or args.max_batches < 1:
+        ap.error("--batch_size and --max_batches must be positive")
 
     cfg = apply_overrides(load_config(args.config), args.overrides)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seg = args.segment_seconds if args.segment_seconds is not None else cfg.data.segment_seconds
+    if seg <= 0:
+        ap.error("--segment_seconds must be positive")
 
     frontend = ConvFrontend(cfg.model.frontend)
     encoder = Encoder(frontend.out_channels, cfg.model.encoder)
@@ -61,23 +66,30 @@ def main() -> None:
     )
 
     sums: Dict[str, float] = {"stft": 0.0, "wav_l1": 0.0}
-    n = 0
+    num_batches = 0
+    num_samples = 0
+    use_amp = amp_enabled(device)
     with torch.no_grad():
         for batch in dl:
             wav = batch["wav"].to(device)
-            h0 = model["frontend"](wav)
-            hE = model["encoder"](h0)
-            z = hE
-            x_hat = model["decoder"](z, target_len=wav.size(-1))
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                h0 = model["frontend"](wav)
+                hE = model["encoder"](h0)
+                x_hat = model["decoder"](hE, target_len=wav.size(-1))
             l_stft, _ = stft(x_hat, wav)
             l_wav = (x_hat - wav).abs().mean()
-            sums["stft"] += float(l_stft.detach().cpu())
-            sums["wav_l1"] += float(l_wav.detach().cpu())
-            n += 1
-            if n >= args.max_batches:
+            batch_samples = int(wav.size(0))
+            sums["stft"] += float(l_stft.detach().cpu()) * batch_samples
+            sums["wav_l1"] += float(l_wav.detach().cpu()) * batch_samples
+            num_batches += 1
+            num_samples += batch_samples
+            if num_batches >= args.max_batches:
                 break
 
-    out = {k: v / max(1, n) for k, v in sums.items()}
+    if num_samples == 0:
+        raise RuntimeError(f"Reconstruction manifest contains no samples: {args.manifest}")
+    out = {k: v / num_samples for k, v in sums.items()}
+    out.update({"num_samples": num_samples, "num_batches": num_batches})
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
 

@@ -5,17 +5,17 @@
 
 ## Executive summary
 
-This thesis develops a **23.8M-parameter continuous-latent autoencoder (CLAE)**
+This thesis develops a **23.80M-parameter continuous-latent autoencoder (CLAE)**
 for 16 kHz Bengali speech. Its principal research output is a compact,
 frame-level representation for downstream speech analysis rather than a
 deployment audio codec. The frozen feature extractor—the convolutional
 frontend and FastConformer/mHC encoder—contains **15.29M parameters** and emits
 a continuous 256-dimensional sequence at **12.5 frames per second**.
 
-The evaluated model was trained for **170,000 optimizer steps**, exceeding the
-original 100,000-step plan. Under the documented effective batch size and
-three-second crop length, this corresponds nominally to **28.56M training
-samples, 23,800 audio hours, and 22.95 passes over the training manifest**.
+The evaluated model was trained for **170,000 optimizer steps**. Under the
+documented effective batch size and three-second crop length, this corresponds
+nominally to **28.56M training samples, 23,800 audio hours, and 22.95
+training-manifest-equivalent passes**.
 These are exposure-equivalent figures: augmentation, random cropping, and
 repeated sampling mean that they are not counts of unique audio.
 
@@ -60,6 +60,14 @@ The architecture and objective are defined by
 
 ## Architecture
 
+![CLAE training architecture](assets/clae_training_architecture.png)
+
+*Figure: Training flow for the continuous-latent autoencoder. The clean input
+provides the reconstruction target; augmented views pass through the frontend,
+frame masking, and encoder before branching into the representation and
+waveform-reconstruction objectives. The single path is schematic: frontend
+frame masking applies only to local views; global views bypass that mask.*
+
 | Component | Configured design | Parameters | Share |
 |---|---|---:|---:|
 | Frontend | Five Conv1D stages; channels 128/256/384/512/512; kernels 10/8/8/4/4; strides 5/4/4/4/4; GroupNorm + GELU | 2,890,240 | 12.1% |
@@ -87,8 +95,8 @@ clean 16 kHz waveform
 
 ## Dataset
 
-The four Bengali corpora contain **1,310,076 utterances** and use a 95/5
-stratified split with seed 42.
+The four Bengali corpora contain **1,310,076 utterances** with close to 2,000
+total hours of audio.
 
 | Dataset | Utterances |
 |---|---:|
@@ -112,7 +120,6 @@ cosine decay.
 
 | Milestone | Status |
 |---|---|
-| 40,250 steps | Earlier accounting snapshot: 6,762,000 forward-pass samples, 5,635 audio hours, and 5.43 manifest-equivalent passes |
 | 50,000 steps | A checkpoint existed and was used to start the packed-data recovery run |
 | 170,000 steps | Checkpoint used for all evaluation results in this report; confirmed by the experiment owner |
 
@@ -133,12 +140,11 @@ Assuming the documented effective batch and segment length remained unchanged:
 | Audio duration processed | 85,680,000 s |
 | Audio hours processed | 23,800 h |
 | Training-manifest equivalents | 22.95× |
-| Relative to original 100k-step plan | 170% |
 
-The supplied recovery invocation alone retains a 100,000-step maximum and
-100,000-step scheduler horizon through the base configuration. The exact
-later overrides or invocation used to reach 170,000 steps should therefore be
-retained with the final checkpoint for full reproducibility.
+The checked-in base configuration retains a 100,000-step maximum and scheduler
+horizon. The exact continuation overrides or invocation used to reach 170,000
+steps are not available, so the exposure calculation assumes the documented
+effective batch and segment length remained unchanged after the recovery run.
 
 ## Evaluation of the 170,000-step checkpoint
 
@@ -245,9 +251,8 @@ three-second feature chunks. Lower WER and CER are better.
 CLAE is substantially behind WavLM, especially on development CER. This is
 consistent with the 12.5 Hz bottleneck retaining speaker and paralinguistic
 information more successfully than detailed linguistic content. The supplied
-ASR log also reports that rows with missing or placeholder durations were kept
-without duration audit; these ASR numbers should therefore be treated as
-diagnostic until rerun with the current duration-validation path.
+ASR run predates the current duration-validation path, so these numbers remain
+diagnostic until rerun with verified audio durations.
 
 ## Overall interpretation
 
@@ -266,7 +271,7 @@ emotion information, but limited linguistic-content retention at its current
 12.5 Hz bottleneck**. It does not yet support a claim of broad superiority over
 pretrained speech encoders.
 
-## Recommended next milestone
+<!-- ## Recommended next milestone
 
 1. Preserve the exact 170k checkpoint path/hash and all continuation overrides,
    particularly `train.max_steps`, scheduler horizon, and learning-rate state.
@@ -278,7 +283,7 @@ pretrained speech encoders.
    improves CER without sacrificing the strong speaker-ID result.
 5. Add reconstruction metrics and listening examples for the same 170k
    checkpoint so representation quality and waveform fidelity can be assessed
-   together.
+   together. -->
 
 ## Provenance note
 

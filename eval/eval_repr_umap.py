@@ -15,7 +15,7 @@ import math
 
 import numpy as np
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_utterances
+from eval.repr_bench import DEFAULT_MODELS, EVAL_DIR, MODEL_ORDER, extract, load_utterances
 
 
 def _umap_2d(X: np.ndarray, seed: int = 0) -> np.ndarray:
@@ -37,7 +37,7 @@ def main() -> None:
     ap.add_argument("--max-utts", type=int, default=300)
     ap.add_argument("--source", default="openslr53", choices=["openslr53", "cv"],
                     help="Utterance source (default: local OpenSLR-53).")
-    ap.add_argument("--models", default=",".join(MODEL_ORDER),
+    ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
                     help="Comma-separated subset of: " + ",".join(MODEL_ORDER))
     ap.add_argument("--ckpt", default=None, help="Local path or HF repo for our model.")
     ap.add_argument("--no-cache", action="store_true")

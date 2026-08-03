@@ -20,11 +20,19 @@ from typing import List
 
 import numpy as np
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_openslr53_utterances
+from eval.repr_bench import (
+    DEFAULT_MODELS,
+    EVAL_DIR,
+    MODEL_ORDER,
+    extract_pools,
+    load_openslr53_utterances,
+)
 
 
 def _trials(X: np.ndarray, speakers: np.ndarray):
     """All upper-triangle pairs: cosine scores + same-speaker labels (vectorized)."""
+    if len(X) != len(speakers) or len(X) < 2:
+        raise ValueError("Speaker verification needs matching arrays with at least two utterances")
     Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
     sim = Xn @ Xn.T                                  # (N, N) cosine
     same = speakers[:, None] == speakers[None, :]    # (N, N) bool
@@ -36,6 +44,10 @@ def eer_and_mindcf(scores: np.ndarray, labels: np.ndarray,
                    p_target: float = 0.01, c_miss: float = 1.0, c_fa: float = 1.0) -> dict:
     from sklearn.metrics import roc_curve
 
+    if not 0.0 < p_target < 1.0:
+        raise ValueError("p_target must be strictly between zero and one")
+    if len(scores) != len(labels) or len(np.unique(labels)) != 2:
+        raise ValueError("EER needs matching scores with positive and negative trials")
     fpr, tpr, _ = roc_curve(labels, scores)
     fnr = 1.0 - tpr
     k = int(np.nanargmin(np.abs(fnr - fpr)))
@@ -51,7 +63,11 @@ def eer_and_mindcf(scores: np.ndarray, labels: np.ndarray,
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-utts", type=int, default=2000)
-    ap.add_argument("--models", default=",".join(MODEL_ORDER))
+    ap.add_argument(
+        "--models",
+        default=",".join(DEFAULT_MODELS),
+        help="Comma-separated subset of: " + ",".join(MODEL_ORDER),
+    )
     ap.add_argument("--pools", default="mean,meanstd")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--no-cache", action="store_true")
@@ -59,13 +75,24 @@ def main() -> None:
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     pools = [p.strip() for p in args.pools.split(",") if p.strip()]
+    if not models or not pools:
+        ap.error("--models and --pools must not be empty")
+    if args.max_utts < 2:
+        ap.error("--max-utts must be at least 2")
     utts = load_openslr53_utterances(max_utts=args.max_utts)
     n_spk = len({u.speaker for u in utts})
 
-    results: dict = {p: {} for p in pools}
-    for pool in pools:
-        for name in models:
-            data = extract(name, utts, ckpt=args.ckpt, pool=pool, use_cache=not args.no_cache)
+    results: dict = {pool: {} for pool in pools}
+    for name in models:
+        pooled = extract_pools(
+            name,
+            utts,
+            ckpt=args.ckpt,
+            pools=pools,
+            use_cache=not args.no_cache,
+        )
+        for pool in pools:
+            data = pooled[pool]
             scores, labels = _trials(data["X"], data["speakers"])
             m = eer_and_mindcf(scores, labels)
             m.update({"n_pos": int(labels.sum()), "n_neg": int(len(labels) - labels.sum()),
@@ -74,9 +101,15 @@ def main() -> None:
 
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     out = EVAL_DIR / "speaker_verif.json"
-    out.write_text(json.dumps(
-        {"n_utts": len(utts), "n_speakers": n_spk, "results": results}, indent=2),
-        encoding="utf-8")
+    payload = {
+        "protocol": "all_upper_triangle_cosine_trials",
+        "n_utts": len(utts),
+        "n_speakers": n_spk,
+        "p_target": 0.01,
+        "pools": pools,
+        "results": results,
+    }
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print(f"\nSpeaker verification  ({len(utts)} utts, {n_spk} speakers)")
     for pool in pools:

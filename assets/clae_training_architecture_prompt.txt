@@ -1,0 +1,32 @@
+Use case: infographic-diagram
+Asset type: publication-ready neural network architecture figure for an arXiv / IEEE research paper
+Primary request: Create a precise, clean model architecture diagram for a Continuous Latent Autoencoder (CLAE) for Bengali speech representation learning.
+
+Style/medium: flat 2D vector-like scientific diagram, white background, restrained navy blue, muted teal, pale gray, and black palette; thin crisp connector lines; consistent rounded rectangular modules; professional IEEE journal aesthetic; no decorative imagery; no gradients, shadows, 3D effects, watermark, logo, caption, figure number, or surrounding prose.
+Composition/framing: wide landscape diagram, left-to-right main flow, with a clean split into two loss branches after the encoder. Generous spacing, strong alignment, no crossing arrows. All labels must be large, sharp, correctly spelled, and readable at paper-column scale.
+
+Exact architecture and labels:
+1. Far left: a small waveform icon labeled exactly “Input waveform x (16 kHz)”.
+2. Split a thin dashed bypass line from the original clean input along the bottom, labeled exactly “Clean target”.
+3. Main arrow into a box labeled “View augmentation” with smaller internal text exactly “2 global + 4 local views” and “augmentation / noise”.
+4. Arrow to a box labeled “Conv1D frontend” with smaller text exactly “5 stages · stride 1280” and “12.5 frames/s”.
+5. Arrow to a narrow processing box labeled exactly “Frame span mask”.
+6. Arrow to a larger box labeled “FastConformer encoder” with smaller text exactly “8 layers + mHC” and “z: 256-D continuous latent”.
+7. From the encoder output, branch upward and downward:
+   Upper auxiliary representation branch: arrow to “Projector” with smaller text “256 → 512 → 64”, then split into two compact loss boxes labeled exactly “L_JEPA” and “L_VISReg”. Add a small brace or joint label exactly “representation losses”.
+   Lower reconstruction branch: arrow to a preprocessing box labeled “Decoder-input corruption” with smaller text exactly “span mask + Gaussian noise”, then arrow to “FiLM waveform decoder”, then arrow to a small reconstructed waveform icon labeled exactly “Reconstructed waveform x̂”, then arrow to a loss circle or box labeled exactly “L_mel”.
+8. Route the dashed “Clean target” bypass from the original input directly into the “L_mel” node, making it visually explicit that mel reconstruction compares the reconstructed waveform with clean x.
+9. Near the two loss branches, include one concise equation only: “L = 1.0 L_mel + 0.3 L_JEPA + 0.7 L_VISReg”.
+
+Visual encoding:
+- solid arrows for learned forward flow
+- dashed gray arrow for the clean reconstruction target
+- light blue boxes for neural network modules
+- light teal boxes for masking/noise/augmentation operations
+- pale orange loss nodes
+- label the encoder-to-projector arrow “p branch” only if there is room
+- label the encoder-to-decoder arrow “z” only if there is room
+
+Constraints: preserve this exact topology and causal order; projector losses act on projector output; decoder corruption happens after encoder and before decoder; frame masking happens after frontend and before encoder; L_mel receives both reconstructed output and the clean target. Avoid extra modules, repeated nodes, circular flow, illegible microtext, mathematical clutter, human figures, spectrogram art, or photorealism.
+
+Implementation clarification: the figure is a schematic shared path. The frame span mask applies to local views only; global views bypass that mask.

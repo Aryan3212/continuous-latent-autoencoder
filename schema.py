@@ -279,24 +279,27 @@ class TrainCfg(_Base):
     val_batches: int | None = None
 
 
-class EmotionCfg(_Base):
+class ClassificationProbeCfg(_Base):
     enabled: bool = False
     train_manifest: str | None = None
     dev_manifest: str | None = None
+    label_key: str
+    steps: int = Field(2000, ge=1)
+    hidden: int = Field(256, ge=1)
+    batch_size: int = Field(64, ge=1)
+    lr: float = Field(3.0e-4, gt=0)
+    seed: int = 0
+    segment_seconds: float | None = Field(default=None, gt=0)
+
+
+class EmotionCfg(ClassificationProbeCfg):
     label_key: str = "emotion"
-    steps: int = 2000
-    batch_size: int = 64
-    segment_seconds: float | None = None
 
 
-class GenderCfg(_Base):
-    enabled: bool = False
-    train_manifest: str | None = None
-    dev_manifest: str | None = None
+class GenderCfg(ClassificationProbeCfg):
     label_key: str = "gender"
     steps: int = 1500
-    batch_size: int = 64
-    segment_seconds: float | None = None
+    hidden: int = 128
 
 
 class AsrCfg(_Base):
@@ -304,10 +307,11 @@ class AsrCfg(_Base):
     train_manifest: str | None = None
     dev_manifest: str | None = None
     text_key: str = "text"
-    steps: int = 1000
-    batch_size: int = 16
-    segment_seconds: float = 15.0
-    max_samples: int = 500
+    steps: int = Field(1000, ge=1)
+    batch_size: int = Field(16, ge=1)
+    segment_seconds: float = Field(15.0, gt=0)
+    max_samples: int = Field(500, ge=0)
+    seed: int = 0
 
 
 class EvalCfg(_Base):

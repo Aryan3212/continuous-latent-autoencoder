@@ -228,6 +228,11 @@ uv run python -m eval.run_all \
 
 Remove `--skip_probes` to run individual probe flags enabled in the config.
 Configure the train/dev manifests for every enabled probe first.
+Results for each checkpoint are grouped under
+`runs/first-run/eval/step_<checkpoint-step>/`, with one `summary.json` carrying
+per-task completion, skip, failure, and timing status. Latent visualization is
+no longer part of the default metric run; add `--visualize` when you want it.
+Use `--skip_recon` to run only the configured probes.
 
 To reconstruct audio for listening:
 

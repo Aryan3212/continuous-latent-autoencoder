@@ -17,10 +17,22 @@ from typing import List
 
 import numpy as np
 
-from eval.repr_bench import EVAL_DIR, MODEL_ORDER, extract, load_subesco_utterances
+from eval.repr_bench import (
+    DEFAULT_MODELS,
+    EVAL_DIR,
+    MODEL_ORDER,
+    extract,
+    load_subesco_utterances,
+)
 
 
-def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, n_folds: int) -> dict:
+def probe(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    n_folds: int,
+    seed: int,
+) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
     from sklearn.model_selection import GroupKFold
@@ -28,18 +40,34 @@ def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, n_folds: int) -> dic
 
     n_groups = len(np.unique(groups))
     n_splits = min(n_folds, n_groups)
+    if n_splits < 2:
+        raise ValueError("Emotion probe needs at least two labelled speakers")
     gkf = GroupKFold(n_splits=n_splits)
 
     accs: List[float] = []
     f1s: List[float] = []
-    for tr, te in gkf.split(X, y, groups):
+    fold_results = []
+    for fold, (tr, te) in enumerate(gkf.split(X, y, groups)):
         scaler = StandardScaler().fit(X[tr])
         Xtr, Xte = scaler.transform(X[tr]), scaler.transform(X[te])
-        clf = LogisticRegression(max_iter=3000, C=1.0)
+        clf = LogisticRegression(max_iter=3000, C=1.0, random_state=seed)
         clf.fit(Xtr, y[tr])
         pred = clf.predict(Xte)
-        accs.append(accuracy_score(y[te], pred))
-        f1s.append(f1_score(y[te], pred, average="macro"))
+        accuracy = float(accuracy_score(y[te], pred))
+        macro_f1 = float(
+            f1_score(y[te], pred, average="macro", zero_division=0)
+        )
+        accs.append(accuracy)
+        f1s.append(macro_f1)
+        fold_results.append({
+            "fold": fold,
+            "accuracy": accuracy,
+            "macro_f1": macro_f1,
+            "n_train": int(len(tr)),
+            "n_test": int(len(te)),
+            "n_train_speakers": int(len(np.unique(groups[tr]))),
+            "n_test_speakers": int(len(np.unique(groups[te]))),
+        })
 
     return {
         "macro_f1": float(np.mean(f1s)),
@@ -48,21 +76,29 @@ def probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray, n_folds: int) -> dic
         "accuracy_std": float(np.std(accs)),
         "n_splits": int(n_splits),
         "dim": int(X.shape[1]),
+        "folds": fold_results,
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-utts", type=int, default=None, help="Cap clips (default: all 7000).")
-    ap.add_argument("--models", default=",".join(MODEL_ORDER),
+    ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
                     help="Comma-separated subset of: " + ",".join(MODEL_ORDER))
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--pool", default="meanstd", choices=["mean", "meanstd"])
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if not models:
+        ap.error("--models must name at least one model")
+    if args.folds < 2:
+        ap.error("--folds must be at least 2")
+    if args.max_utts is not None and args.max_utts < 1:
+        ap.error("--max-utts must be positive")
     utts = load_subesco_utterances(max_utts=args.max_utts)
     y = np.array([u.emotion for u in utts])
     groups = np.array([u.speaker for u in utts])
@@ -72,7 +108,7 @@ def main() -> None:
     results = {}
     for name in models:
         data = extract(name, utts, ckpt=args.ckpt, pool=args.pool, use_cache=not args.no_cache)
-        results[name] = probe(data["X"], y, groups, args.folds)
+        results[name] = probe(data["X"], y, groups, args.folds, args.seed)
 
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
     out = EVAL_DIR / "emotion_probe.json"
@@ -83,6 +119,7 @@ def main() -> None:
         "n_classes": n_classes,
         "chance": chance,
         "pool": args.pool,
+        "seed": args.seed,
         "results": results,
     }
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
