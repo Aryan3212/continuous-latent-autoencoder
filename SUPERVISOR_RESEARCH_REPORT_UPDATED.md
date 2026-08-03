@@ -5,12 +5,13 @@
 
 ## Executive summary
 
-This thesis develops a **23.80M-parameter continuous-latent autoencoder (CLAE)**
-for 16 kHz Bengali speech. Its principal research output is a compact,
-frame-level representation for downstream speech analysis rather than a
-deployment audio codec. The frozen feature extractor—the convolutional
-frontend and FastConformer/mHC encoder—contains **15.29M parameters** and emits
-a continuous 256-dimensional sequence at **12.5 frames per second**.
+This thesis develops a compact **15.29M-parameter speech representation
+encoder** within a continuous-latent autoencoder (CLAE) for 16 kHz Bengali
+speech. The evaluated representation—the convolutional frontend and
+FastConformer/mHC encoder—emits a continuous 256-dimensional sequence at
+**12.5 frames per second**. The primary research goal is downstream semantic
+and discriminative representation quality rather than a deployment audio
+codec.
 
 The evaluated model was trained for **170,000 optimizer steps**. Under the
 documented effective batch size and three-second crop length, this corresponds
@@ -36,6 +37,13 @@ maps \(z\) into \(p\) for representation-learning losses. The decoder and all
 reported frozen-feature probes consume **encoder latent \(z\)**, not projector
 output \(p\). This prevents the downstream representation from being identical
 to the space directly constrained by JEPA and VISReg.
+
+Accordingly, the evaluation prioritizes emotion, speaker, age, and linguistic
+content probes. The decoder currently supplies a reconstruction learning signal
+but is not treated as the principal research output. Strong waveform
+reconstruction would require substantially more dedicated training, so detailed
+decoder-quality claims and reconstruction benchmarks are deferred at this
+stage.
 
 The configured objective is:
 
@@ -75,6 +83,11 @@ frame masking applies only to local views; global views bypass that mask.*
 | Projector | Per-frame BatchNorm/GELU MLP, 256 → 512 → 64 | 165,440 | 0.7% |
 | Decoder | FiLM-conditioned residual waveform decoder; 768 initial channels; strides 4/4/4/4/5; two residual blocks per stage; dilations 1/3/9 | 8,344,225 | 35.1% |
 | **Total** |  | **23,803,125** | **100%** |
+
+The full 23.80M-parameter training architecture is shown for transparency. The
+headline **15.29M** count used in this report is the evaluated frozen feature
+extractor (frontend + encoder: 15,293,460 parameters), which is the component
+used for downstream comparisons.
 
 The frontend stride is \(5\times4\times4\times4\times4=1{,}280\) samples.
 At 16 kHz, this gives one latent frame every 80 ms, or 12.5 frames/s.
