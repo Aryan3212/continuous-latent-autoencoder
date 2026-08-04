@@ -182,9 +182,9 @@ same name.
   canonical audio producer and standalone structural verifier; paired with
   `data.backend=tar` for optional training, not dataset discovery.
 - `scripts/plot_ablation_diagnostics.py` — strict JSONL post-processor for the
-  five matched representation conditions. It merges rows by step, requires the
-  10k/20k/30k milestones and every plotted metric, uses common steps/axes, keeps
-  encoder-latent and projector panels separate, and writes provenance metadata.
+  five matched representation conditions. It merges rows by step, uses the
+  common available steps and every plotted metric, keeps encoder-latent and
+  projector panels separate, and writes provenance metadata.
 - `scripts/run_ablation_suite.sh` — serial launcher for the six matched 30k
   packed-data ablations. It assigns stable output/run IDs, skips intact 30k
   checkpoints, and resumes an interrupted condition from its newest intact

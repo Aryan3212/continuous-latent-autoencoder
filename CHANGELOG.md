@@ -9,8 +9,13 @@ Date format: `YYYY-MM-DD`
 - Reduced the six ablation conditions to 30,000 optimizer steps with checkpoints
   every 1,000 steps. Historical `_50k` config filenames and run IDs remain
   unchanged so existing completed runs can still be detected and skipped.
-- Updated diagnostic milestones to 10k/20k/30k and adjusted the ablation
-  evaluation/documentation guidance accordingly.
+- Adjusted the ablation evaluation/documentation guidance for the 30k endpoint.
+
+**Relaxed diagnostic plot step requirements**
+
+- The ablation plotter now uses common available logged steps without requiring
+  specific diagnostic milestones. Downstream evaluations can be run separately
+  against each condition's step-30k checkpoint.
 
 ## 2026-08-04
 

@@ -18,9 +18,10 @@ All conditions train through the packed TAR backend inherited from
 | No decoder corruption | `configs/large_2kh_ablation_no_decoder_corruption_50k.yaml` | Do decoder masking/noise improve reconstruction or transfer? |
 
 All runs stop at 30k but intentionally retain the original 100k scheduler
-horizon and use the same packed dataset backend. Evaluate at steps 10k, 20k,
-and 30k for learning curves; the 1k
-checkpoint cadence permits additional post-hoc points if a curve is surprising.
+horizon and use the same packed dataset backend. The primary downstream
+evaluation point is the individual step-30k checkpoint for each condition; the
+1k checkpoint cadence permits optional earlier or intermediate evaluations if a
+curve is surprising.
 Use the already-trained historical full checkpoint as the primary reference if its
 resolved configuration exactly matches the full-reference config. Otherwise,
 run the full reference again and document the mismatch.

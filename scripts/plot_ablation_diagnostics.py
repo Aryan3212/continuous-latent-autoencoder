@@ -31,8 +31,6 @@ CONDITION_ARGS = {
     "no_mhc": "No mHC",
     "no_decoder_corruption": "No decoder corruption",
 }
-MILESTONES = (10_000, 20_000, 30_000)
-
 SPACE_METRICS = {
     "z": {
         "rank": ["latent/z/effective_rank"],
@@ -176,18 +174,11 @@ def common_complete_steps(
         selected = sorted(common)
     if not selected:
         raise ValueError(f"no common complete {space}-space diagnostic steps")
-    missing_milestones = sorted(set(MILESTONES) - set(selected))
-    if missing_milestones:
-        raise ValueError(
-            f"{space}-space plots require milestone steps {MILESTONES}; missing {missing_milestones}"
-        )
     return selected
 
 
-def _mark_milestones(axes: list[plt.Axes]) -> None:
+def _style_axes(axes: list[plt.Axes]) -> None:
     for axis in axes:
-        for step in MILESTONES:
-            axis.axvline(step, color="0.8", linewidth=0.8, linestyle=":", zorder=0)
         axis.grid(alpha=0.2)
         axis.set_xlabel("optimizer step")
 
@@ -234,7 +225,7 @@ def plot_space(
         axis.set_ylabel(panel.replace("_", " "))
         axis.legend(fontsize=7, ncol=2)
 
-    _mark_milestones(axes)
+    _style_axes(axes)
     space_name = "encoder latent z" if space == "z" else "VISReg projector p"
     figure.suptitle(f"Ablation representation diagnostics — {space_name}{title_suffix}")
     figure.savefig(output_path, dpi=180)

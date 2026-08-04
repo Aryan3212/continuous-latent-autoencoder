@@ -148,9 +148,9 @@ Plot the following over optimizer step:
   similarity
 
 Use the same checkpoint/log steps and identical axis ranges for every condition.
-At minimum, emphasize steps 10k, 20k, and 30k; intermediate 1k checkpoints
-may be included consistently across all conditions. Do not auto-scale each run
-independently, because that can visually exaggerate or conceal differences.
+Use the common available optimizer steps; the 1k checkpoint cadence permits
+additional post-hoc points when needed. Do not auto-scale each run independently,
+because that can visually exaggerate or conceal differences.
 
 Produce separate panels or figures for:
 

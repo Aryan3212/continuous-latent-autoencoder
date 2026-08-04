@@ -72,5 +72,5 @@ uv run python scripts/plot_ablation_diagnostics.py \
 ```
 
 If `ABLATION_OUT_DIR` was changed, replace the `runs/ablations` prefixes. The
-plotter requires all logged metrics and common 10k, 20k, and 30k steps; it fails
+plotter requires all logged metrics at the common available steps; it fails
 instead of silently omitting an incomplete condition.
