@@ -1,0 +1,18 @@
+# Frame-rate ablation: full objective at 25 Hz instead of 12.5 Hz.
+# Product(frontend strides) = product(decoder strides) = 640 samples/frame.
+# At 16 kHz this is exactly 25 encoder frames/second.
+_base_: configs/large_2kh_packed.yaml
+
+run:
+  wandb:
+    name: "large-2kh-ablation-25hz-full-50k"
+
+model:
+  frontend:
+    strides: [5, 4, 4, 4, 2]
+  decoder:
+    up_strides: [2, 4, 4, 4, 5]
+
+train:
+  max_steps: 50000
+  save_interval_steps: 2500

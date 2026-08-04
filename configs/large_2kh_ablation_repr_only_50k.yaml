@@ -1,0 +1,15 @@
+# Objective-decomposition ablation: representation learning only (J + VISReg).
+# The decoder remains instantiated for architecture/checkpoint compatibility,
+# but reconstruction contributes zero weight to the training objective.
+_base_: configs/large_2kh_packed.yaml
+
+run:
+  wandb:
+    name: "large-2kh-ablation-repr-only-j-visreg-50k"
+
+loss:
+  recon_weight: 0.0
+
+train:
+  max_steps: 50000
+  save_interval_steps: 2500

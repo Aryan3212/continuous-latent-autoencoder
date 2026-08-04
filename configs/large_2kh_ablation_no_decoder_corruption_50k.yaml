@@ -1,0 +1,17 @@
+# Component ablation: full objective without decoder-input masking or noise.
+# View augmentation and the local waveform/frontend masks remain unchanged.
+_base_: configs/large_2kh_packed.yaml
+
+run:
+  wandb:
+    name: "large-2kh-ablation-no-decoder-corruption-50k"
+
+aug:
+  decoder_input_mask:
+    enabled: false
+  decoder_input_noise:
+    enabled: false
+
+train:
+  max_steps: 50000
+  save_interval_steps: 2500

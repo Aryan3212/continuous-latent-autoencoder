@@ -2,6 +2,53 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-08-04
+
+**Implemented ablation observability and matched diagnostic plots**
+
+- Added globally gathered, detached FP32 latent/projector distribution metrics,
+  raw and weighted objective/VISReg decomposition, optimizer/AMP stability,
+  layer-qualified mHC internals, throughput, exposure, CUDA memory, and hardware
+  metadata while retaining the established loss/rank/decoder metric names.
+- Added strict matched-run plotting for encoder-latent and VISReg-projector
+  spaces with common steps/axes, required 10k/25k/50k milestones, optional
+  separate 25 Hz panels, and machine-readable plot provenance.
+- Added CPU unit coverage for covariance/collapse semantics, mHC schema, and the
+  exposed VISReg-term sum. Per repository policy, tests and Python smoke runs
+  were not executed as part of this change.
+
+**Added resumable sequential ablation launcher**
+
+- Added `scripts/run_ablation_suite.sh` to run the six matched packed-data
+  ablations serially with stable run directories. Re-invocation skips intact
+  step-50k conditions and resumes the current condition from the newest intact
+  periodic or final checkpoint; failures and clean early exits stop the suite.
+- Added `docs/ABLATION_RUNS.md` with single-/multi-GPU usage, output relocation,
+  safe forwarded config overrides, resume invariants, failure behavior, and the
+  matched-diagnostic plotting command. Suite-owned identity and schedule
+  overrides are rejected because they would invalidate resume detection.
+
+## 2026-08-03
+
+**Added matched 50k TACL ablation configurations and experiment handoffs**
+
+- Added six `large_2kh.yaml`-derived configs covering the full objective,
+  reconstruction-only, representation-only, mHC-off, 25 Hz, and decoder-input-
+  corruption-off conditions. Every run stops at 50k and saves every 2.5k steps
+  while retaining the original 100k LR horizon for comparison with the
+  historical step-50k checkpoint.
+- Switched those six configs to inherit through `large_2kh_packed.yaml`, making
+  the packed TAR dataset backend common to the complete ablation matrix while
+  preserving the underlying model, objective defaults, optimizer, and schedule.
+- Added `docs/ABLATION_LOGGING_REQUIREMENTS.md`, separating diagnostics already
+  present in training from required VISReg, latent-distribution, optimizer,
+  mHC, throughput, and resource-accounting additions. The handoff also requires
+  reproducible cross-run representation plots with common steps/axes and
+  separate projector-space and encoder-latent panels.
+- Added `docs/EXTRA_EVALUATIONS.md` with the matched checkpoint matrix, external
+  Bengali evaluation, ASR/frame-rate controls, reconstruction metrics,
+  uncertainty protocols, reporting requirements, and compute terminology.
+
 ## 2026-08-02
 
 **Updated supervisor research report for the 170k checkpoint**

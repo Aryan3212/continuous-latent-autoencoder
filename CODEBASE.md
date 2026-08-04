@@ -88,12 +88,17 @@ optional discriminator optimizer, and profiling.
   position. Older checkpoints without this field retain the legacy global-step
   seed fallback. There is no EMA state in this codebase.
 - AMP-overflow-skipped updates still advance the attempted-step counter.
-- Every training log interval records the LR, interval mean/max input and
-  decoder-output RMS, interval peaks, decoder tanh-saturation fraction
-  (`abs(output) >= 0.99`), unscaled pre-clip decoder gradient mean/max, and the
-  actual log-boundary decoder parameter-update norm. Packed runs additionally
+- Every training log interval writes the same reduced row to JSONL and W&B. It
+  includes objective/VISReg decomposition; globally gathered FP32 covariance
+  diagnostics for clean encoder latents and the all-view projector population;
+  pre-clip total/per-module gradient mean and maxima; boundary-step per-module
+  update norms; clipping, AMP-skip, and non-finite counters; mHC layer internals;
+  input/decoder health; throughput, source-audio exposure, and CUDA memory.
+  Existing rank, decoder, and loss keys remain aliases. Packed runs additionally
   record `data_epoch` and each global rank/worker's shard IDs, shard count,
-  assigned samples, and equal selected-sample quota.
+  assigned samples, and equal selected-sample quota. Static runtime metadata
+  records effective batch construction, representation-view count, GPU models,
+  and the fixed collapse/isotropy thresholds.
 - There is no in-loop validation. `train.eval_interval_steps`,
   `train.val_batches`, and `eval.enabled` are currently unused;
   `data.val_manifest` is metadata for external evaluation.
@@ -109,6 +114,13 @@ Full configs: `exp0.yaml`, `exp_3m.yaml`, `exp_3m_gan.yaml`, `large_2kh.yaml`,
 `kaggle_3m_gan.yaml` inherits from `exp_3m_gan.yaml` with Kaggle-specific
 overrides; `large_2kh_packed.yaml` inherits from `large_2kh.yaml` with only
 packed-data loader overrides.
+
+The TACL ablation configs inherit from `large_2kh_packed.yaml`: matched full
+objective, reconstruction-only, representation-only, mHC-off, 25 Hz, and
+decoder-corruption-off variants are named `large_2kh_ablation_*_50k.yaml`. They
+therefore share the packed TAR backend, stop at 50k, checkpoint every 2.5k
+steps, and intentionally retain the underlying base config's 100k LR horizon
+to match the historical full-model step-50k learning-rate trajectory.
 
 ## Data
 
@@ -168,6 +180,14 @@ same name.
 - `scripts/prepare_audio_shards.py` — optional manifest-to-uncompressed-TAR
   canonical audio producer and standalone structural verifier; paired with
   `data.backend=tar` for optional training, not dataset discovery.
+- `scripts/plot_ablation_diagnostics.py` — strict JSONL post-processor for the
+  five matched representation conditions. It merges rows by step, requires the
+  10k/25k/50k milestones and every plotted metric, uses common steps/axes, keeps
+  encoder-latent and projector panels separate, and writes provenance metadata.
+- `scripts/run_ablation_suite.sh` — serial launcher for the six matched 50k
+  packed-data ablations. It assigns stable output/run IDs, skips intact 50k
+  checkpoints, and resumes an interrupted condition from its newest intact
+  periodic or `last.pt` checkpoint before advancing.
 - `scripts/download_subesco.py` — materializes the processed
   `sajid73/SUBESCO-audio-dataset` Parquet release into local WAV files plus a
   label-preserving TSV at `datasets/SUBESCO/` for emotion evaluation.
@@ -227,3 +247,10 @@ same name.
   reproducibility caveats from the supplied experiment log.
 - `CODEBASE.md` — current agent-facing map.
 - `CHANGELOG.md` — human-only change history.
+- `docs/ABLATION_LOGGING_REQUIREMENTS.md` — implemented logging and plotting contract
+  for the matched ablations; its hardware smoke-run acceptance check remains to
+  be performed in the target CUDA environment.
+- `docs/EXTRA_EVALUATIONS.md` — matched-checkpoint evaluation and reporting checklist
+  for the TACL evidence package.
+- `docs/ABLATION_RUNS.md` — user-facing serial launch, resume, output-path, and
+  multi-GPU instructions for the matched ablation suite.

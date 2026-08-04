@@ -53,6 +53,16 @@ from models.sigreg import SIGReg
 from models.visreg import VISReg
 from config import apply_overrides, load_config
 from schema import Config
+from training_diagnostics import (
+    COLLAPSED_DIM_STD_THRESHOLD,
+    ISOTROPY_EPS,
+    mhc_diagnostics,
+    module_grad_norm,
+    module_update_norm,
+    parameters_have_finite_grads,
+    representation_distribution_stats,
+    snapshot_trainable_parameters,
+)
 
 
 @dataclass(frozen=True)
@@ -192,6 +202,7 @@ def save_checkpoint(
     disc: torch.nn.Module | None = None,
     optimizer_d: torch.optim.Optimizer | None = None,
     scaler_d: torch.cuda.amp.GradScaler | None = None,
+    diagnostic_counters: dict[str, int] | None = None,
 ) -> None:
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -201,6 +212,7 @@ def save_checkpoint(
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
         "cfg": cfg.model_dump(),
+        "diagnostic_counters": diagnostic_counters or {},
     }
     if data_epoch is not None:
         payload["data_epoch"] = data_epoch
@@ -346,42 +358,6 @@ def _all_gather_batch(x: torch.Tensor, world_size: int) -> torch.Tensor:
     return torch.cat(gathered, dim=0)
 
 
-def _module_grad_norm(module: torch.nn.Module) -> torch.Tensor:
-    """FP32 L2 norm over the module's unscaled gradients."""
-    parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
-    if not parameters:
-        raise ValueError("cannot measure gradient norm for a module without trainable parameters")
-    total = torch.zeros((), device=parameters[0].device, dtype=torch.float32)
-    for parameter in parameters:
-        if parameter.grad is not None:
-            total = total + parameter.grad.detach().float().square().sum()
-    return total.sqrt()
-
-
-def _snapshot_trainable_parameters(module: torch.nn.Module) -> list[torch.Tensor]:
-    return [
-        parameter.detach().clone()
-        for parameter in module.parameters()
-        if parameter.requires_grad
-    ]
-
-
-def _module_update_norm(
-    module: torch.nn.Module,
-    before: list[torch.Tensor],
-) -> torch.Tensor:
-    """FP32 L2 norm of the actual optimizer update, including weight decay."""
-    parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
-    if len(parameters) != len(before):
-        raise ValueError("parameter snapshot does not match module")
-    if not parameters:
-        raise ValueError("cannot measure update norm for a module without trainable parameters")
-    total = torch.zeros((), device=parameters[0].device, dtype=torch.float32)
-    for parameter, old_value in zip(parameters, before):
-        total = total + (parameter.detach().float() - old_value.float()).square().sum()
-    return total.sqrt()
-
-
 def _restore_checkpoint(
     path: str,
     *,
@@ -391,7 +367,7 @@ def _restore_checkpoint(
     disc: torch.nn.Module | None,
     optimizer_d: torch.optim.Optimizer | None,
     scaler_d: torch.cuda.amp.GradScaler | None,
-) -> tuple[int, _ScheduleInputs | None, int | None]:
+) -> tuple[int, _ScheduleInputs | None, int | None, dict[str, int]]:
     state = torch.load(path, map_location="cpu")
     model.load_state_dict(state["model"], strict=True)
     optimizer.load_state_dict(state["optimizer"])
@@ -410,7 +386,21 @@ def _restore_checkpoint(
         or saved_data_epoch < 0
     ):
         raise ValueError(f"checkpoint has invalid data_epoch: {saved_data_epoch!r}")
-    return int(state.get("step", 0)), _checkpoint_schedule_inputs(state), saved_data_epoch
+    counters = state.get("diagnostic_counters", {})
+    if not isinstance(counters, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        for key, value in counters.items()
+    ):
+        raise ValueError(f"checkpoint has invalid diagnostic_counters: {counters!r}")
+    return (
+        int(state.get("step", 0)),
+        _checkpoint_schedule_inputs(state),
+        saved_data_epoch,
+        counters,
+    )
 
 
 def main() -> None:
@@ -473,15 +463,36 @@ def main() -> None:
     # Data
     dcfg = cfg.data
     if is_main:
+        effective_batch_size = (
+            cfg.train.batch_size * cfg.train.grad_accum_steps * world_size
+        )
+        visible_gpu_count = torch.cuda.device_count()
         meta_extra = {
             "git_hash": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
             "data_backend": dcfg.backend,
             "train_manifest": str(dcfg.train_manifest),
             "shard_manifest": str(dcfg.shard_manifest or ""),
             "val_manifest": str(dcfg.val_manifest or ""),
+            "world_size": world_size,
+            "per_device_batch_size": cfg.train.batch_size,
+            "gradient_accumulation_steps": cfg.train.grad_accum_steps,
+            "effective_batch_size": effective_batch_size,
+            "segment_seconds": dcfg.segment_seconds,
+            "sample_rate": dcfg.sample_rate,
+            "representation_views": (
+                cfg.loss.jepa.num_globals + cfg.loss.jepa.num_locals
+            ),
+            "visible_gpu_count": visible_gpu_count,
+            "gpu_model_names": [
+                torch.cuda.get_device_name(index) for index in range(visible_gpu_count)
+            ],
+            "collapsed_dim_std_threshold": COLLAPSED_DIM_STD_THRESHOLD,
+            "isotropy_epsilon": ISOTROPY_EPS,
         }
         (out_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(), sort_keys=False), encoding="utf-8")
         (out_root / "run_meta.yaml").write_text(yaml.safe_dump(meta_extra, sort_keys=False), encoding="utf-8")
+        if wb is not None:
+            wb.config.update({"runtime_metadata": meta_extra}, allow_val_change=True)
     if dcfg.backend == "files":
         train_ds: torch.utils.data.Dataset[dict[str, Any]] | torch.utils.data.IterableDataset[dict[str, Any]] = AudioDataset(
             DatasetConfig(
@@ -637,8 +648,9 @@ def main() -> None:
     step = 0
     saved_schedule_inputs: _ScheduleInputs | None = None
     saved_data_epoch: int | None = None
+    saved_diagnostic_counters: dict[str, int] = {}
     if args.resume:
-        step, saved_schedule_inputs, saved_data_epoch = _restore_checkpoint(
+        step, saved_schedule_inputs, saved_data_epoch, saved_diagnostic_counters = _restore_checkpoint(
             args.resume,
             model=model,
             optimizer=optimizer,
@@ -730,6 +742,12 @@ def main() -> None:
     log_interval = cfg.train.log_interval_steps
 
     start_time = time.monotonic()
+    interval_start_time = start_time
+    interval_optimizer_steps = 0
+    amp_skipped_updates_total = saved_diagnostic_counters.get(
+        "amp_skipped_updates_total", 0
+    )
+    nonfinite_grad_total = saved_diagnostic_counters.get("nonfinite_grad_total", 0)
     max_seconds = args.max_hours * 3600.0 if args.max_hours else None
 
     epoch = 0
@@ -864,8 +882,8 @@ def main() -> None:
                     # VISReg expects (N, B, D); treat the whole global batch as a
                     # single population (N=1, B=T'*V*B) so the Gaussianity target
                     # uses the largest possible pool of points.
-                    l_reg = reg(sig_global.unsqueeze(0))
-                    reg_stats = {"l_vis": l_reg.detach()}
+                    l_reg, visreg_stats = reg.forward_with_terms(sig_global.unsqueeze(0))
+                    reg_stats = {"l_vis": l_reg.detach(), **visreg_stats}
 
                 # Diagnostic slicing: compare global-0 vs local-0 (clean vs masked signal).
                 z_a = z_cat[:B]               # view-0 encoder embeddings (decoder + diagnostics)
@@ -1025,6 +1043,12 @@ def main() -> None:
                 "input_rms": input_rms,
                 "decoder_output_rms": decoder_output_rms,
                 "decoder_tanh_saturation_frac": decoder_tanh_saturation_frac,
+                "objective/recon_raw": l_recon.detach(),
+                "objective/recon_weighted": (recon_w * l_recon).detach(),
+                "objective/jepa_raw": l_jepa.detach(),
+                "objective/jepa_weighted": (jepa_w * l_jepa).detach(),
+                "objective/reg_raw": l_reg.detach(),
+                "objective/reg_weighted": (reg_w * l_reg).detach(),
             }
             if disc is not None:
                 mb_step_stats["l_adv"] = l_adv.detach()
@@ -1073,13 +1097,33 @@ def main() -> None:
             + total_loss.detach()
         )
         accum_counts["loss"] = accum_counts.get("loss", 0) + 1
+        accum_sums["objective/total"] = (
+            accum_sums.get("objective/total", torch.zeros((), device=device))
+            + total_loss.detach()
+        )
+        accum_counts["objective/total"] = accum_counts.get("objective/total", 0) + 1
 
         # Unscale on every step so the decoder diagnostic is always the true
         # pre-clip gradient norm. The snapshot is limited to log-boundary steps:
         # it measures the actual post-optimizer parameter delta without imposing
         # a full decoder copy on every training step.
         scaler.unscale_(optimizer)
-        decoder_grad_norm = _module_grad_norm(_unwrap(model.decoder))
+        tracked_modules = {
+            name: _unwrap(getattr(model, name))
+            for name in ("frontend", "encoder", "projector", "decoder")
+        }
+        module_grad_norms = {
+            name: module_grad_norm(module)
+            for name, module in tracked_modules.items()
+        }
+        total_grad_norm = torch.stack(list(module_grad_norms.values())).square().sum().sqrt()
+        finite_grad = parameters_have_finite_grads(model.parameters())
+        if not bool(finite_grad.item()):
+            nonfinite_grad_total += 1
+        clip_applied = bool(
+            grad_clip and grad_clip > 0 and total_grad_norm.item() > grad_clip
+        )
+        decoder_grad_norm = module_grad_norms["decoder"]
         accum_sums["decoder_grad_norm"] = (
             accum_sums.get("decoder_grad_norm", torch.zeros((), device=device))
             + decoder_grad_norm.detach()
@@ -1093,19 +1137,64 @@ def main() -> None:
             if previous_grad_max is None
             else torch.maximum(previous_grad_max, decoder_grad_norm.detach())
         )
-        decoder_before_step = (
-            _snapshot_trainable_parameters(_unwrap(model.decoder)) if will_log else None
+        for module_name, norm in module_grad_norms.items():
+            key = f"optim/{module_name}_grad_norm_preclip"
+            accum_sums[key] = accum_sums.get(key, torch.zeros((), device=device)) + norm.detach()
+            accum_counts[key] = accum_counts.get(key, 0) + 1
+            max_key = f"{key}_max"
+            previous = interval_maxes.get(max_key)
+            interval_maxes[max_key] = norm.detach() if previous is None else torch.maximum(previous, norm.detach())
+        accum_sums["optim/total_grad_norm_preclip"] = (
+            accum_sums.get("optim/total_grad_norm_preclip", torch.zeros((), device=device))
+            + total_grad_norm.detach()
+        )
+        accum_counts["optim/total_grad_norm_preclip"] = accum_counts.get("optim/total_grad_norm_preclip", 0) + 1
+        previous_total_max = interval_maxes.get("optim/total_grad_norm_preclip_max")
+        interval_maxes["optim/total_grad_norm_preclip_max"] = (
+            total_grad_norm.detach()
+            if previous_total_max is None
+            else torch.maximum(previous_total_max, total_grad_norm.detach())
+        )
+        for key, value in {
+            "optim/clip_fraction": float(clip_applied),
+            "amp/skipped_update_fraction": 0.0,
+        }.items():
+            tensor_value = torch.tensor(value, device=device)
+            accum_sums[key] = accum_sums.get(key, torch.zeros((), device=device)) + tensor_value
+            accum_counts[key] = accum_counts.get(key, 0) + 1
+        module_before_step = (
+            {
+                name: snapshot_trainable_parameters(module)
+                for name, module in tracked_modules.items()
+            }
+            if will_log
+            else None
+        )
+        mhc_boundary_stats = (
+            # Capture gradients before clip/step; matrix/parameter values are the
+            # values that produced this boundary update.
+            mhc_diagnostics(tracked_modules["encoder"]) if will_log else None
         )
 
         # Optimize generator.
         if grad_clip and grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         lr_used = float(optimizer.param_groups[0]["lr"])
+        scaler_scale_before = float(scaler.get_scale()) if scaler.is_enabled() else 1.0
         scaler.step(optimizer)
         scaler.update()
-        decoder_update_norm = (
-            _module_update_norm(_unwrap(model.decoder), decoder_before_step)
-            if decoder_before_step is not None
+        scaler_scale_after = float(scaler.get_scale()) if scaler.is_enabled() else 1.0
+        amp_update_skipped = scaler.is_enabled() and scaler_scale_after < scaler_scale_before
+        if amp_update_skipped:
+            amp_skipped_updates_total += 1
+            # Replace the placeholder inserted above for this optimizer step.
+            accum_sums["amp/skipped_update_fraction"].add_(1.0)
+        module_update_norms = (
+            {
+                name: module_update_norm(module, module_before_step[name])
+                for name, module in tracked_modules.items()
+            }
+            if module_before_step is not None
             else None
         )
 
@@ -1118,6 +1207,7 @@ def main() -> None:
             scaler_d.update()
 
         step += 1
+        interval_optimizer_steps += 1
         scheduler.step()
 
         # Embedding similarity probe: encode the last microbatch clean and
@@ -1126,32 +1216,35 @@ def main() -> None:
         # frame and utterance level. pos ≪ neg means the encoder identifies
         # the same audio under augmentation while keeping utterances apart;
         # contrast (neg/pos) drifting toward 1 means collapse or aug-sensitivity.
-        if is_main and step % cfg.train.probe_interval_steps == 0:
+        if step % cfg.train.probe_interval_steps == 0:
             model.eval()
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 z_clean = _unwrap(model.encoder)(_unwrap(model.frontend)(wav_a)).float()
                 z_aug = _unwrap(model.encoder)(
                     _unwrap(model.frontend)(apply_waveform_augment(wav_a, dcfg.sample_rate, aug_global_cfg))
                 ).float()
+                z_clean = _all_gather_batch(z_clean, world_size)
+                z_aug = _all_gather_batch(z_aug, world_size)
+            model.train()
+            if is_main:
                 pos_frame = (z_clean - z_aug).pow(2).mean()
                 neg_frame = (z_clean - z_aug.roll(1, dims=0)).pow(2).mean()
                 zc_utt = z_clean.mean(dim=2)
                 za_utt = z_aug.mean(dim=2)
                 pos_utt = (zc_utt - za_utt).pow(2).mean()
                 neg_utt = (zc_utt - za_utt.roll(1, dims=0)).pow(2).mean()
-            model.train()
-            probe_row = {
-                "step": step,
-                "sim/pos_frame_mse": pos_frame.item(),
-                "sim/neg_frame_mse": neg_frame.item(),
-                "sim/frame_contrast": (neg_frame / pos_frame.clamp_min(1e-8)).item(),
-                "sim/pos_utt_mse": pos_utt.item(),
-                "sim/neg_utt_mse": neg_utt.item(),
-                "sim/utt_contrast": (neg_utt / pos_utt.clamp_min(1e-8)).item(),
-            }
-            jsonl.log(probe_row)
-            if wb is not None:
-                wb.log(probe_row, step=step)
+                probe_row = {
+                    "step": step,
+                    "sim/pos_frame_mse": pos_frame.item(),
+                    "sim/neg_frame_mse": neg_frame.item(),
+                    "sim/frame_contrast": (neg_frame / pos_frame.clamp_min(1e-8)).item(),
+                    "sim/pos_utt_mse": pos_utt.item(),
+                    "sim/neg_utt_mse": neg_utt.item(),
+                    "sim/utt_contrast": (neg_utt / pos_utt.clamp_min(1e-8)).item(),
+                }
+                jsonl.log(probe_row)
+                if wb is not None:
+                    wb.log(probe_row, step=step)
 
         if step % log_interval == 0:
             log_stats = _reduce_metric_totals(
@@ -1170,14 +1263,27 @@ def main() -> None:
             accum_counts.clear()
             interval_maxes.clear()
 
-            with torch.no_grad():
-                z32 = _all_gather_batch(z_a.detach().float(), world_size)
+            model.eval()
+            with torch.no_grad(), torch.amp.autocast(
+                "cuda", dtype=amp_dtype, enabled=use_amp
+            ):
+                # z is encoded from the unaugmented source waveform with the
+                # just-updated checkpoint weights.
+                z_diag = _unwrap(model.encoder)(
+                    _unwrap(model.frontend)(wav_a)
+                ).float()
+                z32 = _all_gather_batch(z_diag, world_size)
+                # p is the detached, training-mode population actually consumed
+                # by VISReg for the boundary update (all sampled views/frames).
+                p32 = _all_gather_batch(sig_flat.detach().float(), world_size)
                 p_utt = _all_gather_batch(
                     p_cat[:B].detach().float().mean(dim=2), world_size
                 )
+            model.train()
 
             if is_main:
-                assert decoder_update_norm is not None
+                assert module_update_norms is not None
+                assert mhc_boundary_stats is not None
                 with torch.no_grad():
                     z_frames = z32.permute(0, 2, 1).reshape(-1, z32.size(1))
                     z_res = (z32 - z32.mean(dim=2, keepdim=True)).permute(0, 2, 1).reshape(-1, z32.size(1))
@@ -1185,10 +1291,45 @@ def main() -> None:
                     log_stats["z_rank_utt"] = _participation_ratio(z32.mean(dim=2)).item()
                     log_stats["z_rank_res"] = _participation_ratio(z_res).item()
                     log_stats["p_rank_utt"] = _participation_ratio(p_utt).item()
+                    log_stats.update(
+                        representation_distribution_stats(z_frames, prefix="latent/z")
+                    )
+                    log_stats.update(
+                        representation_distribution_stats(p32, prefix="projector/p")
+                    )
+                    log_stats.update(mhc_boundary_stats)
+
+                interval_end_time = time.monotonic()
+                interval_seconds = max(interval_end_time - interval_start_time, 1.0e-12)
+                effective_batch_size = cfg.train.batch_size * grad_accum * world_size
+                audio_samples_in_interval = (
+                    interval_optimizer_steps
+                    * effective_batch_size
+                    * int(math.ceil(dcfg.segment_seconds * dcfg.sample_rate))
+                )
+                log_stats.update({
+                    "optim/clip_applied": float(clip_applied),
+                    "optim/finite_grad": float(finite_grad.item()),
+                    "optim/nonfinite_grad_total": nonfinite_grad_total,
+                    "amp/scale": scaler_scale_after,
+                    "amp/skipped_updates_total": amp_skipped_updates_total,
+                    "runtime/elapsed_wall_seconds": interval_end_time - start_time,
+                    "throughput/optimizer_steps_per_second": interval_optimizer_steps / interval_seconds,
+                    "throughput/audio_samples_per_second": audio_samples_in_interval / interval_seconds,
+                    "resource/source_audio_hours_processed": (
+                        step * effective_batch_size * dcfg.segment_seconds / 3600.0
+                    ),
+                    "resource/cuda_allocated_bytes": torch.cuda.memory_allocated(device),
+                    "resource/cuda_reserved_bytes": torch.cuda.memory_reserved(device),
+                    "resource/cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+                    "resource/cuda_peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+                })
+                for module_name, update_norm in module_update_norms.items():
+                    log_stats[f"optim/{module_name}_update_norm"] = update_norm.item()
                 row: dict[str, Any] = {
                     "step": step,
                     "lr": lr_used,
-                    "decoder_update_norm": decoder_update_norm.item(),
+                    "decoder_update_norm": module_update_norms["decoder"].item(),
                     **log_stats,
                 }
                 if dcfg.backend == "tar":
@@ -1206,6 +1347,8 @@ def main() -> None:
                 jsonl.log(row)
                 if wb is not None:
                     wb.log(row, step=step)
+                interval_start_time = interval_end_time
+            interval_optimizer_steps = 0
 
         if is_main and step % cfg.train.save_interval_steps == 0:
             # Step-tagged so a later collapse still leaves usable checkpoints
@@ -1222,6 +1365,10 @@ def main() -> None:
                 disc=disc,
                 optimizer_d=optimizer_d,
                 scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
+                diagnostic_counters={
+                    "amp_skipped_updates_total": amp_skipped_updates_total,
+                    "nonfinite_grad_total": nonfinite_grad_total,
+                },
             )
             shutil.copyfile(step_ckpt, ckpt_dir / "last.pt")
 
@@ -1243,6 +1390,10 @@ def main() -> None:
             disc=disc,
             optimizer_d=optimizer_d,
             scaler_d=scaler_d if (scaler_d is not None and scaler_d.is_enabled()) else None,
+            diagnostic_counters={
+                "amp_skipped_updates_total": amp_skipped_updates_total,
+                "nonfinite_grad_total": nonfinite_grad_total,
+            },
         )
 
     # Barrier so non-main ranks wait for rank 0's final save before tearing the

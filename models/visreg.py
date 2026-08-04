@@ -44,7 +44,7 @@ class VISReg(nn.Module):
             self._cached_B = B
         return self._cached_target.to(device=device, dtype=dtype)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def terms(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         _, B, D = z.shape
 
         mu = z.mean(dim=1, keepdim=True)
@@ -60,4 +60,18 @@ class VISReg(nn.Module):
         target = self._get_target(B, z.device, z.dtype).view(1, B, 1)
         shape_loss = (p_sorted - target).pow(2).mean()
 
-        return scale_loss + shape_loss + center_loss
+        return center_loss, scale_loss, shape_loss
+
+    def forward_with_terms(self, z: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        center_loss, scale_loss, shape_loss = self.terms(z)
+        # Retain the original addition order for numerical/checkpoint continuity.
+        total = scale_loss + shape_loss + center_loss
+        return total, {
+            "visreg/center_loss": center_loss.detach(),
+            "visreg/scale_loss": scale_loss.detach(),
+            "visreg/shape_loss": shape_loss.detach(),
+        }
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        total, _ = self.forward_with_terms(z)
+        return total

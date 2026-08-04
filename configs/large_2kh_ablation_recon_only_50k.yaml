@@ -1,0 +1,16 @@
+# Objective-decomposition ablation: reconstruction only (R).
+_base_: configs/large_2kh_packed.yaml
+
+run:
+  wandb:
+    name: "large-2kh-ablation-recon-only-r-50k"
+
+loss:
+  jepa:
+    weight: 0.0
+  visreg:
+    weight: 0.0
+
+train:
+  max_steps: 50000
+  save_interval_steps: 2500

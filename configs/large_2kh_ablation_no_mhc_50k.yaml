@@ -1,0 +1,15 @@
+# Component ablation: full R + J + VISReg objective with mHC disabled.
+_base_: configs/large_2kh_packed.yaml
+
+run:
+  wandb:
+    name: "large-2kh-ablation-no-mhc-50k"
+
+model:
+  encoder:
+    mhc:
+      enabled: false
+
+train:
+  max_steps: 50000
+  save_interval_steps: 2500
