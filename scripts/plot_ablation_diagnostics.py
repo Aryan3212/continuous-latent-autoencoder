@@ -31,7 +31,7 @@ CONDITION_ARGS = {
     "no_mhc": "No mHC",
     "no_decoder_corruption": "No decoder corruption",
 }
-MILESTONES = (10_000, 25_000, 50_000)
+MILESTONES = (10_000, 20_000, 30_000)
 
 SPACE_METRICS = {
     "z": {

@@ -11,5 +11,5 @@ loss:
   recon_weight: 0.0
 
 train:
-  max_steps: 50000
-  save_interval_steps: 2500
+  max_steps: 30000
+  save_interval_steps: 1000

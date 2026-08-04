@@ -117,10 +117,11 @@ packed-data loader overrides.
 
 The TACL ablation configs inherit from `large_2kh_packed.yaml`: matched full
 objective, reconstruction-only, representation-only, mHC-off, 25 Hz, and
-decoder-corruption-off variants are named `large_2kh_ablation_*_50k.yaml`. They
-therefore share the packed TAR backend, stop at 50k, checkpoint every 2.5k
-steps, and intentionally retain the underlying base config's 100k LR horizon
-to match the historical full-model step-50k learning-rate trajectory.
+decoder-corruption-off variants retain their historical
+`large_2kh_ablation_*_50k.yaml` names and stable run IDs for resume compatibility.
+They share the packed TAR backend, stop at 30k, checkpoint every 1k steps, and
+intentionally retain the underlying base config's 100k LR horizon to match the
+historical full-model learning-rate trajectory.
 
 ## Data
 
@@ -182,10 +183,10 @@ same name.
   `data.backend=tar` for optional training, not dataset discovery.
 - `scripts/plot_ablation_diagnostics.py` — strict JSONL post-processor for the
   five matched representation conditions. It merges rows by step, requires the
-  10k/25k/50k milestones and every plotted metric, uses common steps/axes, keeps
+  10k/20k/30k milestones and every plotted metric, uses common steps/axes, keeps
   encoder-latent and projector panels separate, and writes provenance metadata.
-- `scripts/run_ablation_suite.sh` — serial launcher for the six matched 50k
-  packed-data ablations. It assigns stable output/run IDs, skips intact 50k
+- `scripts/run_ablation_suite.sh` — serial launcher for the six matched 30k
+  packed-data ablations. It assigns stable output/run IDs, skips intact 30k
   checkpoints, and resumes an interrupted condition from its newest intact
   periodic or `last.pt` checkpoint before advancing.
 - `scripts/download_subesco.py` — materializes the processed

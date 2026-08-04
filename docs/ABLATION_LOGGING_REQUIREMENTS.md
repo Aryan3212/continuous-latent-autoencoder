@@ -1,6 +1,6 @@
 # Ablation logging requirements
 
-Implemented logging and plotting contract for the 50k TACL ablation runs. This
+Implemented logging and plotting contract for the 30k TACL ablation runs. This
 document does not authorize starting a run. All six configs inherit the packed
 TAR backend from `large_2kh_packed.yaml`.
 
@@ -148,7 +148,7 @@ Plot the following over optimizer step:
   similarity
 
 Use the same checkpoint/log steps and identical axis ranges for every condition.
-At minimum, emphasize steps 10k, 25k, and 50k; intermediate 2.5k checkpoints
+At minimum, emphasize steps 10k, 20k, and 30k; intermediate 1k checkpoints
 may be included consistently across all conditions. Do not auto-scale each run
 independently, because that can visually exaggerate or conceal differences.
 

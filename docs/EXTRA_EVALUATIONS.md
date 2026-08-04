@@ -1,6 +1,6 @@
 # Extra evaluations for the TACL evidence package
 
-This is the evaluation checklist for the six matched 50k configurations. It
+This is the evaluation checklist for the six matched 30k configurations. It
 separates required submission evidence from optional follow-ups. Running any
 evaluation script still requires selecting the correct hardware/environment.
 All conditions train through the packed TAR backend inherited from
@@ -17,11 +17,11 @@ All conditions train through the packed TAR backend inherited from
 | Full objective at 25 Hz | `configs/large_2kh_ablation_25hz_50k.yaml` | Does temporal resolution improve ASR? |
 | No decoder corruption | `configs/large_2kh_ablation_no_decoder_corruption_50k.yaml` | Do decoder masking/noise improve reconstruction or transfer? |
 
-All runs stop at 50k but intentionally retain the original 100k scheduler
-horizon and use the same packed dataset backend. Evaluate at steps 10k, 25k,
-and 50k for learning curves; the 2.5k
+All runs stop at 30k but intentionally retain the original 100k scheduler
+horizon and use the same packed dataset backend. Evaluate at steps 10k, 20k,
+and 30k for learning curves; the 1k
 checkpoint cadence permits additional post-hoc points if a curve is surprising.
-Use the historical step-50k full checkpoint as the primary reference if its
+Use the already-trained historical full checkpoint as the primary reference if its
 resolved configuration exactly matches the full-reference config. Otherwise,
 run the full reference again and document the mismatch.
 
@@ -124,8 +124,8 @@ are different spaces and should not be conflated.
   project the working figure is approximately 2,000 hours.
 - **Exposure hours:** cumulative duration of source segments fed into training,
   counting repeats across epochs and steps. With one GPU and the reference
-  settings, a 50k run processes
-  `50,000 * 42 * 4 * 3 / 3,600 = 7,000` source-audio exposure hours. Multiply by
+  settings, a 30k run processes
+  `30,000 * 42 * 4 * 3 / 3,600 = 4,200` source-audio exposure hours. Multiply by
   world size for DDP. Do not multiply by the six augmented views; disclose those
   separately as a compute multiplier.
 - **GPU-hours:** hardware usage: wall-clock training hours multiplied by the

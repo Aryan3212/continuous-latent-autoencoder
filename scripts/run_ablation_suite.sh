@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the six matched 50k ablations serially. Re-running this script resumes the
+# Run the six matched 30k ablations serially. Re-running this script resumes the
 # current condition from its newest intact checkpoint and skips completed runs.
 
 set -Eeuo pipefail
@@ -128,7 +128,7 @@ for index in "${!configs[@]}"; do
   run_id="${run_ids[$index]}"
   run_dir="$resolved_out_dir/$run_id"
   checkpoint_dir="$run_dir/checkpoints"
-  completion_checkpoint="$checkpoint_dir/step_050000.pt"
+  completion_checkpoint="$checkpoint_dir/step_030000.pt"
 
   if checkpoint_is_intact "$completion_checkpoint"; then
     echo "[ablation-suite] skip complete: $run_id"
@@ -148,7 +148,7 @@ for index in "${!configs[@]}"; do
   if "${train_command[@]}" --config "$config" "${resume_args[@]}" \
       "run.run_id=$run_id" "run.out_dir=$out_dir" "$@"; then
     if ! checkpoint_is_intact "$completion_checkpoint"; then
-      echo "[ablation-suite] $run_id exited cleanly before step 50000; stopping the suite" >&2
+      echo "[ablation-suite] $run_id exited cleanly before step 30000; stopping the suite" >&2
       echo "[ablation-suite] rerun this command to resume it before later conditions" >&2
       exit 3
     fi

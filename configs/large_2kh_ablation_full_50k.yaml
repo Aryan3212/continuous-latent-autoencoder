@@ -1,6 +1,6 @@
-# Matched 50k full-objective reference for the TACL ablation study.
+# Matched 30k full-objective reference for the TACL ablation study.
 #
-# Stop at step 50k but retain large_2kh.yaml's 100k scheduler horizon so this
+# Stop at step 30k but retain large_2kh.yaml's 100k scheduler horizon so this
 # follows the same LR trajectory as the historical full-model step-50k
 # checkpoint. The packed base selects the TAR dataset backend without changing
 # the base model, objective, optimizer, or schedule. All ablations use it.
@@ -11,5 +11,5 @@ run:
     name: "large-2kh-ablation-full-r-j-visreg-50k"
 
 train:
-  max_steps: 50000
-  save_interval_steps: 2500
+  max_steps: 30000
+  save_interval_steps: 1000
