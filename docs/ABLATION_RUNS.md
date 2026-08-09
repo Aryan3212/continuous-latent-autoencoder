@@ -1,16 +1,17 @@
 # Sequential ablation runs
 
-Run all six 30k conditions, one at a time, from the repository root:
+Run the five non-reference 50k conditions, one at a time, from the repository
+root:
 
 ```bash
 scripts/run_ablation_suite.sh
 ```
 
-The fixed order is full objective, reconstruction-only, representation-only,
-mHC-off, 25 Hz, and decoder-corruption-off. A condition starts only after the
-previous condition produces an intact `step_030000.pt`. The filenames and run IDs
-retain their historical `_50k` suffix so an already-completed full run remains
-discoverable and can be skipped.
+The fixed order is reconstruction-only, representation-only, mHC-off, 25 Hz,
+and decoder-corruption-off. A condition starts only after the previous condition
+produces an intact `step_050000.pt`. The full-objective reference is launched
+separately with `configs/large_2kh_ablation_full_50k.yaml`. The filenames and
+run IDs retain their `_50k` suffix.
 
 The launcher gives every condition a stable run ID under `runs/ablations/`.
 Re-run the same command after an interruption or machine restart. Completed
@@ -37,12 +38,12 @@ Additional dotted config overrides are forwarded to every condition:
 scripts/run_ablation_suite.sh run.wandb.enabled=false
 ```
 
-The launcher rejects overrides for the stable run ID/output root, 30k stopping
+The launcher rejects overrides for the stable run ID/output root, 50k stopping
 point, 1k save cadence, and 100k scheduler horizon because its completion and
 resume guarantees depend on those values. Use `ABLATION_OUT_DIR` to relocate
 outputs.
 
-If training exits unsuccessfully, or exits cleanly before creating the 30k
+If training exits unsuccessfully, or exits cleanly before creating the 50k
 checkpoint (for example because of `--max_hours` added outside this launcher),
 the suite stops rather than advancing to the next condition. It does not retry
 failures in a loop; after correcting transient hardware, storage, or data
