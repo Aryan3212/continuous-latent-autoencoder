@@ -1,6 +1,6 @@
 # Ablation logging requirements
 
-Implemented logging and plotting contract for the 50k TACL ablation runs. This
+Implemented logging and plotting contract for the 25k TACL ablation runs. This
 document does not authorize starting a run. All six configs inherit the packed
 TAR backend from `large_2kh_packed.yaml`.
 

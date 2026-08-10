@@ -3,7 +3,7 @@ _base_: configs/large_2kh_packed.yaml
 
 run:
   wandb:
-    name: "large-2kh-ablation-recon-only-r-50k"
+    name: "large-2kh-ablation-recon-only-r-50k-v2"
 
 loss:
   jepa:
@@ -12,5 +12,5 @@ loss:
     weight: 0.0
 
 train:
-  max_steps: 50000
+  max_steps: 25000
   save_interval_steps: 1000

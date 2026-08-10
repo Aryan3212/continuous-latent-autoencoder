@@ -4,6 +4,16 @@ Date format: `YYYY-MM-DD`
 
 ## 2026-08-09
 
+**Reduced matched ablation budget to 25k**
+
+- Set all six packed TACL ablation configurations to 25,000 optimizer steps,
+  retaining their historical `_50k` filenames/run IDs, 1,000-step checkpoint
+  cadence, and shared 100,000-step learning-rate schedule horizon.
+- Updated the sequential launcher and ablation documentation to use the
+  `step_025000.pt` completion checkpoint.
+
+## 2026-08-09
+
 **Restored matched 50k ablation budget**
 
 - Set all six packed TACL ablation configurations to 50,000 optimizer steps,

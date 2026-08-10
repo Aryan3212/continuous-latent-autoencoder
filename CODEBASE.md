@@ -119,7 +119,7 @@ The TACL ablation configs inherit from `large_2kh_packed.yaml`: matched full
 objective, reconstruction-only, representation-only, mHC-off, 25 Hz, and
 decoder-corruption-off variants retain their historical
 `large_2kh_ablation_*_50k.yaml` names and stable run IDs for resume compatibility.
-They share the packed TAR backend, stop at 50k, checkpoint every 1k steps, and
+They share the packed TAR backend, stop at 25k, checkpoint every 1k steps, and
 intentionally retain the underlying base config's 100k LR horizon to match the
 historical full-model learning-rate trajectory.
 
@@ -185,9 +185,9 @@ same name.
   five matched representation conditions. It merges rows by step, uses the
   common available steps and every plotted metric, keeps encoder-latent and
   projector panels separate, and writes provenance metadata.
-- `scripts/run_ablation_suite.sh` — serial launcher for the five matched 50k
+- `scripts/run_ablation_suite.sh` — serial launcher for the five matched 25k
   non-reference packed-data ablations. It assigns stable output/run IDs, skips
-  intact 50k checkpoints, and resumes an interrupted condition from its newest
+  intact 25k checkpoints, and resumes an interrupted condition from its newest
   intact periodic or `last.pt` checkpoint before advancing. The matched full
   reference is launched separately from its corresponding config.
 - `scripts/download_subesco.py` — materializes the processed

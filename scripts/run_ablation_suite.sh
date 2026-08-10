@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the five matched non-reference 50k ablations serially. Re-running this
+# Run the five matched non-reference 25k ablations serially. Re-running this
 # script resumes the current condition from its newest intact checkpoint and
 # skips completed runs.
 
@@ -129,7 +129,7 @@ for index in "${!configs[@]}"; do
   run_id="${run_ids[$index]}"
   run_dir="$resolved_out_dir/$run_id"
   checkpoint_dir="$run_dir/checkpoints"
-  completion_checkpoint="$checkpoint_dir/step_050000.pt"
+  completion_checkpoint="$checkpoint_dir/step_025000.pt"
 
   if checkpoint_is_intact "$completion_checkpoint"; then
     echo "[ablation-suite] skip complete: $run_id"
@@ -149,7 +149,7 @@ for index in "${!configs[@]}"; do
   if "${train_command[@]}" --config "$config" "${resume_args[@]}" \
       "run.run_id=$run_id" "run.out_dir=$out_dir" "$@"; then
     if ! checkpoint_is_intact "$completion_checkpoint"; then
-      echo "[ablation-suite] $run_id exited cleanly before step 50000; stopping the suite" >&2
+      echo "[ablation-suite] $run_id exited cleanly before step 25000; stopping the suite" >&2
       echo "[ablation-suite] rerun this command to resume it before later conditions" >&2
       exit 3
     fi
