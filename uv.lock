@@ -297,6 +297,12 @@ dependencies = [
     { name = "wandb" },
 ]
 
+[package.optional-dependencies]
+reconstruction-metrics = [
+    { name = "pesq", marker = "sys_platform == 'linux'" },
+    { name = "pystoi" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "codecarbon", specifier = ">=3.2.2" },
@@ -311,8 +317,10 @@ requires-dist = [
     { name = "nvidia-nvjpeg-cu12" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pesq", marker = "sys_platform == 'linux' and extra == 'reconstruction-metrics'", specifier = "==0.0.4" },
     { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.5" },
+    { name = "pystoi", marker = "extra == 'reconstruction-metrics'", specifier = "==0.4.1" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
@@ -325,9 +333,10 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.66" },
     { name = "transformers", specifier = ">=5.14.0" },
     { name = "umap-learn", specifier = ">=0.5.5" },
-    { name = "utmosv2", git = "https://github.com/sarulab-speech/UTMOSv2.git" },
+    { name = "utmosv2", git = "https://github.com/sarulab-speech/UTMOSv2.git?rev=cc2700db57bb83ee13dc31ebe1b868c254e15d09" },
     { name = "wandb", specifier = ">=0.16" },
 ]
+provides-extras = ["reconstruction-metrics"]
 
 [[package]]
 name = "contourpy"
@@ -1538,6 +1547,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pesq"
+version = "0.0.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/e6/f8bdcef3238ac10fb3ce37d150e9b03a152d971febd681f088c6e5e17d8e/pesq-0.0.4.tar.gz", hash = "sha256:b724b28f73fb638522982bd68e8c3c0957e2f45210639a460233b17aa7fc890b", size = 38702, upload-time = "2022-05-17T14:15:26.301Z" }
+
+[[package]]
 name = "pillow"
 version = "12.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1783,6 +1798,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pystoi"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/3d/1ae8bdb686c6aaaeef474aa6b790abbe38f42b61188b57a974dd9320e521/pystoi-0.4.1.tar.gz", hash = "sha256:1c6f50d6fbfee46b00c922458cdbd27228d9830ca81cea788fd600fc2f7de6e4", size = 10401, upload-time = "2023-12-29T16:48:05.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/22/60cd92bd3ec00948800984410f4cf5ded5bd8e9b715729f3642efe0edb3d/pystoi-0.4.1-py2.py3-none-any.whl", hash = "sha256:e277b671663d26d35a2416c9c8010a74084e6c3970354506398051a554896939", size = 8218, upload-time = "2023-12-29T16:48:03.748Z" },
 ]
 
 [[package]]
@@ -2511,7 +2539,7 @@ wheels = [
 [[package]]
 name = "utmosv2"
 version = "1.3.1.dev0"
-source = { git = "https://github.com/sarulab-speech/UTMOSv2.git#cc2700db57bb83ee13dc31ebe1b868c254e15d09" }
+source = { git = "https://github.com/sarulab-speech/UTMOSv2.git?rev=cc2700db57bb83ee13dc31ebe1b868c254e15d09#cc2700db57bb83ee13dc31ebe1b868c254e15d09" }
 dependencies = [
     { name = "librosa" },
     { name = "numpy" },

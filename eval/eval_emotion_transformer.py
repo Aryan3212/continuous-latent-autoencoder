@@ -18,8 +18,10 @@ Writes ``runs/eval/emotion_transformer.json``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import pathlib
 from typing import List
 
 import numpy as np
@@ -73,56 +75,122 @@ def _collate(items):
     return x, mask, labels
 
 
-def _train_eval(frames, yi, tr, te, n_classes, epochs):
+def _train_eval(frames, yi, tr, te, n_classes, epochs, seed):
     from sklearn.metrics import accuracy_score, f1_score
 
     D = frames[0].size(1)
     train_items = [(frames[i], int(yi[i])) for i in tr]
     test_items = [(frames[i], int(yi[i])) for i in te]
-    net = TransformerProbe(D, n_classes).to(DEVICE)
-    opt = torch.optim.AdamW(net.parameters(), lr=5e-4, weight_decay=1e-3)
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
-    bs = 64
-    rng = np.random.default_rng(0)
-    net.train()
-    for _ in range(epochs):
-        order = rng.permutation(len(train_items))
-        for s in range(0, len(order), bs):
-            x, mask, lab = _collate([train_items[i] for i in order[s : s + bs]])
-            x, mask, lab = x.to(DEVICE), mask.to(DEVICE), lab.to(DEVICE)
-            logits = net(x, mask)
-            loss = loss_fn(logits, lab)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-    net.eval()
-    preds: List[int] = []
-    with torch.no_grad():
-        for s in range(0, len(test_items), bs):
-            x, mask, _ = _collate(test_items[s : s + bs])
-            preds.extend(net(x.to(DEVICE), mask.to(DEVICE)).argmax(-1).cpu().tolist())
+    fork_devices = [torch.cuda.current_device()] if DEVICE.type == "cuda" else []
+    with torch.random.fork_rng(devices=fork_devices):
+        torch.manual_seed(seed)
+        if DEVICE.type == "cuda":
+            torch.cuda.manual_seed_all(seed)
+        net = TransformerProbe(D, n_classes).to(DEVICE)
+        opt = torch.optim.AdamW(net.parameters(), lr=5e-4, weight_decay=1e-3)
+        loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
+        bs = 64
+        rng = np.random.default_rng(seed)
+        net.train()
+        for _ in range(epochs):
+            order = rng.permutation(len(train_items))
+            for s in range(0, len(order), bs):
+                x, mask, lab = _collate([train_items[i] for i in order[s : s + bs]])
+                x, mask, lab = x.to(DEVICE), mask.to(DEVICE), lab.to(DEVICE)
+                logits = net(x, mask)
+                loss = loss_fn(logits, lab)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+        net.eval()
+        preds: List[int] = []
+        with torch.no_grad():
+            for s in range(0, len(test_items), bs):
+                x, mask, _ = _collate(test_items[s : s + bs])
+                preds.extend(
+                    net(x.to(DEVICE), mask.to(DEVICE)).argmax(-1).cpu().tolist()
+                )
     gold = [int(yi[i]) for i in te]
-    return accuracy_score(gold, preds), f1_score(gold, preds, average="macro")
+    return (
+        float(accuracy_score(gold, preds)),
+        float(f1_score(gold, preds, average="macro")),
+        preds,
+    )
 
 
-def run_model(name, utts, y, groups, max_frames, folds, epochs):
-    from sklearn.model_selection import GroupKFold
-
-    frames = get_frames(name, utts, max_frames)
+def run_model(
+    name,
+    utts,
+    y,
+    groups,
+    max_frames,
+    folds,
+    epochs,
+    *,
+    ckpt,
+    seed,
+    feature_cache_dir,
+):
+    frames, cache_info = get_frames(
+        name,
+        utts,
+        max_frames,
+        ckpt=ckpt,
+        feature_cache_dir=feature_cache_dir,
+    )
     classes = sorted(set(y))
     c2i = {c: i for i, c in enumerate(classes)}
     yi = np.array([c2i[v] for v in y])
     accs, f1s = [], []
-    n_splits = min(folds, len(np.unique(groups)))
-    for tr, te in GroupKFold(n_splits).split(frames, yi, groups):
-        a, f = _train_eval(frames, yi, tr, te, len(classes), epochs)
+    oof_predictions: list[dict | None] = [None] * len(y)
+    for fold, (tr, te) in enumerate(folds):
+        a, f, predictions = _train_eval(
+            frames, yi, tr, te, len(classes), epochs, seed + fold
+        )
         accs.append(a)
         f1s.append(f)
+        for index, prediction in zip(te, predictions):
+            oof_predictions[int(index)] = {
+                "item_id": str(utts[index].id),
+                "speaker_id": str(groups[index]),
+                "fold": fold,
+                "gold": str(y[index]),
+                "prediction": str(classes[prediction]),
+            }
     print(f"[{name}] transformer: acc={np.mean(accs)*100:.1f}% "
           f"macroF1={np.mean(f1s)*100:.1f}% (D={frames[0].size(1)})", flush=True)
     return {"accuracy": float(np.mean(accs)), "accuracy_std": float(np.std(accs)),
             "macro_f1": float(np.mean(f1s)), "macro_f1_std": float(np.std(f1s)),
-            "dim": int(frames[0].size(1)), "n_splits": int(n_splits)}
+            "dim": int(frames[0].size(1)), "n_splits": int(len(folds)),
+            "probe_seed": seed, "prediction_protocol": "out_of_fold",
+            "feature_cache": cache_info,
+            "predictions": [row for row in oof_predictions if row is not None]}
+
+
+def _fixed_folds(y, groups, n_folds, split_seed):
+    from sklearn.model_selection import GroupKFold
+
+    n_splits = min(n_folds, len(np.unique(groups)))
+    return list(
+        GroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=split_seed,
+        ).split(np.zeros(len(y)), y, groups)
+    )
+
+
+def _split_hash(utts, groups, folds):
+    fold_by_item = np.full(len(utts), -1, dtype=np.int64)
+    for fold, (_, test_indices) in enumerate(folds):
+        fold_by_item[test_indices] = fold
+    rows = [
+        [str(utterance.id), str(speaker), int(fold)]
+        for utterance, speaker, fold in zip(utts, groups, fold_by_item)
+    ]
+    return hashlib.sha256(
+        json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def main() -> None:
@@ -132,23 +200,57 @@ def main() -> None:
     ap.add_argument("--max-frames", type=int, default=300)
     ap.add_argument("--folds", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--ckpt", default=None)
+    ap.add_argument("--subesco-dir", default=None)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data-seed", type=int, default=0)
+    ap.add_argument("--split-seed", type=int, default=0)
+    ap.add_argument("--feature-cache-dir", type=pathlib.Path, default=None)
+    ap.add_argument("--out", type=pathlib.Path, default=EVAL_DIR / "emotion_transformer.json")
     args = ap.parse_args()
+    if args.max_utts is not None and args.max_utts < 1:
+        ap.error("--max-utts must be positive")
+    if min(args.max_frames, args.folds, args.epochs) < 1 or args.folds < 2:
+        ap.error("frame/epoch budgets must be positive and --folds at least 2")
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    utts = load_subesco_utterances(max_utts=args.max_utts)
+    utts = load_subesco_utterances(
+        max_utts=args.max_utts, seed=args.data_seed, root=args.subesco_dir
+    )
     y = np.array([u.emotion for u in utts])
     groups = np.array([u.speaker for u in utts])
+    folds = _fixed_folds(y, groups, args.folds, args.split_seed)
+    split_hash = _split_hash(utts, groups, folds)
     chance = 1.0 / len(set(y))
 
     results = {}
     for name in models:
-        results[name] = run_model(name, utts, y, groups, args.max_frames, args.folds, args.epochs)
+        results[name] = run_model(
+            name,
+            utts,
+            y,
+            groups,
+            args.max_frames,
+            folds,
+            args.epochs,
+            ckpt=args.ckpt,
+            seed=args.seed,
+            feature_cache_dir=args.feature_cache_dir,
+        )
 
-    EVAL_DIR.mkdir(parents=True, exist_ok=True)
-    out = EVAL_DIR / "emotion_transformer.json"
+    out = args.out
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(
         {"dataset": "SUBESCO", "n_utts": len(utts), "chance": chance,
-         "probe": "transformer_cls", "results": results}, indent=2), encoding="utf-8")
+         "probe": "transformer_cls", "seed": args.seed,
+         "data_seed": args.data_seed, "split_seed": args.split_seed,
+         "probe_seed": args.seed, "split_hash": split_hash,
+         "split_protocol": "speaker_group_kfold", "bootstrap_unit": "speaker",
+         "checkpoint": args.ckpt,
+         "feature_cache_dir": (
+             str(args.feature_cache_dir.resolve()) if args.feature_cache_dir else None
+         ),
+         "results": results}, indent=2), encoding="utf-8")
 
     rand = results.get("ours_random", {}).get("macro_f1")
     print(f"\nSUBESCO emotion — TRANSFORMER probe  "

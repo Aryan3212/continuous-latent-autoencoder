@@ -152,7 +152,11 @@ SUBESCO_DIR = _REPO_ROOT / "datasets" / "SUBESCO"
 SUBESCO_EMOTIONS = ("ANGRY", "DISGUST", "FEAR", "HAPPY", "NEUTRAL", "SAD", "SURPRISE")
 
 
-def load_subesco_utterances(max_utts: Optional[int] = None, seed: int = 0) -> List[Utterance]:
+def load_subesco_utterances(
+    max_utts: Optional[int] = None,
+    seed: int = 0,
+    root: str | Path | None = None,
+) -> List[Utterance]:
     """Load SUBESCO (Bangla emotional speech) clips with emotion + speaker labels.
 
     Filenames look like ``F_02_MONIKA_S_1_NEUTRAL_1.wav``: tokens are
@@ -164,10 +168,11 @@ def load_subesco_utterances(max_utts: Optional[int] = None, seed: int = 0) -> Li
 
     import torchaudio
 
-    wavs = sorted(SUBESCO_DIR.rglob("*.wav"))
+    subesco_dir = Path(root).expanduser().resolve() if root is not None else SUBESCO_DIR
+    wavs = sorted(subesco_dir.rglob("*.wav"))
     if not wavs:
         raise FileNotFoundError(
-            f"No .wav under {SUBESCO_DIR}. Download+unzip SUBESCO first."
+            f"No .wav under {subesco_dir}. Download+materialize SUBESCO first."
         )
 
     emo_set = set(SUBESCO_EMOTIONS)
@@ -295,14 +300,22 @@ def load_common_voice_age_utterances(
     return utts
 
 
-def load_utterances(source: str = "openslr53", max_utts: int = 300) -> List[Utterance]:
+def load_utterances(
+    source: str = "openslr53",
+    max_utts: int = 300,
+    *,
+    subesco_dir: str | Path | None = None,
+    seed: int = 0,
+) -> List[Utterance]:
     """Dispatch to a speaker-labelled utterance source."""
     if source == "openslr53":
-        return load_openslr53_utterances(max_utts=max_utts)
+        return load_openslr53_utterances(max_utts=max_utts, seed=seed)
     if source == "cv":
         return load_cv_utterances(max_utts=max_utts)
     if source == "subesco":
-        return load_subesco_utterances(max_utts=max_utts)
+        return load_subesco_utterances(
+            max_utts=max_utts, root=subesco_dir, seed=seed
+        )
     raise ValueError(f"unknown source {source!r}; choose 'openslr53', 'cv', or 'subesco'")
 
 
@@ -741,18 +754,81 @@ def build_embedder(
 
 
 _UTMOS_MODEL = None
+_UTMOS_IDENTITY: dict[str, Any] | None = None
+UTMOS_PACKAGE_REVISION = "cc2700db57bb83ee13dc31ebe1b868c254e15d09"
+UTMOS_CONFIG = "fusion_stage3"
+UTMOS_FOLD = 0
+UTMOS_SEED = 42
+
+
+def _state_dict_sha256(model: torch.nn.Module) -> str:
+    """Hash exact runtime weights so an unversioned upstream download is auditable."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"UTMOS state_dict entry {name!r} is not a tensor")
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(json.dumps(list(value.shape)).encode("ascii"))
+        digest.update(value.numpy().tobytes(order="C"))
+    return digest.hexdigest()
 
 
 def _utmos_model():
-    """Lazily load the UTMOSv2 ensemble once (pretrained weights download on
+    """Lazily load the UTMOSv2 model once (pretrained weights download on
     first use)."""
-    global _UTMOS_MODEL
+    global _UTMOS_IDENTITY, _UTMOS_MODEL
     if _UTMOS_MODEL is None:
         import utmosv2
 
-        print("[utmos] loading UTMOSv2 pretrained ensemble", flush=True)
-        _UTMOS_MODEL = utmosv2.create_model(pretrained=True)
+        print("[utmos] loading UTMOSv2 pretrained model", flush=True)
+        checkpoint_value = os.environ.get("UTMOSV2_CHECKPOINT")
+        checkpoint_path = (
+            Path(checkpoint_value).expanduser().resolve()
+            if checkpoint_value
+            else None
+        )
+        if checkpoint_path is not None and not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"UTMOSV2_CHECKPOINT does not exist: {checkpoint_path}"
+            )
+        _UTMOS_MODEL = utmosv2.create_model(
+            pretrained=True,
+            config=UTMOS_CONFIG,
+            fold=UTMOS_FOLD,
+            seed=UTMOS_SEED,
+            checkpoint_path=checkpoint_path,
+        )
+        _UTMOS_MODEL.eval()
+        _UTMOS_IDENTITY = {
+            "package_revision": UTMOS_PACKAGE_REVISION,
+            "config": UTMOS_CONFIG,
+            "fold": UTMOS_FOLD,
+            "seed": UTMOS_SEED,
+            "checkpoint_source": (
+                str(checkpoint_path)
+                if checkpoint_path is not None
+                else "UTMOSv2 package cache / sarulab-speech/UTMOSv2 resolve/main"
+            ),
+            "upstream_weight_revision": (
+                "explicit local checkpoint"
+                if checkpoint_path is not None
+                else "not revision-pinned by upstream API; state_dict_sha256 is authoritative"
+            ),
+            "state_dict_sha256": _state_dict_sha256(_UTMOS_MODEL),
+        }
+        print(
+            f"[utmos] runtime state_dict sha256={_UTMOS_IDENTITY['state_dict_sha256']}",
+            flush=True,
+        )
     return _UTMOS_MODEL
+
+
+def utmos_runtime_identity() -> dict[str, Any]:
+    _utmos_model()
+    assert _UTMOS_IDENTITY is not None
+    return dict(_UTMOS_IDENTITY)
 
 
 def compute_utmos_scores(
@@ -764,6 +840,9 @@ def compute_utmos_scores(
     Used to color the cluster plots.
     """
     EMB_DIR.mkdir(parents=True, exist_ok=True)
+    model = _utmos_model()
+    identity = utmos_runtime_identity()
+    identity_json = json.dumps(identity, sort_keys=True)
     cache = EMB_DIR / "utmos_mos.npz"
     ids = np.array([u.id for u in utts])
     audio_fingerprint = _utterance_fingerprint(utts)
@@ -774,11 +853,19 @@ def compute_utmos_scores(
             if "audio_fingerprint" in data
             else ""
         )
-        if list(data["ids"]) == list(ids) and cached_fingerprint == audio_fingerprint:
+        cached_identity = (
+            str(data["model_identity"].item())
+            if "model_identity" in data
+            else ""
+        )
+        if (
+            list(data["ids"]) == list(ids)
+            and cached_fingerprint == audio_fingerprint
+            and cached_identity == identity_json
+        ):
             print(f"[utmos] using cached MOS ({len(data['mos'])})", flush=True)
             return data["mos"]
 
-    model = _utmos_model()
     mos: List[float] = []
     for i, u in enumerate(utts):
         # predict(data=..., sr=...) returns a scalar/array for one clip.
@@ -793,6 +880,7 @@ def compute_utmos_scores(
         mos=mos_arr,
         ids=ids,
         audio_fingerprint=audio_fingerprint,
+        model_identity=identity_json,
     )
     return mos_arr
 

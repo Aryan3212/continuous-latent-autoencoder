@@ -164,14 +164,23 @@ def _decode_cached_loader(
     id2tok: List[str],
     device: torch.device,
     max_decode_len: int = 200,
+    records: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Greedily decode a disk-backed feature ``DataLoader`` batch by batch."""
     head.eval()
     all_texts: List[str] = []
     all_hyps: List[str] = []
+    all_records: List[Dict[str, Any]] = []
+    record_offset = 0
     skip = {PAD_IDX, BOS_IDX, EOS_IDX}
     with torch.no_grad():
         for xb_cpu, vl_cpu, texts in loader:
+            if records is not None:
+                batch_records = records[record_offset : record_offset + len(texts)]
+                if len(batch_records) != len(texts):
+                    raise RuntimeError("Prediction records do not align with decoded ASR items")
+                all_records.extend(batch_records)
+                record_offset += len(texts)
             xb = xb_cpu.to(device, non_blocking=True)
             vl = vl_cpu.to(device, non_blocking=True)
             B, T, _ = xb.shape
@@ -198,12 +207,24 @@ def _decode_cached_loader(
         {"ref": ref, "hyp": hyp}
         for ref, hyp in zip(all_texts[:5], all_hyps[:5])
     ]
-    return {
+    result: Dict[str, Any] = {
         "wer": float(wer(all_texts, all_hyps)),
         "cer": float(cer(all_texts, all_hyps)),
         "num_samples": len(all_texts),
         "examples": examples,
     }
+    if records is not None:
+        if record_offset != len(records):
+            raise RuntimeError("Prediction records do not cover the full ASR split")
+        result["predictions"] = [
+            {
+                **_prediction_identity(record),
+                "reference": reference,
+                "hypothesis": hypothesis,
+            }
+            for record, reference, hypothesis in zip(all_records, all_texts, all_hyps)
+        ]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -294,19 +315,45 @@ def _cache_config(
     max_utt_seconds: float,
     extractor_identity: Dict[str, Any],
 ) -> Dict[str, Any]:
-    stat = pathlib.Path(manifest).resolve().stat()
+    resolved_manifest = pathlib.Path(manifest).resolve()
     return {
-        "format": 2,
+        "format": 3,
         "model": model_name,
-        "manifest": str(pathlib.Path(manifest).resolve()),
-        "manifest_size": stat.st_size,
-        "manifest_mtime_ns": stat.st_mtime_ns,
+        # Seed-specific result paths may contain byte-identical filtered
+        # manifests. Key the feature cache by data content, not that path/mtime.
+        "manifest_sha256": _sha256_file(resolved_manifest),
+        "manifest_size": resolved_manifest.stat().st_size,
         "text_key": text_key,
         "max_samples": max_samples,
         "segment_seconds": segment_seconds,
         "max_utt_seconds": max_utt_seconds,
         "extractor": extractor_identity,
     }
+
+
+def _cache_config_matches(previous: Dict[str, Any], current: Dict[str, Any]) -> bool:
+    if {key: previous.get(key) for key in current} == current:
+        return True
+    if previous.get("format") != 2 or current.get("format") != 3:
+        return False
+    previous_manifest = previous.get("manifest")
+    if not isinstance(previous_manifest, str) or not pathlib.Path(previous_manifest).is_file():
+        return False
+    migrated = {
+        key: previous.get(key)
+        for key in current
+        if key not in {"format", "manifest_sha256", "manifest_size"}
+    }
+    expected = {
+        key: value
+        for key, value in current.items()
+        if key not in {"format", "manifest_sha256", "manifest_size"}
+    }
+    return (
+        migrated == expected
+        and previous.get("manifest_size") == current.get("manifest_size")
+        and _sha256_file(previous_manifest) == current.get("manifest_sha256")
+    )
 
 
 def _file_identity(path: str) -> Dict[str, Any]:
@@ -317,6 +364,84 @@ def _file_identity(path: str) -> Dict[str, Any]:
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
+
+
+def _sha256_file(path: str | pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_identity(path: str | pathlib.Path) -> Dict[str, Any]:
+    identity = _file_identity(str(path))
+    identity["sha256"] = _sha256_file(path)
+    return identity
+
+
+def _speaker_id(row: Dict[str, Any]) -> str | None:
+    for key in ("speaker_id", "speaker", "client_id"):
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return None
+
+
+def _stable_item_id(index: int, source: str) -> str:
+    digest = hashlib.sha256(
+        str(pathlib.Path(source).resolve()).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"item_{index:06d}_{digest}"
+
+
+def _cache_item_metadata(
+    index: int, row: Dict[str, Any], source: str
+) -> Dict[str, Any]:
+    return {
+        "item_id": _stable_item_id(index, source),
+        "speaker_id": _speaker_id(row),
+        "source_audio_filepath": str(pathlib.Path(source).resolve()),
+    }
+
+
+def _prediction_identity(record: Dict[str, Any]) -> Dict[str, Any]:
+    source = str(record.get("source_audio_filepath") or record.get("source") or "")
+    item_id = record.get("item_id")
+    if not isinstance(item_id, str) or not item_id:
+        feature_index = int(pathlib.Path(str(record["feature"])).stem)
+        item_id = _stable_item_id(feature_index, source)
+    speaker = record.get("speaker_id")
+    return {
+        "item_id": item_id,
+        "speaker_id": str(speaker) if speaker is not None and str(speaker).strip() else None,
+        "source_audio_filepath": source,
+    }
+
+
+def _prediction_split_sha256(rows: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(
+        [
+            {
+                "item_id": row["item_id"],
+                "reference": row["reference"],
+            }
+            for row in rows
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _write_jsonl(path: pathlib.Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def _config_fingerprint(config: Any) -> str:
@@ -432,8 +557,7 @@ def _cache_external_features(
                 f"Feature cache {cache_dir} has no metadata; remove it or choose --feature_cache_dir"
             )
         previous = json.loads(meta_path.read_text(encoding="utf-8"))
-        previous_config = {key: previous.get(key) for key in config}
-        if previous_config != config:
+        if not _cache_config_matches(previous, config):
             raise RuntimeError(
                 f"Feature cache {cache_dir} was made for different inputs; remove it or choose "
                 "--feature_cache_dir"
@@ -550,6 +674,7 @@ def _cache_external_features(
             record = {
                 "feature": str(feature_rel),
                 "text": text,
+                **_cache_item_metadata(accepted, row, path),
                 **_source_record(path),
             }
             index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -632,8 +757,7 @@ def _cache_clae_features(
                 "choose --feature_cache_dir"
             )
         previous = json.loads(meta_path.read_text(encoding="utf-8"))
-        previous_config = {key: previous.get(key) for key in config}
-        if previous_config != config:
+        if not _cache_config_matches(previous, config):
             raise RuntimeError(
                 f"Feature cache {cache_dir} was made for different inputs; "
                 "remove it or choose --feature_cache_dir"
@@ -722,10 +846,16 @@ def _cache_clae_features(
                 temp_path = feature_path.with_suffix(".tmp")
                 torch.save(frames, temp_path)
                 temp_path.replace(feature_path)
+                raw_source = str(row["audio_filepath"])
+                source_path = pathlib.Path(raw_source)
+                if not source_path.is_absolute():
+                    source_path = resolve_manifest_root(manifest, [row]) / source_path
+                source = str(source_path.resolve())
                 record = {
                     "feature": str(feature_rel),
                     "text": text,
-                    **_source_record(str(row["audio_filepath"])),
+                    **_cache_item_metadata(accepted, row, source),
+                    **_source_record(source),
                 }
                 index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 index_file.flush()
@@ -833,6 +963,13 @@ def main() -> None:
     )
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--predictions-out",
+        "--predictions_out",
+        dest="predictions_out",
+        default=None,
+        help="Per-dev-item JSONL output (default: <out>.predictions.jsonl).",
+    )
     # Decoder hyperparameters (new, not in eval_asr.py)
     ap.add_argument("--d_model", type=int, default=256)
     ap.add_argument("--dec_layers", type=int, default=2)
@@ -1200,8 +1337,19 @@ def main() -> None:
     result_de = _decode_cached_loader(
         head, dev_eval_loader, id2tok, device,
         max_decode_len=args.max_decode_len,
+        records=dev_cache.records,
     )
     del dev_eval_loader
+    dev_predictions = result_de.pop("predictions")
+    if len({row["item_id"] for row in dev_predictions}) != len(dev_predictions):
+        raise RuntimeError("Dev ASR split does not yield unique item IDs")
+    dev_split_sha256 = _prediction_split_sha256(dev_predictions)
+    predictions_path = (
+        pathlib.Path(args.predictions_out)
+        if args.predictions_out
+        else out_path.with_suffix(".predictions.jsonl")
+    )
+    _write_jsonl(predictions_path, dev_predictions)
 
     # ------------------------------------------------------------------
     # 11. Write output JSON
@@ -1244,6 +1392,22 @@ def main() -> None:
             "max_decode_len": args.max_decode_len,
         },
         "ctc_free": True,
+        "predictions_descriptor": {
+            "path": str(predictions_path.resolve()),
+            "format": "jsonl",
+            "schema": "asr_predictions_v1",
+            "count": len(dev_predictions),
+            "split_sha256": dev_split_sha256,
+        },
+        "predictions_artifact": str(predictions_path.resolve()),
+        "data_provenance": {
+            "train_manifest": _manifest_identity(args.train_manifest),
+            "dev_manifest": _manifest_identity(args.dev_manifest),
+            "filtered_train_manifest": _manifest_identity(train_manifest),
+            "filtered_dev_manifest": _manifest_identity(dev_manifest),
+            "extractor": extractor_identity,
+            "dev_split_sha256": dev_split_sha256,
+        },
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out_data, indent=2, ensure_ascii=False), encoding="utf-8")

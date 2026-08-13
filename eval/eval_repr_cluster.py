@@ -14,6 +14,8 @@ Writes ``runs/eval/cluster_tsne_umap.png``.
 from __future__ import annotations
 
 import argparse
+import json
+import pathlib
 
 import numpy as np
 
@@ -24,6 +26,7 @@ from eval.repr_bench import (
     compute_utmos_scores,
     extract,
     load_utterances,
+    utmos_runtime_identity,
 )
 
 
@@ -56,20 +59,32 @@ def _umap_2d(X: np.ndarray, seed: int = 0) -> np.ndarray:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-utts", type=int, default=300)
-    ap.add_argument("--source", default="openslr53", choices=["openslr53", "cv"])
+    ap.add_argument("--source", default="openslr53", choices=["openslr53", "cv", "subesco"])
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
                     help="Comma-separated subset of: " + ",".join(MODEL_ORDER))
     ap.add_argument("--ckpt", default=None, help="Local path or HF repo for our model.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--subesco-dir", default=None)
+    ap.add_argument("--out", type=pathlib.Path, default=EVAL_DIR / "cluster_tsne_umap.png")
+    ap.add_argument("--metadata-out", type=pathlib.Path, default=None)
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
+    if args.max_utts < 6:
+        ap.error("--max-utts must be at least 6 for t-SNE")
+    if args.source == "subesco" and not args.subesco_dir:
+        ap.error("--subesco-dir is required with --source subesco")
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    utts = load_utterances(args.source, max_utts=args.max_utts)
+    utts = load_utterances(
+        args.source,
+        max_utts=args.max_utts,
+        subesco_dir=args.subesco_dir,
+        seed=args.seed,
+    )
 
     # Coloring: UTMOSv2 MOS per utterance (shared across all panels).
     mos = compute_utmos_scores(utts, use_cache=not args.no_cache)
@@ -104,9 +119,32 @@ def main() -> None:
         fontsize=13,
     )
 
-    EVAL_DIR.mkdir(parents=True, exist_ok=True)
-    out = EVAL_DIR / "cluster_tsne_umap.png"
+    out = args.out
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches="tight")
+    metadata_out = args.metadata_out or out.with_suffix(".json")
+    metadata_out.parent.mkdir(parents=True, exist_ok=True)
+    metadata_out.write_text(
+        json.dumps(
+            {
+                "source": args.source,
+                "subesco_dir": str(pathlib.Path(args.subesco_dir).resolve()) if args.subesco_dir else None,
+                "checkpoint": args.ckpt,
+                "models": models,
+                "num_utterances": len(utts),
+                "seed": args.seed,
+                "reducers": ["t-SNE", "UMAP"],
+                "color": "UTMOSv2 predicted MOS of source audio",
+                "utmosv2_identity": utmos_runtime_identity(),
+                "mos_min": float(mos.min()),
+                "mos_max": float(mos.max()),
+                "figure": str(out.resolve()),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     print(f"wrote {out}")
 
 

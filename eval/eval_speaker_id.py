@@ -14,9 +14,11 @@ Writes ``runs/eval/speaker_id_probe.json`` and prints a table.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -42,11 +44,19 @@ def _per_speaker_split(speakers: np.ndarray, test_per_speaker: int, seed: int):
     return np.array(train_idx), np.array(test_idx)
 
 
-def probe(X: np.ndarray, speakers: np.ndarray, test_per_speaker: int, seed: int) -> dict:
+def probe(
+    X: np.ndarray,
+    speakers: np.ndarray,
+    item_ids: np.ndarray,
+    train_indices: np.ndarray,
+    test_indices: np.ndarray,
+    test_per_speaker: int,
+    seed: int,
+) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 
-    tr, te = _per_speaker_split(speakers, test_per_speaker, seed)
+    tr, te = train_indices, test_indices
     if len(tr) == 0 or len(te) == 0:
         raise ValueError(
             "Speaker-ID split needs at least one train and test utterance; "
@@ -60,7 +70,8 @@ def probe(X: np.ndarray, speakers: np.ndarray, test_per_speaker: int, seed: int)
     clf = LogisticRegression(max_iter=3000, C=1.0, random_state=seed)
     clf.fit(Xtr, speakers[tr])
     train_acc = float(clf.score(Xtr, speakers[tr]))
-    test_acc = float(clf.score(Xte, speakers[te]))
+    predictions = clf.predict(Xte)
+    test_acc = float(np.mean(predictions == speakers[te]))
     return {
         "test_acc": test_acc,
         "train_acc": train_acc,
@@ -68,8 +79,38 @@ def probe(X: np.ndarray, speakers: np.ndarray, test_per_speaker: int, seed: int)
         "n_test": int(len(te)),
         "dim": int(X.shape[1]),
         "seed": seed,
+        "probe_seed": seed,
         "test_per_speaker": test_per_speaker,
+        "prediction_protocol": "heldout_test",
+        "predictions": [
+            {
+                "item_id": str(item_ids[index]),
+                "speaker_id": str(speakers[index]),
+                "fold": 0,
+                "gold": str(speakers[index]),
+                "prediction": str(prediction),
+            }
+            for index, prediction in zip(te, predictions)
+        ],
     }
+
+
+def _split_hash(
+    item_ids: np.ndarray,
+    speakers: np.ndarray,
+    train_indices: np.ndarray,
+    test_indices: np.ndarray,
+) -> str:
+    roles = np.full(len(item_ids), "unassigned", dtype=object)
+    roles[train_indices] = "train"
+    roles[test_indices] = "test"
+    rows = [
+        [str(item_id), str(speaker_id), str(role)]
+        for item_id, speaker_id, role in zip(item_ids, speakers, roles)
+    ]
+    return hashlib.sha256(
+        json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def main() -> None:
@@ -81,6 +122,9 @@ def main() -> None:
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--test-per-speaker", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data-seed", type=int, default=0)
+    ap.add_argument("--split-seed", type=int, default=0)
+    ap.add_argument("--out", type=Path, default=EVAL_DIR / "speaker_id_probe.json")
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
 
@@ -89,7 +133,17 @@ def main() -> None:
         ap.error("--models must name at least one model")
     if args.max_utts < 2 or args.test_per_speaker < 1:
         ap.error("--max-utts must be at least 2 and --test-per-speaker positive")
-    utts = load_utterances(args.source, max_utts=args.max_utts)
+    utts = load_utterances(
+        args.source, max_utts=args.max_utts, seed=args.data_seed
+    )
+    item_ids = np.asarray([u.id for u in utts])
+    speakers = np.asarray([u.speaker for u in utts])
+    train_indices, test_indices = _per_speaker_split(
+        speakers, args.test_per_speaker, args.split_seed
+    )
+    split_hash = _split_hash(
+        item_ids, speakers, train_indices, test_indices
+    )
     n_spk = len({u.speaker for u in utts})
     chance = 1.0 / n_spk
 
@@ -97,17 +151,30 @@ def main() -> None:
     for name in models:
         data = extract(name, utts, ckpt=args.ckpt, use_cache=not args.no_cache)
         results[name] = probe(
-            data["X"], data["speakers"], args.test_per_speaker, args.seed
+            data["X"],
+            speakers,
+            item_ids,
+            train_indices,
+            test_indices,
+            args.test_per_speaker,
+            args.seed,
         )
 
-    EVAL_DIR.mkdir(parents=True, exist_ok=True)
-    out = EVAL_DIR / "speaker_id_probe.json"
+    out = args.out
+    out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "protocol": "closed_set_same_speakers_heldout_utterances",
         "n_utts": len(utts),
         "n_speakers": n_spk,
         "chance": chance,
         "seed": args.seed,
+        "data_seed": args.data_seed,
+        "split_seed": args.split_seed,
+        "probe_seed": args.seed,
+        "split_hash": split_hash,
+        "split_protocol": "per_speaker_heldout_utterances",
+        "bootstrap_unit": "speaker",
+        "checkpoint": args.ckpt,
         "test_per_speaker": args.test_per_speaker,
         "results": results,
     }

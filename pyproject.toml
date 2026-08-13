@@ -37,6 +37,12 @@ dependencies = [
   "speechbrain>=1.0",
 ]
 
+[project.optional-dependencies]
+reconstruction-metrics = [
+  "pystoi==0.4.1",
+  "pesq==0.0.4; sys_platform == 'linux'",
+]
+
 [tool.setuptools]
 py-modules = ["data_loading", "losses", "schema", "config"]
 
@@ -60,4 +66,4 @@ torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
 torchcodec = { index = "pytorch-cpu" }
-utmosv2 = { git = "https://github.com/sarulab-speech/UTMOSv2.git" }
+utmosv2 = { git = "https://github.com/sarulab-speech/UTMOSv2.git", rev = "cc2700db57bb83ee13dc31ebe1b868c254e15d09" }
