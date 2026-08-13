@@ -218,7 +218,7 @@ uv run torchrun --standalone --nproc_per_node=2 train.py \
 Run reconstruction metrics without configured probes:
 
 ```bash
-uv run python -m eval.run_all \
+uv run --extra reconstruction-metrics python -m eval.run_all \
   --config configs/local_6gb.yaml \
   --ckpt runs/first-run/checkpoints/last.pt \
   --manifest staging/manifests/val.jsonl \
@@ -233,6 +233,23 @@ Results for each checkpoint are grouped under
 per-task completion, skip, failure, and timing status. Latent visualization is
 no longer part of the default metric run; add `--visualize` when you want it.
 Use `--skip_recon` to run only the configured probes.
+
+For the six-condition TACL evidence run, use the fixed-checkpoint statistics
+launcher after training is complete. It keeps the data split fixed, repeats
+probe seeds 0/1/2, and computes paired bootstrap intervals from saved
+predictions without retraining during resampling:
+
+```bash
+TACL_RECON_MANIFEST=staging/manifests/val.jsonl \
+TACL_ASR_TRAIN_MANIFEST=/path/to/asr-train.jsonl \
+TACL_ASR_DEV_MANIFEST=/path/to/asr-dev.jsonl \
+TACL_SUBESCO_DIR=datasets/SUBESCO \
+scripts/run_tacl_statistics.sh
+```
+
+ASR, SUBESCO emotion, Common Voice age, and OpenSLR speaker tasks run only when
+their documented inputs are available. See the launcher's `--help` output and
+`docs/EXTRA_EVALUATIONS.md` for the full matrix.
 
 To reconstruct audio for listening:
 

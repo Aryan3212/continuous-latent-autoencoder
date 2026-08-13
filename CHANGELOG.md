@@ -2,6 +2,41 @@
 
 Date format: `YYYY-MM-DD`
 
+## 2026-08-13
+
+**Unified the six-run 25k training and evaluation workflow**
+
+- Added `large_2kh_packed_25k.yaml`, preserving the original packed model,
+  objective, data backend, and 100k scheduler horizon while ending at 25k.
+- Extended `run_ablation_suite.sh` to complete the five ablations and the
+  packed-base reference serially, then evaluate all six checkpoints once.
+- Kept reconstruction evaluation on an explicit normal validation JSONL
+  manifest prepared from the downloaded datasets.
+- Added six-condition evaluation consolidation and removed the redundant
+  seven-run protocol; the duplicate matched-full run is not part of the suite.
+- Expanded the post-training evaluator with fixed-source per-item MR-STFT,
+  waveform L1, SI-SDR, STOI, ESTOI, and PESQ results plus metric coverage;
+  condition-specific SUBESCO attentive-statistics/Transformer emotion probes;
+  and MOS-colored t-SNE/UMAP plots.
+- Pinned the UTMOSv2 package source, made the Mimi reconstruction baseline
+  enforce exactly eight quantizers at the nominal 1.1 kbps point, and added
+  reproducible blinded listening-stimulus generation after all reconstructions.
+- Tightened reconstruction reporting to one shared CLAE/Mimi STFT contract and
+  full metric-by-item coverage, cleared stale Mimi/listening artifacts before
+  reruns, added stimulus SHA-256 manifests, made visualization sampling seed
+  deterministic, and keyed UTMOS caches/metadata by the exact runtime weight
+  hash because the upstream default weight URL is not revision-pinned.
+- Added the TACL fixed-checkpoint statistics workflow: probe seeds 0/1/2 on one
+  fixed data split, reusable frozen-feature caches, complete per-item/trial
+  prediction artifacts, and paired bootstrap intervals by utterance, speaker,
+  or predefined trial without bootstrap retraining.
+- Separated data-selection, split, and probe seeds across downstream probes and
+  made CPU/GPU probe initialization, minibatch order, and dropout follow the
+  requested probe seed.
+- Made listening-study stimulus generation opt-in, moved checkpoint validation
+  before per-condition rerun cleanup, preserved partial Mimi artifacts for
+  diagnosis, and limited cleanup to known generated paths.
+
 ## 2026-08-09
 
 **Reduced matched ablation budget to 25k**

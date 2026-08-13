@@ -114,14 +114,15 @@ Full configs: `exp0.yaml`, `exp_3m.yaml`, `exp_3m_gan.yaml`, `large_2kh.yaml`,
 `kaggle_3m_gan.yaml` inherits from `exp_3m_gan.yaml` with Kaggle-specific
 overrides; `large_2kh_packed.yaml` inherits from `large_2kh.yaml` with only
 packed-data loader overrides.
+`large_2kh_packed_25k.yaml` is the packed base configuration with only the
+training endpoint reduced to 25k, retaining the original 100k LR horizon.
 
-The TACL ablation configs inherit from `large_2kh_packed.yaml`: matched full
-objective, reconstruction-only, representation-only, mHC-off, 25 Hz, and
-decoder-corruption-off variants retain their historical
-`large_2kh_ablation_*_50k.yaml` names and stable run IDs for resume compatibility.
-They share the packed TAR backend, stop at 25k, checkpoint every 1k steps, and
-intentionally retain the underlying base config's 100k LR horizon to match the
-historical full-model learning-rate trajectory.
+The six-run TACL workflow uses `large_2kh_packed_25k.yaml` as its full-objective
+reference plus reconstruction-only, representation-only, mHC-off, 25 Hz, and
+decoder-corruption-off configs inherited from `large_2kh_packed.yaml`. The five
+ablations retain their historical `large_2kh_ablation_*_50k.yaml` names and run
+IDs for resume compatibility. Every run shares the packed TAR backend, stops at
+25k, and retains the underlying base config's 100k LR horizon.
 
 ## Data
 
@@ -185,11 +186,35 @@ same name.
   five matched representation conditions. It merges rows by step, uses the
   common available steps and every plotted metric, keeps encoder-latent and
   projector panels separate, and writes provenance metadata.
-- `scripts/run_ablation_suite.sh` — serial launcher for the five matched 25k
-  non-reference packed-data ablations. It assigns stable output/run IDs, skips
-  intact 25k checkpoints, and resumes an interrupted condition from its newest
-  intact periodic or `last.pt` checkpoint before advancing. The matched full
-  reference is launched separately from its corresponding config.
+- `scripts/run_ablation_suite.sh` — the single six-run workflow. It serially
+  completes the five 25k ablations and packed-base reference, skips intact 25k
+  checkpoints, resumes an interrupted run from its newest intact checkpoint,
+  and invokes the evaluator once after all training is complete.
+- `scripts/run_ablation_evals.sh` — serial evaluator for the same six step-25k
+  checkpoints. It runs `eval.run_all` per intact checkpoint, then pinned Mimi
+  at exactly 8 quantizers / nominal 1.1 kbps, optionally prepares a blinded
+  fixed-source listening bundle when `ABLATION_EVAL_LISTENING=1`, and
+  consolidates raw summaries plus a compact Markdown comparison. Failures are
+  isolated so later conditions still run. The
+  reconstruction source is the explicit normal validation JSONL manifest, and
+  its `audio_filepath` entries must be accessible during evaluation.
+- `scripts/run_tacl_statistics.sh` — fixed-checkpoint TACL evidence launcher.
+  It validates all six step-25k checkpoints before writing outputs, keeps the
+  data/split seed fixed, repeats stochastic probes at seeds 0/1/2, reuses
+  frozen ASR and temporal-emotion features across seeds, and publishes paired
+  bootstrap statistics only after every configured evaluation succeeds.
+- `eval/bootstrap_statistics.py` — result-only paired bootstrap analyzer. It
+  aligns the same item IDs across systems, reports probe-seed mean/sample SD
+  separately from sampling uncertainty, bootstraps utterances for
+  reconstruction/ASR, speakers for classification, and speakers or predefined
+  trials for verification, and never retrains a probe.
+- `scripts/build_listening_study.py` — verifies that every condition saved the
+  same originals, samples a deterministic shared set, copies anonymized
+  stimuli and a ratings template into a public directory, and preserves the
+  condition/source key separately. It prepares stimuli only; it does not
+  collect or analyze human ratings.
+- `scripts/summarize_ablation_evals.py` — result-only companion used by the
+  ablation evaluator to combine per-condition summaries without rerunning them.
 - `scripts/download_subesco.py` — materializes the processed
   `sajid73/SUBESCO-audio-dataset` Parquet release into local WAV files plus a
   label-preserving TSV at `datasets/SUBESCO/` for emotion evaluation.
@@ -198,10 +223,19 @@ same name.
   checkpoint writes one self-contained `step_<N>/` directory and summary;
   `eval.enabled` and child probe flags are honored, missing manifests are
   reported as skips, and latent visualization is opt-in with `--visualize`.
-  Reconstruction uses CUDA AMP for model inference while keeping spectral
-  metrics in FP32. Reruns remove stale per-task artifacts, apply bounded
-  timeouts, and return a failing process status after writing the summary if a
-  requested task fails. Step-less legacy checkpoints require `--step`.
+  Reconstruction uses CUDA AMP for model inference while keeping metrics in
+  FP32. It reports fixed-source per-item MR-STFT components, waveform L1,
+  SI-SDR, STOI, ESTOI, and wide-band PESQ with coverage/failure records and
+  optional paired audio. Report mode additionally runs both SUBESCO temporal
+  emotion heads and a t-SNE/UMAP figure colored by UTMOSv2 MOS; an
+  explicit SUBESCO root is required or these tasks are recorded as skipped.
+  Reruns remove stale per-task artifacts, apply bounded timeouts, and return a
+  failing status after writing the summary if a requested task is incomplete.
+  Step-less legacy checkpoints require `--step`.
+  CLAE and Mimi share the explicit evaluation STFT config from
+  `eval/recon_metrics.py`; strict completeness requires every metric on every
+  item. This runner does not orchestrate the standalone speaker, age,
+  attention-ASR, or Kathbath evaluations.
 - `eval/repr_bench.py` — shared frozen-feature adapter registry and versioned
   embedding cache. Supports CLAE, WavLM, Whisper-tiny, ECAPA, emotion2vec,
   Mimi, Higgs Audio V2, and XCodec2; codec adapters use continuous
@@ -219,6 +253,9 @@ same name.
   use speaker-disjoint group folds; closed-set speaker ID holds out utterances
   from the same enrolled speakers; speaker verification scores all utterance
   pairs. The age probe reads local Common Voice Bengali `validated.tsv`.
+  Probe outputs separate data selection, split, and probe seeds and retain
+  item/speaker predictions for paired resampling. Verification stores compact
+  predefined trial identities and scores in a compressed NPZ artifact.
 - `eval/eval_asr_attn.py` — fixed-budget 2-layer Transformer-decoder ASR probe;
   it accepts the shared adapters and is the content metric for low-rate CLAE.
   CLAE and external adapters both use versioned, resumable per-utterance frame
@@ -232,10 +269,26 @@ same name.
   batch size for every model. The head and replacement sampler use a recorded
   deterministic seed; head initialization is reset after extraction so cache
   hits and misses are identical.
+- `eval/eval_emotion_temporal.py` / `eval/eval_emotion_transformer.py` —
+  condition-safe attentive-statistics and Transformer temporal emotion probes;
+  both accept explicit checkpoint, SUBESCO root, data/split/probe seeds, and
+  output paths. Their validated frame cache excludes the probe seed so frozen
+  extraction is shared across repeated probe runs.
+- `eval/eval_repr_cluster.py` — condition-safe t-SNE/UMAP plots colored by
+  UTMOSv2 predicted MOS of the source audio. UTMOSv2 package code is locked to
+  commit `cc2700db57bb83ee13dc31ebe1b868c254e15d09`; the upstream default weight
+  URL is not revisioned, so runtime metadata and cache identity include the
+  exact loaded state-dictionary SHA-256, config, fold, and seed. An explicit
+  local weight path can be supplied with `UTMOSV2_CHECKPOINT`.
 - `eval/eval_repr_viz.py` / `eval/render_compact_scorecard.py` — PCA+UMAP
   attribute plots and Markdown scorecard aggregation.
-- `eval/eval_mimi_recon.py` — standalone Mimi reconstruction baseline using the
-  same loss family as CLAE reconstruction evaluation.
+- `eval/eval_mimi_recon.py` — pinned Mimi reconstruction baseline using the
+  same fixed-source per-item metric pipeline as CLAE. It enforces exactly eight
+  quantizers and fails rather than silently evaluating all codebooks.
+- `eval/recon_metrics.py` — shared reconstruction metric and coverage layer.
+  SI-SDR is internal; STOI/ESTOI and PESQ use the pinned
+  `reconstruction-metrics` project extra (`pesq` is Linux-only) and expose
+  dependency/per-item failures instead of hiding missing metrics.
 - `scripts/reconstruct_audio.py` / `reconstruct_live.py` — reconstruction tools.
 - `scripts/visualize_latents.py` — standalone latent visualization.
 

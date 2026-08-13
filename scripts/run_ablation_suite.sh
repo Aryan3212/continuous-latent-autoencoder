@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run the five matched non-reference 25k ablations serially. Re-running this
-# script resumes the current condition from its newest intact checkpoint and
-# skips completed runs.
+# Train the packed-base reference and five 25k ablations serially, then evaluate
+# all six checkpoints once. Re-running resumes the current condition and skips
+# completed runs.
 
 set -Eeuo pipefail
 
@@ -15,11 +15,18 @@ Usage: scripts/run_ablation_suite.sh [TRAIN_CONFIG_OVERRIDE ...]
 Environment:
   ABLATION_OUT_DIR         Output root (default: runs/ablations)
   ABLATION_GPUS            GPUs/processes per run (default: 1)
+  ABLATION_EVAL_MANIFEST   Validation manifest for reconstruction evaluation;
+                           required unless reconstruction is skipped.
+  ABLATION_EVAL_SKIP_RECON Requires ABLATION_EVAL_MIMI=0 and
+                           ABLATION_EVAL_LISTENING=0 when set to 1
+  ABLATION_EVAL_SUBESCO_DIR Explicit SUBESCO root for temporal emotion and
+                           MOS-colored representation plots
+  ABLATION_EVAL_*          Evaluation options; see run_ablation_evals.sh --help
 
 Examples:
-  scripts/run_ablation_suite.sh
-  ABLATION_GPUS=2 scripts/run_ablation_suite.sh
-  scripts/run_ablation_suite.sh run.wandb.enabled=false
+  ABLATION_EVAL_MANIFEST=staging/manifests/val.jsonl ABLATION_EVAL_SUBESCO_DIR=datasets/SUBESCO scripts/run_ablation_suite.sh
+  ABLATION_GPUS=2 ABLATION_EVAL_MANIFEST=staging/manifests/val.jsonl scripts/run_ablation_suite.sh
+  ABLATION_EVAL_SKIP_RECON=1 ABLATION_EVAL_MIMI=0 ABLATION_EVAL_LISTENING=0 scripts/run_ablation_suite.sh run.wandb.enabled=false
 EOF
   exit 0
 fi
@@ -32,6 +39,66 @@ for override in "$@"; do
       ;;
   esac
 done
+
+skip_recon="${ABLATION_EVAL_SKIP_RECON:-0}"
+case "$skip_recon" in
+  0)
+    if [[ -z "${ABLATION_EVAL_MANIFEST:-}" ]]; then
+      echo "[ablation-suite] set ABLATION_EVAL_MANIFEST to a validation manifest, or set ABLATION_EVAL_SKIP_RECON=1 before starting" >&2
+      exit 2
+    fi
+    if [[ ! -f "$ABLATION_EVAL_MANIFEST" ]]; then
+      echo "[ablation-suite] validation manifest does not exist: $ABLATION_EVAL_MANIFEST" >&2
+      exit 2
+    fi
+    ;;
+  1) ;;
+  *)
+    echo "[ablation-suite] ABLATION_EVAL_SKIP_RECON must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+for eval_boolean in ABLATION_EVAL_MIMI ABLATION_EVAL_LISTENING; do
+  default_value=1
+  if [[ "$eval_boolean" == "ABLATION_EVAL_LISTENING" ]]; then
+    default_value=0
+  fi
+  case "${!eval_boolean:-$default_value}" in
+    0|1) ;;
+    *) echo "[ablation-suite] $eval_boolean must be 0 or 1" >&2; exit 2 ;;
+  esac
+done
+if [[ "$skip_recon" == "1" ]]; then
+  if [[ "${ABLATION_EVAL_MIMI:-1}" != "0" || "${ABLATION_EVAL_LISTENING:-0}" != "0" ]]; then
+    echo "[ablation-suite] skipping reconstruction requires ABLATION_EVAL_MIMI=0 and ABLATION_EVAL_LISTENING=0" >&2
+    exit 2
+  fi
+fi
+if [[ -n "${ABLATION_EVAL_SUBESCO_DIR:-}" && ! -d "$ABLATION_EVAL_SUBESCO_DIR" ]]; then
+  echo "[ablation-suite] SUBESCO directory does not exist: $ABLATION_EVAL_SUBESCO_DIR" >&2
+  exit 2
+fi
+if [[ -n "${UTMOSV2_CHECKPOINT:-}" && ! -f "$UTMOSV2_CHECKPOINT" ]]; then
+  echo "[ablation-suite] UTMOSV2_CHECKPOINT does not exist: $UTMOSV2_CHECKPOINT" >&2
+  exit 2
+fi
+for positive_eval_var in ABLATION_EVAL_RECON_BATCH ABLATION_EVAL_RECON_BATCHES ABLATION_EVAL_LISTENING_N; do
+  value="${!positive_eval_var:-}"
+  if [[ -n "$value" && ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ablation-suite] $positive_eval_var must be a positive integer" >&2
+    exit 2
+  fi
+done
+eval_segment_seconds="${ABLATION_EVAL_SEGMENT_SECONDS:-3.0}"
+if [[ ! "$eval_segment_seconds" =~ ^[0-9]+([.][0-9]+)?$ || "$eval_segment_seconds" =~ ^0+([.]0+)?$ ]]; then
+  echo "[ablation-suite] ABLATION_EVAL_SEGMENT_SECONDS must be positive" >&2
+  exit 2
+fi
+eval_recon_budget="$(( ${ABLATION_EVAL_RECON_BATCH:-8} * ${ABLATION_EVAL_RECON_BATCHES:-50} ))"
+if [[ "${ABLATION_EVAL_LISTENING:-0}" == "1" && "${ABLATION_EVAL_LISTENING_N:-20}" -gt "$eval_recon_budget" ]]; then
+  echo "[ablation-suite] ABLATION_EVAL_LISTENING_N cannot exceed the reconstruction batch budget ($eval_recon_budget)" >&2
+  exit 2
+fi
 
 out_dir="${ABLATION_OUT_DIR:-runs/ablations}"
 gpu_count="${ABLATION_GPUS:-1}"
@@ -51,6 +118,7 @@ configs=(
   "configs/large_2kh_ablation_no_mhc_50k.yaml"
   "configs/large_2kh_ablation_25hz_50k.yaml"
   "configs/large_2kh_ablation_no_decoder_corruption_50k.yaml"
+  "configs/large_2kh_packed_25k.yaml"
 )
 
 run_ids=(
@@ -59,6 +127,7 @@ run_ids=(
   "large-2kh-ablation-no-mhc-50k"
   "large-2kh-ablation-25hz-full-50k"
   "large-2kh-ablation-no-decoder-corruption-50k"
+  "large-2kh-packed-25k"
 )
 
 checkpoint_is_intact() {
@@ -162,4 +231,6 @@ for index in "${!configs[@]}"; do
   fi
 done
 
-echo "[ablation-suite] all six conditions are complete"
+echo "[ablation-suite] all six training runs are complete"
+echo "[ablation-suite] starting evaluation for all six checkpoints"
+scripts/run_ablation_evals.sh

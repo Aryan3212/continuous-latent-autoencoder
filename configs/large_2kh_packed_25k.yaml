@@ -1,0 +1,7 @@
+# The unmodified packed-data reference, stopped at the shared 25k endpoint.
+# Retain large_2kh.yaml's 100k scheduler horizon for an identical early-training
+# learning-rate trajectory to the other packed ablations.
+_base_: configs/large_2kh_packed.yaml
+
+train:
+  max_steps: 25000
