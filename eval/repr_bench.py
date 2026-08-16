@@ -250,6 +250,7 @@ def load_common_voice_age_utterances(
     cv_root: str,
     max_utts: Optional[int] = None,
     seed: int = 0,
+    label_column: str = "age",
 ) -> List[Utterance]:
     """Load age-labelled Bengali Common Voice clips from a local release.
 
@@ -271,16 +272,17 @@ def load_common_voice_age_utterances(
     if not clips.is_dir():
         raise FileNotFoundError(f"No clips/ directory next to {tsv}")
     df = pd.read_csv(tsv, sep="\t", low_memory=False)
-    required = {"path", "client_id", "age"}
+    required = {"path", "client_id", label_column}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"{tsv} is missing required columns: {sorted(missing)}")
     rows = []
-    columns = ["path", "client_id", "age"] + (["sentence"] if "sentence" in df.columns else [])
+    columns = ["path", "client_id", label_column] + (["sentence"] if "sentence" in df.columns else [])
     for row in df[columns].fillna("").to_dict("records"):
         path = clips / str(row["path"])
-        if str(row["client_id"]).strip() and str(row["age"]).strip() and path.is_file():
-            rows.append((path, str(row["client_id"]).strip(), str(row["age"]).strip(), str(row.get("sentence", ""))))
+        label = str(row[label_column]).strip()
+        if str(row["client_id"]).strip() and label and path.is_file():
+            rows.append((path, str(row["client_id"]).strip(), label, str(row.get("sentence", ""))))
     rng = random.Random(seed)
     rng.shuffle(rows)
     if max_utts is not None:

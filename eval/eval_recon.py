@@ -10,7 +10,6 @@ import torch
 
 from config import apply_overrides, load_config
 from data_loading import AudioDataset, DatasetConfig, collate_fixed
-from eval.common import amp_enabled
 from eval.recon_metrics import (
     ReconstructionMetrics,
     EVALUATION_STFT_CONFIG_VERSION,
@@ -99,13 +98,14 @@ def main() -> None:
     per_item: list[dict[str, Any]] = []
     num_batches = 0
     num_items = 0
-    use_amp = amp_enabled(device)
     with torch.no_grad():
         for batch in dl:
             wav = batch["wav"].to(device)
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                encoded = model["encoder"](model["frontend"](wav))
-                reconstructed = model["decoder"](encoded, target_len=wav.size(-1))
+            # Decoder activations can overflow under BF16 for otherwise finite
+            # checkpoints and clean held-out inputs. Reconstruction metrics are
+            # an offline correctness path, so keep this forward pass in FP32.
+            encoded = model["encoder"](model["frontend"](wav))
+            reconstructed = model["decoder"](encoded, target_len=wav.size(-1))
             for batch_index, meta in enumerate(batch["meta"]):
                 item_index = num_items
                 item_id = _item_id(item_index, meta)

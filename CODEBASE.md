@@ -203,6 +203,15 @@ same name.
   data/split seed fixed, repeats stochastic probes at seeds 0/1/2, reuses
   frozen ASR and temporal-emotion features across seeds, and publishes paired
   bootstrap statistics only after every configured evaluation succeeds.
+- `scripts/run_full_evaluation_suite.sh` — resume-aware seven-checkpoint
+  evaluation launcher for the six 25k conditions plus the packed 210k
+  `last.pt`. It evaluates FP32 reconstruction, exact-8-quantizer Mimi
+  reconstruction, ASR, generic and temporal emotion, age, gender, speaker ID,
+  and verification. A successful task writes a neighbouring `.ok` marker, so
+  interrupted or failed tasks retry without repeating completed work. Shared
+  external baseline tables are evaluated once against the packed 210k run;
+  their Mimi representation features remain continuous pre-quantization
+  latents, separate from the bitrate-controlled reconstruction baseline.
 - `eval/bootstrap_statistics.py` — result-only paired bootstrap analyzer. It
   aligns the same item IDs across systems, reports probe-seed mean/sample SD
   separately from sampling uncertainty, bootstraps utterances for
@@ -223,8 +232,9 @@ same name.
   checkpoint writes one self-contained `step_<N>/` directory and summary;
   `eval.enabled` and child probe flags are honored, missing manifests are
   reported as skips, and latent visualization is opt-in with `--visualize`.
-  Reconstruction uses CUDA AMP for model inference while keeping metrics in
-  FP32. It reports fixed-source per-item MR-STFT components, waveform L1,
+  Reconstruction runs the CLAE forward pass and metrics in FP32; this avoids
+  BF16 decoder-activation overflow on otherwise finite held-out inputs. It
+  reports fixed-source per-item MR-STFT components, waveform L1,
   SI-SDR, STOI, ESTOI, and wide-band PESQ with coverage/failure records and
   optional paired audio. Report mode additionally runs both SUBESCO temporal
   emotion heads and a t-SNE/UMAP figure colored by UTMOSv2 MOS; an
@@ -249,10 +259,11 @@ same name.
   mean+std embeddings. Remote adapter revisions are immutable Hub commits, and
   cache hits pair embeddings with the current dataset labels.
 - `eval/eval_emotion.py`, `eval/eval_speaker_id.py`, `eval/eval_speaker_verif.py`,
-  and `eval/eval_age.py` — downstream representation probes. Emotion and age
-  use speaker-disjoint group folds; closed-set speaker ID holds out utterances
-  from the same enrolled speakers; speaker verification scores all utterance
-  pairs. The age probe reads local Common Voice Bengali `validated.tsv`.
+  and `eval/eval_age.py` — downstream representation probes. Emotion, age,
+  and Common Voice gender use speaker-disjoint group folds; closed-set speaker
+  ID holds out utterances from the same enrolled speakers; speaker verification
+  scores all utterance pairs. The demographic probe reads a selected `age` or
+  `gender` column from local Common Voice Bengali `validated.tsv`.
   Probe outputs separate data selection, split, and probe seeds and retain
   item/speaker predictions for paired resampling. Verification stores compact
   predefined trial identities and scores in a compressed NPZ artifact.

@@ -37,6 +37,26 @@ Date format: `YYYY-MM-DD`
   before per-condition rerun cleanup, preserved partial Mimi artifacts for
   diagnosis, and limited cleanup to known generated paths.
 
+**Made reconstruction evaluation numerically reliable**
+
+- Run the CLAE reconstruction forward pass in FP32 rather than CUDA AMP. A
+  finite no-decoder-corruption checkpoint produced BF16-overflowed decoder
+  activations for clean held-out clips, while the same inputs were finite in
+  FP32; metrics now score the stable FP32 reconstruction.
+
+**Added a resume-aware full checkpoint evaluation launcher**
+
+- Added `scripts/run_full_evaluation_suite.sh` for the six 25k ablations plus
+  `large-2kh-packed-210k-tail-lr-1e4/checkpoints/last.pt`, with the actual
+  reconstruction-only `-v2` run directory.
+- It evaluates reconstruction, exact-8-quantizer Mimi reconstruction, ASR
+  CER/WER, generic and temporal emotion, Common Voice age/gender, speaker ID,
+  and verification. Successful task markers preserve completed outputs while
+  missing or failed tasks retry on the next invocation.
+- Added Common Voice `gender` support to the demographic probe. Age and gender
+  labels use the same speaker-disjoint protocol; labels are taken directly from
+  `validated.tsv` rather than inferred from file names.
+
 ## 2026-08-09
 
 **Reduced matched ablation budget to 25k**

@@ -123,6 +123,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cv_root", required=True, help="Common Voice release directory containing validated.tsv + clips/")
     ap.add_argument("--max-utts", type=int, default=None)
+    ap.add_argument("--label-column", choices=["age", "gender"], default="age")
     ap.add_argument(
         "--models",
         default=",".join(DEFAULT_MODELS),
@@ -146,7 +147,7 @@ def main() -> None:
     if args.max_utts is not None and args.max_utts < 1:
         ap.error("--max-utts must be positive")
     utts = load_common_voice_age_utterances(
-        args.cv_root, args.max_utts, args.data_seed
+        args.cv_root, args.max_utts, args.data_seed, args.label_column
     )
     item_ids = np.asarray([u.id for u in utts])
     y = np.asarray([u.age for u in utts])
@@ -173,7 +174,8 @@ def main() -> None:
     out = args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "dataset": "Common Voice Bengali validated", "n_utts": len(utts),
+        "dataset": "Common Voice Bengali validated", "label_column": args.label_column,
+        "n_utts": len(utts),
         "n_speakers": int(len(np.unique(groups))), "n_classes": int(len(np.unique(y))),
         "pool": args.pool, "seed": args.seed,
         "data_seed": args.data_seed, "split_seed": args.split_seed,
@@ -183,7 +185,7 @@ def main() -> None:
         "results": results,
     }
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"\nCommon Voice Bengali age ({len(utts)} clips, {payload['n_speakers']} speaker-disjoint)")
+    print(f"\nCommon Voice Bengali {args.label_column} ({len(utts)} clips, {payload['n_speakers']} speaker-disjoint)")
     for name, result in results.items():
         print(f"{name:<16} balanced acc={result['balanced_accuracy']*100:.1f}%  macro-F1={result['macro_f1']*100:.1f}%")
     print(f"wrote {out}")
