@@ -57,6 +57,13 @@ Date format: `YYYY-MM-DD`
   labels use the same speaker-disjoint protocol; labels are taken directly from
   `validated.tsv` rather than inferred from file names.
 
+**Made the default full-evaluation run practical on the remote host**
+
+- The launcher now defaults to one fixed probe seed, skips temporal-emotion
+  variants unless explicitly requested, and uses bounded Common Voice,
+  speaker, and ASR budgets. `FULL_EVAL_TASKS` selects task families for a
+  larger or bespoke rerun; completed `.ok`-marked work is still reused.
+
 ## 2026-08-09
 
 **Reduced matched ablation budget to 25k**

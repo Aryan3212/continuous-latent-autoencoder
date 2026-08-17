@@ -27,17 +27,22 @@ Optional controls:
   FULL_EVAL_OUT_DIR              Output root (default: runs/full_evaluations)
   FULL_EVAL_FORCE                1 reruns successful tasks (default: 0)
   FULL_EVAL_MAIN_STEP            Label for packed last.pt (default: 210000)
-  FULL_EVAL_PROBE_SEEDS          Probe seeds (default: "0 1 2")
+  FULL_EVAL_PROBE_SEEDS          Probe seeds (default: "0")
+  FULL_EVAL_TASKS                Comma-separated task families. Compact default:
+                                 reconstruction,emotion,age,gender,speaker_id,
+                                 speaker_verification,asr,mimi_reconstruction.
+                                 Add emotion_temporal,emotion_transformer only
+                                 when those extra analyses are needed.
   FULL_EVAL_RECON_BATCH          Reconstruction batch size (default: 8)
   FULL_EVAL_RECON_BATCHES        Reconstruction batch limit (default: 50)
   FULL_EVAL_SEGMENT_SECONDS      Reconstruction segment length (default: 3.0)
   FULL_EVAL_EMOTION_MAX_UTTS     0=all SUBESCO clips (default: 0)
-  FULL_EVAL_CV_MAX_UTTS          0=all labelled Common Voice clips (default: 0)
-  FULL_EVAL_SPEAKER_ID_MAX_UTTS  Speaker-ID utterance cap (default: 1000)
-  FULL_EVAL_SPEAKER_VERIF_MAX_UTTS  Verification utterance cap (default: 2000)
+  FULL_EVAL_CV_MAX_UTTS          0=all labelled Common Voice clips (default: 3000)
+  FULL_EVAL_SPEAKER_ID_MAX_UTTS  Speaker-ID utterance cap (default: 750)
+  FULL_EVAL_SPEAKER_VERIF_MAX_UTTS  Verification utterance cap (default: 1000)
   FULL_EVAL_VERIFICATION_TRIALS  0=all pairs (default: 0)
-  FULL_EVAL_ASR_MAX_SAMPLES      Per-split ASR cap (default: 10000)
-  FULL_EVAL_ASR_STEPS            ASR probe updates (default: 8000)
+  FULL_EVAL_ASR_MAX_SAMPLES      Per-split ASR cap (default: 3000)
+  FULL_EVAL_ASR_STEPS            ASR probe updates (default: 3000)
   FULL_EVAL_ASR_BATCH            ASR probe batch size (default: 16)
   FULL_EVAL_EXTERNAL_MODELS      Reusable non-CLAE report baselines
   FULL_EVAL_ASR_BASELINES        Comma-separated ASR baseline adapters (default: wavlm)
@@ -137,6 +142,22 @@ cv_root="${FULL_EVAL_CV_ROOT:-}"
 force="${FULL_EVAL_FORCE:-0}"
 case "$force" in 0|1) ;; *) fail "FULL_EVAL_FORCE must be 0 or 1" ;; esac
 
+# Compact is intentionally the default: it produces one fixed-seed result per
+# condition and omits the two costly temporal-emotion variants.  The previous
+# exhaustive matrix remains available through explicit controls.
+tasks_csv="${FULL_EVAL_TASKS:-reconstruction,emotion,age,gender,speaker_id,speaker_verification,asr,mimi_reconstruction}"
+IFS=',' read -r -a task_array <<< "$tasks_csv"
+valid_tasks=",reconstruction,emotion,age,gender,speaker_id,speaker_verification,asr,emotion_temporal,emotion_transformer,mimi_reconstruction,"
+for task in "${task_array[@]}"; do
+  [[ -n "$task" && "$valid_tasks" == *",$task,"* ]] || fail "unknown FULL_EVAL_TASKS entry: $task"
+done
+has_task() {
+  local wanted="$1"
+  local task
+  for task in "${task_array[@]}"; do [[ "$task" == "$wanted" ]] && return 0; done
+  return 1
+}
+
 [[ -n "$recon_manifest" ]] || fail "set FULL_EVAL_RECON_MANIFEST"
 [[ -n "$asr_train_manifest" ]] || fail "set FULL_EVAL_ASR_TRAIN_MANIFEST"
 [[ -n "$asr_dev_manifest" ]] || fail "set FULL_EVAL_ASR_DEV_MANIFEST"
@@ -147,12 +168,14 @@ require_file "$asr_train_manifest" "FULL_EVAL_ASR_TRAIN_MANIFEST"
 require_file "$asr_dev_manifest" "FULL_EVAL_ASR_DEV_MANIFEST"
 require_dir "$subesco_dir" "FULL_EVAL_SUBESCO_DIR"
 require_dir "$cv_root" "FULL_EVAL_CV_ROOT"
-require_file "datasets/OpenSLR53/asr_bengali/utt_spk_text.tsv" "OpenSLR-53 speaker metadata"
-require_dir "datasets/OpenSLR53/asr_bengali/data" "OpenSLR-53 audio directory"
+if has_task speaker_id || has_task speaker_verification; then
+  require_file "datasets/OpenSLR53/asr_bengali/utt_spk_text.tsv" "OpenSLR-53 speaker metadata"
+  require_dir "datasets/OpenSLR53/asr_bengali/data" "OpenSLR-53 audio directory"
+fi
 
 out_root="${FULL_EVAL_OUT_DIR:-runs/full_evaluations}"
 case "$out_root" in /*) ;; *) out_root="$repo_root/$out_root" ;; esac
-probe_seeds="${FULL_EVAL_PROBE_SEEDS:-0 1 2}"
+probe_seeds="${FULL_EVAL_PROBE_SEEDS:-0}"
 read -r -a seed_array <<< "$probe_seeds"
 ((${#seed_array[@]})) || fail "FULL_EVAL_PROBE_SEEDS must contain at least one integer"
 for seed in "${seed_array[@]}"; do integer "each FULL_EVAL_PROBE_SEEDS value" "$seed"; done
@@ -161,12 +184,12 @@ recon_batch="${FULL_EVAL_RECON_BATCH:-8}"
 recon_batches="${FULL_EVAL_RECON_BATCHES:-50}"
 segment_seconds="${FULL_EVAL_SEGMENT_SECONDS:-3.0}"
 emotion_max_utts="${FULL_EVAL_EMOTION_MAX_UTTS:-0}"
-cv_max_utts="${FULL_EVAL_CV_MAX_UTTS:-0}"
-speaker_id_max_utts="${FULL_EVAL_SPEAKER_ID_MAX_UTTS:-1000}"
-speaker_verif_max_utts="${FULL_EVAL_SPEAKER_VERIF_MAX_UTTS:-2000}"
+cv_max_utts="${FULL_EVAL_CV_MAX_UTTS:-3000}"
+speaker_id_max_utts="${FULL_EVAL_SPEAKER_ID_MAX_UTTS:-750}"
+speaker_verif_max_utts="${FULL_EVAL_SPEAKER_VERIF_MAX_UTTS:-1000}"
 verification_trials="${FULL_EVAL_VERIFICATION_TRIALS:-0}"
-asr_max_samples="${FULL_EVAL_ASR_MAX_SAMPLES:-10000}"
-asr_steps="${FULL_EVAL_ASR_STEPS:-8000}"
+asr_max_samples="${FULL_EVAL_ASR_MAX_SAMPLES:-3000}"
+asr_steps="${FULL_EVAL_ASR_STEPS:-3000}"
 asr_batch="${FULL_EVAL_ASR_BATCH:-16}"
 data_seed="${FULL_EVAL_DATA_SEED:-0}"
 split_seed="${FULL_EVAL_SPLIT_SEED:-0}"
@@ -245,58 +268,60 @@ for index in "${!labels[@]}"; do
   step="${steps[$index]}"
   condition_dir="$out_root/conditions/$label/step_$step"
 
-  recon_out="$condition_dir/reconstruction.json"
-  run_task "$recon_out" "FP32 reconstruction: $label" \
-    uv run --extra reconstruction-metrics python -m eval.eval_recon \
-    --config "$config" --ckpt "$checkpoint" --manifest "$recon_manifest" \
-    --batch_size "$recon_batch" --max_batches "$recon_batches" \
-    --segment_seconds "$segment_seconds" --out "$recon_out"
+  if has_task reconstruction; then
+    recon_out="$condition_dir/reconstruction.json"
+    run_task "$recon_out" "FP32 reconstruction: $label" \
+      uv run --extra reconstruction-metrics python -m eval.eval_recon \
+      --config "$config" --ckpt "$checkpoint" --manifest "$recon_manifest" \
+      --batch_size "$recon_batch" --max_batches "$recon_batches" \
+      --segment_seconds "$segment_seconds" --out "$recon_out"
+  fi
 
   for seed in "${seed_array[@]}"; do
-    run_task "$condition_dir/emotion_seed_$seed.json" "emotion: $label seed $seed" \
+    if has_task emotion; then run_task "$condition_dir/emotion_seed_$seed.json" "emotion: $label seed $seed" \
       uv run python -m eval.eval_emotion --models ours --ckpt "$checkpoint" \
       --subesco-dir "$subesco_dir" "${emotion_limit_args[@]}" \
       --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
-      --out "$condition_dir/emotion_seed_$seed.json"
-    run_task "$condition_dir/age_seed_$seed.json" "age: $label seed $seed" \
+      --out "$condition_dir/emotion_seed_$seed.json"; fi
+    if has_task age; then run_task "$condition_dir/age_seed_$seed.json" "age: $label seed $seed" \
       uv run python -m eval.eval_age --models ours --ckpt "$checkpoint" \
       --cv_root "$cv_root" --label-column age "${cv_limit_args[@]}" \
       --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
-      --out "$condition_dir/age_seed_$seed.json"
-    run_task "$condition_dir/gender_seed_$seed.json" "gender: $label seed $seed" \
+      --out "$condition_dir/age_seed_$seed.json"; fi
+    if has_task gender; then run_task "$condition_dir/gender_seed_$seed.json" "gender: $label seed $seed" \
       uv run python -m eval.eval_age --models ours --ckpt "$checkpoint" \
       --cv_root "$cv_root" --label-column gender "${cv_limit_args[@]}" \
       --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
-      --out "$condition_dir/gender_seed_$seed.json"
-    run_task "$condition_dir/speaker_id_seed_$seed.json" "speaker ID: $label seed $seed" \
+      --out "$condition_dir/gender_seed_$seed.json"; fi
+    if has_task speaker_id; then run_task "$condition_dir/speaker_id_seed_$seed.json" "speaker ID: $label seed $seed" \
       uv run python -m eval.eval_speaker_id --models ours --ckpt "$checkpoint" \
       --max-utts "$speaker_id_max_utts" --data-seed "$data_seed" \
       --split-seed "$split_seed" --seed "$seed" \
-      --out "$condition_dir/speaker_id_seed_$seed.json"
-    asr_task "$condition_dir/asr_seed_$seed.json" "attention ASR: $label seed $seed" \
-      ours "$config" "$checkpoint" "$condition_dir/asr_features" "$seed"
+      --out "$condition_dir/speaker_id_seed_$seed.json"; fi
+    if has_task asr; then asr_task "$condition_dir/asr_seed_$seed.json" "attention ASR: $label seed $seed" \
+      ours "$config" "$checkpoint" "$condition_dir/asr_features" "$seed"; fi
 
-    run_task "$condition_dir/emotion_temporal_seed_$seed.json" "temporal emotion: $label seed $seed" \
+    if has_task emotion_temporal; then run_task "$condition_dir/emotion_temporal_seed_$seed.json" "temporal emotion: $label seed $seed" \
       uv run python -m eval.eval_emotion_temporal --models ours --ckpt "$checkpoint" \
       --subesco-dir "$subesco_dir" "${emotion_limit_args[@]}" \
       --max-frames "$temporal_max_frames" --epochs "$temporal_attn_epochs" \
       --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
       --feature-cache-dir "$condition_dir/emotion_frame_cache" \
-      --out "$condition_dir/emotion_temporal_seed_$seed.json"
-    run_task "$condition_dir/emotion_transformer_seed_$seed.json" "Transformer emotion: $label seed $seed" \
+      --out "$condition_dir/emotion_temporal_seed_$seed.json"; fi
+    if has_task emotion_transformer; then run_task "$condition_dir/emotion_transformer_seed_$seed.json" "Transformer emotion: $label seed $seed" \
       uv run python -m eval.eval_emotion_transformer --models ours --ckpt "$checkpoint" \
       --subesco-dir "$subesco_dir" "${emotion_limit_args[@]}" \
       --max-frames "$temporal_max_frames" --epochs "$temporal_transformer_epochs" \
       --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
       --feature-cache-dir "$condition_dir/emotion_frame_cache" \
-      --out "$condition_dir/emotion_transformer_seed_$seed.json"
+      --out "$condition_dir/emotion_transformer_seed_$seed.json"; fi
   done
 
-  run_task "$condition_dir/speaker_verification.json" "speaker verification: $label" \
+  if has_task speaker_verification; then run_task "$condition_dir/speaker_verification.json" "speaker verification: $label" \
     uv run python -m eval.eval_speaker_verif --models ours --pools mean,meanstd \
     --ckpt "$checkpoint" --max-utts "$speaker_verif_max_utts" \
     --max-trials "$verification_trials" --data-seed "$data_seed" \
-    --split-seed "$split_seed" --out "$condition_dir/speaker_verification.json"
+    --split-seed "$split_seed" --out "$condition_dir/speaker_verification.json"; fi
 done
 
 # Reusable baselines are evaluated once against the final packed model's random
@@ -308,63 +333,67 @@ main_step="${steps[$main_index]}"
 baseline_dir="$out_root/baselines/packed-210k-last/step_$main_step"
 baseline_models="ours_random,$external_models"
 for seed in "${seed_array[@]}"; do
-  run_task "$baseline_dir/emotion_seed_$seed.json" "report emotion baselines seed $seed" \
+  if has_task emotion; then run_task "$baseline_dir/emotion_seed_$seed.json" "report emotion baselines seed $seed" \
     uv run python -m eval.eval_emotion --models "$baseline_models" --ckpt "$main_checkpoint" \
     --subesco-dir "$subesco_dir" "${emotion_limit_args[@]}" \
     --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
-    --out "$baseline_dir/emotion_seed_$seed.json"
-  run_task "$baseline_dir/age_seed_$seed.json" "report age baselines seed $seed" \
+    --out "$baseline_dir/emotion_seed_$seed.json"; fi
+  if has_task age; then run_task "$baseline_dir/age_seed_$seed.json" "report age baselines seed $seed" \
     uv run python -m eval.eval_age --models "$baseline_models" --ckpt "$main_checkpoint" \
     --cv_root "$cv_root" --label-column age "${cv_limit_args[@]}" \
     --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
-    --out "$baseline_dir/age_seed_$seed.json"
-  run_task "$baseline_dir/gender_seed_$seed.json" "report gender baselines seed $seed" \
+    --out "$baseline_dir/age_seed_$seed.json"; fi
+  if has_task gender; then run_task "$baseline_dir/gender_seed_$seed.json" "report gender baselines seed $seed" \
     uv run python -m eval.eval_age --models "$baseline_models" --ckpt "$main_checkpoint" \
     --cv_root "$cv_root" --label-column gender "${cv_limit_args[@]}" \
     --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
-    --out "$baseline_dir/gender_seed_$seed.json"
-  run_task "$baseline_dir/speaker_id_seed_$seed.json" "report speaker-ID baselines seed $seed" \
+    --out "$baseline_dir/gender_seed_$seed.json"; fi
+  if has_task speaker_id; then run_task "$baseline_dir/speaker_id_seed_$seed.json" "report speaker-ID baselines seed $seed" \
     uv run python -m eval.eval_speaker_id --models "$baseline_models" --ckpt "$main_checkpoint" \
     --max-utts "$speaker_id_max_utts" --data-seed "$data_seed" \
     --split-seed "$split_seed" --seed "$seed" \
-    --out "$baseline_dir/speaker_id_seed_$seed.json"
-  run_task "$baseline_dir/emotion_temporal_seed_$seed.json" "temporal emotion baselines seed $seed" \
+    --out "$baseline_dir/speaker_id_seed_$seed.json"; fi
+  if has_task emotion_temporal; then run_task "$baseline_dir/emotion_temporal_seed_$seed.json" "temporal emotion baselines seed $seed" \
     uv run python -m eval.eval_emotion_temporal --models "$temporal_baselines" --ckpt "$main_checkpoint" \
     --subesco-dir "$subesco_dir" "${emotion_limit_args[@]}" \
     --max-frames "$temporal_max_frames" --epochs "$temporal_attn_epochs" \
     --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
     --feature-cache-dir "$baseline_dir/emotion_frame_cache" \
-    --out "$baseline_dir/emotion_temporal_seed_$seed.json"
-  run_task "$baseline_dir/emotion_transformer_seed_$seed.json" "Transformer emotion baselines seed $seed" \
+    --out "$baseline_dir/emotion_temporal_seed_$seed.json"; fi
+  if has_task emotion_transformer; then run_task "$baseline_dir/emotion_transformer_seed_$seed.json" "Transformer emotion baselines seed $seed" \
     uv run python -m eval.eval_emotion_transformer --models "$temporal_baselines" --ckpt "$main_checkpoint" \
     --subesco-dir "$subesco_dir" "${emotion_limit_args[@]}" \
     --max-frames "$temporal_max_frames" --epochs "$temporal_transformer_epochs" \
     --data-seed "$data_seed" --split-seed "$split_seed" --seed "$seed" \
     --feature-cache-dir "$baseline_dir/emotion_frame_cache" \
-    --out "$baseline_dir/emotion_transformer_seed_$seed.json"
+    --out "$baseline_dir/emotion_transformer_seed_$seed.json"; fi
 done
 
-run_task "$baseline_dir/speaker_verification.json" "report speaker-verification baselines" \
+if has_task speaker_verification; then run_task "$baseline_dir/speaker_verification.json" "report speaker-verification baselines" \
   uv run python -m eval.eval_speaker_verif --models "$baseline_models" --pools mean,meanstd \
   --ckpt "$main_checkpoint" --max-utts "$speaker_verif_max_utts" \
   --max-trials "$verification_trials" --data-seed "$data_seed" \
-  --split-seed "$split_seed" --out "$baseline_dir/speaker_verification.json"
+  --split-seed "$split_seed" --out "$baseline_dir/speaker_verification.json"; fi
 
-IFS=',' read -r -a asr_baseline_array <<< "$asr_baselines"
-for model in "${asr_baseline_array[@]}"; do
-  [[ -n "$model" ]] || continue
-  for seed in "${seed_array[@]}"; do
-    asr_task "$baseline_dir/asr_${model}_seed_$seed.json" "attention ASR baseline: $model seed $seed" \
-      "$model" "$main_config" "$main_checkpoint" "$baseline_dir/asr_${model}_features" "$seed"
+if has_task asr; then
+  IFS=',' read -r -a asr_baseline_array <<< "$asr_baselines"
+  for model in "${asr_baseline_array[@]}"; do
+    [[ -n "$model" ]] || continue
+    for seed in "${seed_array[@]}"; do
+      asr_task "$baseline_dir/asr_${model}_seed_$seed.json" "attention ASR baseline: $model seed $seed" \
+        "$model" "$main_config" "$main_checkpoint" "$baseline_dir/asr_${model}_features" "$seed"
+    done
   done
-done
+fi
 
-mimi_out_dir="$out_root/baselines/mimi_8q_1.1kbps"
-mimi_out="$mimi_out_dir/mimi_metrics.json"
-run_task "$mimi_out" "pinned Mimi reconstruction at exactly 8 quantizers / 1.1 kbps" \
-  uv run --extra reconstruction-metrics python -m eval.eval_mimi_recon \
-  --manifest "$recon_manifest" --out_dir "$mimi_out_dir" --batch_size "$recon_batch" \
-  --segment_seconds "$segment_seconds" --max_batches "$recon_batches" --num_recon_wavs 0
+if has_task mimi_reconstruction; then
+  mimi_out_dir="$out_root/baselines/mimi_8q_1.1kbps"
+  mimi_out="$mimi_out_dir/mimi_metrics.json"
+  run_task "$mimi_out" "pinned Mimi reconstruction at exactly 8 quantizers / 1.1 kbps" \
+    uv run --extra reconstruction-metrics python -m eval.eval_mimi_recon \
+    --manifest "$recon_manifest" --out_dir "$mimi_out_dir" --batch_size "$recon_batch" \
+    --segment_seconds "$segment_seconds" --max_batches "$recon_batches" --num_recon_wavs 0
+fi
 
 if [[ "$failed" == "0" ]]; then
   echo "[full-eval] completed: $out_root"

@@ -205,9 +205,11 @@ same name.
   bootstrap statistics only after every configured evaluation succeeds.
 - `scripts/run_full_evaluation_suite.sh` — resume-aware seven-checkpoint
   evaluation launcher for the six 25k conditions plus the packed 210k
-  `last.pt`. It evaluates FP32 reconstruction, exact-8-quantizer Mimi
-  reconstruction, ASR, generic and temporal emotion, age, gender, speaker ID,
-  and verification. A successful task writes a neighbouring `.ok` marker, so
+  `last.pt`. Its compact default uses one fixed seed, bounded Common Voice,
+  speaker, and ASR samples, and evaluates FP32 reconstruction, exact-8-
+  quantizer Mimi reconstruction, ASR, generic emotion, age, gender, speaker
+  ID, and verification. Temporal-emotion variants are opt-in through
+  `FULL_EVAL_TASKS`. A successful task writes a neighbouring `.ok` marker, so
   interrupted or failed tasks retry without repeating completed work. Shared
   external baseline tables are evaluated once against the packed 210k run;
   their Mimi representation features remain continuous pre-quantization
