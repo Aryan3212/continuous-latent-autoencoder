@@ -37,12 +37,12 @@ Optional controls:
   FULL_EVAL_RECON_BATCHES        Reconstruction batch limit (default: 50)
   FULL_EVAL_SEGMENT_SECONDS      Reconstruction segment length (default: 3.0)
   FULL_EVAL_EMOTION_MAX_UTTS     0=all SUBESCO clips (default: 0)
-  FULL_EVAL_CV_MAX_UTTS          0=all labelled Common Voice clips (default: 3000)
-  FULL_EVAL_SPEAKER_ID_MAX_UTTS  Speaker-ID utterance cap (default: 750)
-  FULL_EVAL_SPEAKER_VERIF_MAX_UTTS  Verification utterance cap (default: 1000)
+  FULL_EVAL_CV_MAX_UTTS          0=all labelled Common Voice clips (default: 0)
+  FULL_EVAL_SPEAKER_ID_MAX_UTTS  Speaker-ID utterance cap (default: 1000)
+  FULL_EVAL_SPEAKER_VERIF_MAX_UTTS  Verification utterance cap (default: 2000)
   FULL_EVAL_VERIFICATION_TRIALS  0=all pairs (default: 0)
-  FULL_EVAL_ASR_MAX_SAMPLES      Per-split ASR cap (default: 3000)
-  FULL_EVAL_ASR_STEPS            ASR probe updates (default: 3000)
+  FULL_EVAL_ASR_MAX_SAMPLES      Per-split ASR cap (default: 10000)
+  FULL_EVAL_ASR_STEPS            ASR probe updates (default: 8000)
   FULL_EVAL_ASR_BATCH            ASR probe batch size (default: 16)
   FULL_EVAL_EXTERNAL_MODELS      Reusable non-CLAE report baselines
   FULL_EVAL_ASR_BASELINES        Comma-separated ASR baseline adapters (default: wavlm)
@@ -184,12 +184,12 @@ recon_batch="${FULL_EVAL_RECON_BATCH:-8}"
 recon_batches="${FULL_EVAL_RECON_BATCHES:-50}"
 segment_seconds="${FULL_EVAL_SEGMENT_SECONDS:-3.0}"
 emotion_max_utts="${FULL_EVAL_EMOTION_MAX_UTTS:-0}"
-cv_max_utts="${FULL_EVAL_CV_MAX_UTTS:-3000}"
-speaker_id_max_utts="${FULL_EVAL_SPEAKER_ID_MAX_UTTS:-750}"
-speaker_verif_max_utts="${FULL_EVAL_SPEAKER_VERIF_MAX_UTTS:-1000}"
+cv_max_utts="${FULL_EVAL_CV_MAX_UTTS:-0}"
+speaker_id_max_utts="${FULL_EVAL_SPEAKER_ID_MAX_UTTS:-1000}"
+speaker_verif_max_utts="${FULL_EVAL_SPEAKER_VERIF_MAX_UTTS:-2000}"
 verification_trials="${FULL_EVAL_VERIFICATION_TRIALS:-0}"
-asr_max_samples="${FULL_EVAL_ASR_MAX_SAMPLES:-3000}"
-asr_steps="${FULL_EVAL_ASR_STEPS:-3000}"
+asr_max_samples="${FULL_EVAL_ASR_MAX_SAMPLES:-10000}"
+asr_steps="${FULL_EVAL_ASR_STEPS:-8000}"
 asr_batch="${FULL_EVAL_ASR_BATCH:-16}"
 data_seed="${FULL_EVAL_DATA_SEED:-0}"
 split_seed="${FULL_EVAL_SPLIT_SEED:-0}"

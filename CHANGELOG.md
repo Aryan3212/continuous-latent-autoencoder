@@ -59,10 +59,10 @@ Date format: `YYYY-MM-DD`
 
 **Made the default full-evaluation run practical on the remote host**
 
-- The launcher now defaults to one fixed probe seed, skips temporal-emotion
-  variants unless explicitly requested, and uses bounded Common Voice,
-  speaker, and ASR budgets. `FULL_EVAL_TASKS` selects task families for a
-  larger or bespoke rerun; completed `.ok`-marked work is still reused.
+- The launcher now defaults to one fixed probe seed and skips temporal-emotion
+  variants unless explicitly requested, while retaining the original full-data
+  evaluation budgets. `FULL_EVAL_TASKS` selects task families for a larger or
+  bespoke rerun; completed `.ok`-marked work is still reused.
 
 ## 2026-08-09
 
